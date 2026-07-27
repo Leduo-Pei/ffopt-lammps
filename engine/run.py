@@ -587,6 +587,10 @@ def main():
                         help="Resume BO from latest checkpoint")
     parser.add_argument("--checkpoint", default=None,
                         help="Path to specific checkpoint JSON to resume from")
+    parser.add_argument(
+        "--output-dir", default=None,
+        help="Deterministic BO output directory (used by ffopt run).",
+    )
     parser.add_argument("--bo-method",
                         choices=["auto", "gp", "turbo", "saasbo"],
                         default=None,
@@ -632,6 +636,10 @@ def main():
 
     if args.bo_method:
         config["optimization"]["method"] = args.bo_method
+    if args.output_dir:
+        config.setdefault("workflow", {})["bo_output_dir"] = str(
+            Path(args.output_dir).resolve()
+        )
 
     mf = config["manifest"]
     lmp = config["lammps"]

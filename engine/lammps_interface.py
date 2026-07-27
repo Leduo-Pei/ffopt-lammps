@@ -24,13 +24,12 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from .property_evaluators import PropertyEvaluationContext, build_property_plan
+
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-
-# Unit conversion: 1 kcal/(mol A^2) -> J/m^2
-KCAL_MOL_A2_TO_J_M2 = 0.69477
 
 # Penalty objective returned for failed or non-physical evaluations
 LARGE_PENALTY = 1000.0
@@ -269,6 +268,8 @@ class LAMMPSRunner:
                     f"Cleavage method requires equal atom counts in surf_complete "
                     f"({n_c}) and surf_split ({n_s}). Check data file generation."
                 )
+
+        self.property_plan = build_property_plan(config, self)
 
     # ====================================================================== #
     # Public API                                                              #
@@ -625,8 +626,6 @@ class LAMMPSRunner:
         eval_dir   : dedicated working directory for this evaluation.
         save_traj  : passed through to LAMMPS save_traj variable.
         """
-        _sv = 1 if save_traj else 0
-
         # ------------------------------------------------------------------ #
         # Step 0: Resolve all parameters                                      #
         # Applies derived_params expressions and charge neutrality.           #
@@ -650,162 +649,25 @@ class LAMMPSRunner:
                 error_msg=cerr,
             )
 
-        properties: Dict[str, float] = {}
-
-        # ------------------------------------------------------------------ #
-        # Optional stage: Bulk NPT 300 K                                      #
-        # Required by bulk targets and by the NPT-PE sublimation proxy.       #
-        # ------------------------------------------------------------------ #
-        if self.bulk_required:
-            bulk_props = self._run_bulk(
-                resolved, eval_dir, save_traj, seed_override)
-            if bulk_props is None:
-                return EvalResult(
-                    params=raw_params, properties={},
-                    objective=LARGE_PENALTY, success=False,
-                    error_msg="bulk LAMMPS failed or DATA_BULK line missing",
-                )
-
-            # Bulk sanity gates: reject runaway NPT trajectories.
-            err = self._bulk_sanity_check(bulk_props)
-            if err:
-                return EvalResult(
-                    params=raw_params, properties=bulk_props,
-                    objective=LARGE_PENALTY, success=False,
-                    error_msg=err,
-                )
-            properties.update(bulk_props)
-        # ------------------------------------------------------------------ #
-        # Adsorption energy target (extra 3-box NVT calculation)             #
-        #   E_ad = E_complex - E_slab - E_mol   (kcal/mol)                   #
-        # ------------------------------------------------------------------ #
-        if self.ads_enabled:
-            adsorption = self._run_adsorption(resolved, eval_dir, save_traj)
-            if adsorption is None:
-                return EvalResult(
-                    params=raw_params, properties=properties,
-                    objective=LARGE_PENALTY, success=False,
-                    error_msg="adsorption LAMMPS failed or DATA_AD line missing",
-                )
-            properties.update(adsorption)
-
-        # ------------------------------------------------------------------ #
-        # Sublimation/cohesive-energy proxy                                  #
-        #   esub_proxy = E_single_min - <PE_bulk_NPT>/Nmol  [kJ/mol]         #
-        # ------------------------------------------------------------------ #
-        if self.sub_enabled:
-            sub = self._compute_sublimation_proxy_from_bulk_pe(
-                resolved, os.path.join(eval_dir, "sublimation"),
-                properties.get("pe"), save_traj)
-            if sub is None:
-                return EvalResult(
-                    params=raw_params, properties=properties,
-                    objective=LARGE_PENALTY, success=False,
-                    error_msg="sublimation proxy LAMMPS failed or DATA_SUB line missing",
-                )
-            properties["esub_proxy"] = sub["esub_proxy_kj_mol"]
-            properties["esub_proxy_kcal_mol"] = sub["esub_proxy_kcal_mol"]
-            properties["esub_single_pe"] = sub["E_single_kcal"]
-            properties["esub_bulk_pe_per_mol"] = sub["E_bulk_per_molecule_kcal"]
-
-        # ------------------------------------------------------------------ #
-        # compute_surface: false -> return the currently requested properties
-        # ------------------------------------------------------------------ #
-        if not self.compute_surface:
-            objective, per_prop = self._compute_objective(properties)
-            obj_s, _ = self._compute_pareto_objectives(per_prop)
-            return EvalResult(
-                params=raw_params, properties=properties,
-                objective=objective, success=True,
-                per_property_error=per_prop,
-                obj_structural=obj_s, obj_surface=float("nan"),
-            )
-
-        # ------------------------------------------------------------------ #
-        # Stages 2+3: surf_complete and surf_split run in parallel.          #
-        # Both are independent NVT calculations on separate slabs.            #
-        # ThreadPoolExecutor is appropriate: subprocess calls are I/O-bound.  #
-        # ------------------------------------------------------------------ #
-        surf_vars_base = {
-            "cutoff":      self.cutoff,
-            "npt_seed":    self.surf_npt_seed,
-            "equil_steps": self.surf_equil,
-            "prod_steps":  self.surf_prod,
-            "save_traj":   _sv,
-            **( {"kspace_accuracy": self.kspace_accuracy}
-                if self.use_charge else {} ),
-        }
-
-        with ThreadPoolExecutor(max_workers=2) as tex:
-            fut_sc = tex.submit(
-                self._run_surf, resolved, eval_dir,
-                "complete", self.surf_complete, surf_vars_base)
-            fut_ss = tex.submit(
-                self._run_surf, resolved, eval_dir,
-                "split", self.surf_split, surf_vars_base)
-            sc_props = fut_sc.result()
-            ss_props = fut_ss.result()
-
-        if sc_props is None:
-            return EvalResult(
-                params=raw_params, properties=properties,
-                objective=LARGE_PENALTY, success=False,
-                error_msg="surf_complete LAMMPS failed or DATA_SURF line missing",
-            )
-        if ss_props is None:
-            return EvalResult(
-                params=raw_params, properties=properties,
-                objective=LARGE_PENALTY, success=False,
-                error_msg="surf_split LAMMPS failed or DATA_SURF line missing",
-            )
-
-        # ------------------------------------------------------------------ #
-        # Cleavage method: compute surf_energy                                #
-        # surf_energy = (E_split - E_complete) / (2 * A_xy)   [J/m^2]
-        # ------------------------------------------------------------------ #
-        try:
-            E_c         = float(sc_props[self.surf_E_key])
-            E_s         = float(ss_props[self.surf_E_key])
-            A           = float(sc_props[self.surf_A_key])
-        # surf_energy = (E_split - E_complete) / (2 * A_xy)   [J/m^2]
-        except (KeyError, ValueError, ZeroDivisionError) as e:
-            return EvalResult(
-                params=raw_params, properties=properties,
-                objective=LARGE_PENALTY, success=False,
-                error_msg=f"surf_energy computation failed: {e}",
-            )
-
-        # Sanity gates on surf_energy
-        if not np.isfinite(surf_energy):
+        stage_result = self.property_plan.execute(
+            self,
+            PropertyEvaluationContext(
+                resolved=resolved,
+                eval_dir=eval_dir,
+                save_traj=save_traj,
+                seed_override=seed_override,
+            ),
+        )
+        properties = stage_result.properties
+        if not stage_result.success:
             return EvalResult(
                 params=raw_params,
-                properties={**properties, "surf_energy": surf_energy},
-                objective=LARGE_PENALTY, success=False,
-                error_msg=f"non-finite surf_energy={surf_energy}",
-            )
-        if surf_energy <= self.surf_energy_min:
-            return EvalResult(
-                params=raw_params,
-                properties={**properties, "surf_energy": surf_energy},
-                objective=LARGE_PENALTY, success=False,
-                error_msg=(f"surf_energy={surf_energy:.4f} J/m2 <= "
-                           f"sanity min {self.surf_energy_min} J/m2"),
-            )
-        if surf_energy > self.surf_energy_max:
-            return EvalResult(
-                params=raw_params,
-                properties={**properties, "surf_energy": surf_energy},
-                objective=LARGE_PENALTY, success=False,
-                error_msg=(f"surf_energy={surf_energy:.4f} J/m2 > "
-                           f"sanity max {self.surf_energy_max} J/m2"),
+                properties=properties,
+                objective=LARGE_PENALTY,
+                success=False,
+                error_msg=stage_result.error,
             )
 
-        properties.update({
-            "surf_energy": surf_energy,
-            "E_complete": E_c,
-            "E_split": E_s,
-            "A_xy": A,
-        })
         objective, per_prop = self._compute_objective(properties)
         obj_s, obj_surf = self._compute_pareto_objectives(per_prop)
         return EvalResult(

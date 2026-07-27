@@ -16,3 +16,12 @@ Paths are resolved from the repository/project root rather than the installed
 Python package. Workstation and SLURM details should be configured once with
 `ffopt machine configure`; user profiles override the portable defaults in
 `configs/machines/`.
+
+The shared `pipeline` block selects the default end-to-end stages. Per-project
+`stages.sample` settings define the number of independent points, centres,
+radii, and seeds. Users normally edit those YAML values and run:
+
+```bash
+ffopt run --project projects/btah_charge_only.yaml --machine local --dry-run
+ffopt run --project projects/btah_charge_only.yaml --machine local --resume
+```

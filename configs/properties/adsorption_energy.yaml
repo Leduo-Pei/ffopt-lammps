@@ -6,6 +6,9 @@
 # The Au slab LJ parameters are read from the data file and are not optimised.
 # BTAH LJ/charges are written by atom label from the active atom_types module.
 
+property_evaluators:
+  adsorption: {enabled: true}
+
 targets:
   ead:
     # Experimental/reference adsorption energy target. More negative means

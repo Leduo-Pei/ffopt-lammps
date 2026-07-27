@@ -1,5 +1,7 @@
 # Disable sublimation while keeping the config key present.
 
+property_evaluators:
+  sublimation: {enabled: false}
+
 sublimation:
   enabled: false
-

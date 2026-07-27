@@ -173,7 +173,7 @@ def main():
     parser.add_argument("--dry-run",   action="store_true",
                         help="Print generated SLURM script without submitting")
     parser.add_argument("--resume",    action="store_true",
-                        help="(bo) Add --resume flag to engine.run")
+                        help="(bo/al) Continue from the latest saved progress")
     parser.add_argument("--bo-method", choices=["auto", "gp", "turbo", "saasbo"],
                         default=None,
                         help="(bo) Override optimization.method")
@@ -235,7 +235,8 @@ def main():
 
     # Build extra args
     extra_parts = []
-    if args.resume      and args.job == "bo":   extra_parts.append("--resume")
+    if args.resume      and args.job in ("bo", "al"):
+        extra_parts.append("--resume")
     if args.bo_method   and args.job == "bo":
         extra_parts.extend(["--bo-method", args.bo_method])
     if args.model       and args.job in ("nn", "al"):
@@ -246,6 +247,8 @@ def main():
         extra_parts.extend(["--bo-dir", args.bo_dir])
     if args.nn_dir and args.job == "al":
         extra_parts.extend(["--nn-dir", args.nn_dir])
+    if args.output_dir and args.job == "bo":
+        extra_parts.extend(["--output-dir", args.output_dir])
     if args.output_dir and args.job == "nn":
         extra_parts.extend(["--output-dir", args.output_dir])
     if args.additional_core_file and args.job in ("nn", "al"):

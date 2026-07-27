@@ -1,5 +1,7 @@
 # Disable adsorption while keeping the config key present.
 
+property_evaluators:
+  adsorption: {enabled: false}
+
 adsorption:
   enabled: false
-

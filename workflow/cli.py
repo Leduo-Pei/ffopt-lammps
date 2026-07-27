@@ -305,8 +305,46 @@ def cmd_status(args: argparse.Namespace) -> None:
         ("Validation", _newest([f"runs/{project.name}/validation_*/validation_summary.json", "outputs/**/validation_summary.json"])),
     ]
     print(f"Project: {project.name} [{machine}]\nRun root: {run_root}\n")
+    from .pipeline import load_pipeline_status
+
+    pipeline = load_pipeline_status(project, args.run_id)
+    if pipeline:
+        print(f"Pipeline: {args.run_id}")
+        for stage in pipeline["stages"]:
+            detail = stage.get("job_id") or stage.get("message") or ""
+            print(
+                f"  {stage['name']:10s} {stage['status']:10s} "
+                f"attempt={stage['attempt']:<2d} {detail}"
+            )
+        print()
     for label, path in artifacts:
         print(f"{label:15s}: {path if path else '-'}")
+
+
+def cmd_run(args: argparse.Namespace) -> None:
+    project, machine, config_path = _common(args)
+    from .pipeline import PipelineRunner
+
+    runner = PipelineRunner(
+        project=project,
+        machine=machine,
+        config_path=config_path,
+        run_id=args.run_id,
+        resume=args.resume,
+        dry_run=args.dry_run,
+        watch=args.watch,
+        poll_seconds=args.poll_seconds,
+        from_stage=args.from_stage,
+        until=args.until,
+    )
+    outcome = runner.run()
+    if outcome == "waiting":
+        print(
+            "A SLURM stage is active. Run the same command with --resume to "
+            "continue, or add --watch to advance automatically."
+        )
+    elif outcome == "completed":
+        print(f"Pipeline completed: {runner.root}")
 
 
 def cmd_doctor(args: argparse.Namespace) -> None:
@@ -383,6 +421,8 @@ def cmd_bo(args: argparse.Namespace) -> None:
         command = _module("engine.run", "--config", config_path)
     if args.resume:
         command.append("--resume")
+    if args.output_dir:
+        command.extend(["--output-dir", resolve_path(args.output_dir)])
     if args.smoke:
         if is_slurm:
             raise SystemExit("Cluster BO already performs a pre-flight check; --smoke is local-only.")
@@ -562,6 +602,8 @@ def cmd_al(args: argparse.Namespace) -> None:
         command.extend(["--additional-core-file", resolve_path(path)])
     if args.save_traj:
         command.append("--save-traj")
+    if args.resume:
+        command.append("--resume")
     if args.dry_run and is_slurm:
         command.append("--dry-run")
     elif args.dry_run:
@@ -590,11 +632,13 @@ def cmd_audit(args: argparse.Namespace) -> None:
 def cmd_validate(args: argparse.Namespace) -> None:
     project, _, config_path = _common(args)
     parameters = resolve_path(args.parameters) if args.parameters else _newest([
+        f"runs/{project.name}/**/final_summary.json",
         f"runs/{project.name}/**/final_parameters.json",
+        f"runs/{project.name}/legacy/**/final_summary.json",
         f"runs/{project.name}/legacy/**/final_parameters.json",
     ])
     if parameters is None:
-        raise SystemExit("No final_parameters.json found. Pass --parameters explicitly.")
+        raise SystemExit("No final parameter JSON found. Pass --parameters explicitly.")
     output = resolve_path(args.output_dir) if args.output_dir else project.run_root / f"validation_{_timestamp()}"
     command = _module(
         "engine.validate_final_parameters", "--config", config_path,
@@ -602,6 +646,23 @@ def cmd_validate(args: argparse.Namespace) -> None:
     )
     if args.overwrite:
         command.append("--overwrite")
+    _run(command)
+
+
+def cmd_finalize(args: argparse.Namespace) -> None:
+    project, _, config_path = _common(args)
+    audits = [resolve_path(path) for path in args.audit]
+    output = (
+        resolve_path(args.output_dir)
+        if args.output_dir
+        else project.run_root / f"final_{_timestamp()}"
+    )
+    command = _module(
+        "engine.finalize_al", "--config", config_path,
+        "--output-dir", output,
+    )
+    for audit in audits:
+        command.extend(["--audit", audit])
     _run(command)
 
 
@@ -721,11 +782,37 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         child = sub.add_parser(name)
         _add_context(child)
+        if name == "status":
+            child.add_argument(
+                "--run-id", default="default",
+                help="Named pipeline run to display (default: default).",
+            )
         child.set_defaults(function=function)
+
+    run = sub.add_parser(
+        "run", help="Run the restartable BO -> sampling -> NN -> AL pipeline."
+    )
+    _add_context(run)
+    run.add_argument("--run-id", default="default")
+    run.add_argument("--resume", action="store_true")
+    run.add_argument("--dry-run", action="store_true")
+    run.add_argument(
+        "--watch", action="store_true",
+        help="On SLURM, keep polling and submit each next stage automatically.",
+    )
+    run.add_argument("--poll-seconds", type=int, default=60)
+    run.add_argument("--from-stage", choices=[
+        "bo", "sample", "nn", "al", "audit", "finalize", "validate"
+    ])
+    run.add_argument("--until", choices=[
+        "bo", "sample", "nn", "al", "audit", "finalize", "validate"
+    ])
+    run.set_defaults(function=cmd_run)
 
     bo = sub.add_parser("bo", help="Run or submit Bayesian optimization.")
     _add_context(bo)
     bo.add_argument("--resume", action="store_true")
+    bo.add_argument("--output-dir")
     bo.add_argument("--dry-run", action="store_true", help="Preview only; never run or submit work.")
     bo.add_argument("--smoke", action="store_true", help="Local-only: run one real LAMMPS pipeline evaluation.")
     bo.add_argument("--save-traj", action="store_true", help="Save trajectories during --smoke.")
@@ -774,6 +861,10 @@ def build_parser() -> argparse.ArgumentParser:
         else:
             child.add_argument("--nn-dir")
             child.add_argument("--additional-core-file", action="append")
+            child.add_argument(
+                "--resume", action="store_true",
+                help="Continue after the last fully recorded AL round.",
+            )
         child.set_defaults(function=function)
 
     audit = sub.add_parser("audit", help="Re-evaluate top candidates with independent seeds.")
@@ -784,6 +875,14 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--seeds", type=int, nargs="+", default=[101, 202, 303])
     audit.add_argument("--max-workers", type=int)
     audit.set_defaults(function=cmd_audit)
+
+    finalize = sub.add_parser(
+        "finalize", help="Select the best robust audit result and export parameters."
+    )
+    _add_context(finalize)
+    finalize.add_argument("--audit", action="append", required=True)
+    finalize.add_argument("--output-dir")
+    finalize.set_defaults(function=cmd_finalize)
 
     validate = sub.add_parser("validate", help="Run final trajectory-producing LAMMPS validation.")
     _add_context(validate)
