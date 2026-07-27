@@ -1,0 +1,5 @@
+# Disable active learning for BO-only or BO+NN-only workflows.
+
+active_learning:
+  enabled: false
+

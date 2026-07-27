@@ -1,0 +1,30 @@
+# Local smoke-test overrides.
+#
+# Include this after local.yaml and the property modules. It shortens MD while
+# keeping the same data files and force-field path, so it is suitable for
+# dry-run wiring checks, not for production BO data.
+
+manifest:
+  system_name: "BTAH_822_smoke"
+
+lammps:
+  timeout: 14400
+  bulk:
+    equil_steps: 200
+    prod_steps: 5000
+
+adsorption:
+  md:
+    equil_steps: 200
+    prod_steps: 1000
+
+parallel:
+  max_workers: 1
+  cores_per_worker: 1
+  omp_threads_per_worker: 1
+  use_mpi: false
+
+optimization:
+  n_initial: 2
+  n_bo_iterations: 2
+

@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ffopt-lammps"
+version = "0.1.0a1"
+description = "Restartable force-field parameter optimization with LAMMPS, Bayesian optimization, surrogate models, and active learning."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+authors = [
+  {name = "Leduo-Pei", email = "ziyu.pei@gtiit.edu.cn"},
+]
+keywords = ["LAMMPS", "force field", "Bayesian optimization", "active learning"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Chemistry",
+]
+dependencies = [
+  "PyYAML>=6.0",
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "scipy>=1.10",
+  "scikit-learn>=1.3",
+  "matplotlib>=3.7",
+]
+
+[project.optional-dependencies]
+bo = ["torch>=2.2", "botorch>=0.11", "gpytorch>=1.11"]
+nn = ["torch>=2.2", "xgboost>=2.0"]
+full = [
+  "torch>=2.2",
+  "botorch>=0.11",
+  "gpytorch>=1.11",
+  "xgboost>=2.0",
+]
+dev = ["pytest>=8.0", "build>=1.2", "ruff>=0.6"]
+
+[project.scripts]
+ffopt = "ffopt.cli:main"
+
+[project.urls]
+Repository = "https://github.com/Leduo-Pei/ffopt-lammps"
+Issues = "https://github.com/Leduo-Pei/ffopt-lammps/issues"
+
+[tool.setuptools]
+packages = ["ffopt", "engine", "workflow", "utils", "viz", "slurm"]
+
+[tool.setuptools.package-dir]
+ffopt = "src/ffopt"
+engine = "engine"
+workflow = "workflow"
+utils = "utils"
+viz = "viz"
+slurm = "slurm"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

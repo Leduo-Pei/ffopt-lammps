@@ -1,0 +1,45 @@
+# Portable SLURM defaults.
+#
+# Cluster paths, partitions, QOS names, and environment setup belong in the
+# user's ~/.config/ffopt/machines/cluster.yaml profile, not in a project.
+
+machine:
+  backend: "slurm"
+
+lammps:
+  executable: "lmp"
+  mpiexec: "srun"
+  timeout: 216000
+
+parallel:
+  max_workers: 1
+  cores_per_worker: 1
+  omp_threads_per_worker: 1
+  use_mpi: true
+
+cluster:
+  env_setup: []
+  bo:
+    partition: ""
+    qos: ""
+    nodes: 1
+    cores: 1
+    time: "24:00:00"
+    mem: "0"
+  nn:
+    partition: ""
+    qos: ""
+    nodes: 1
+    cores: 1
+    time: "24:00:00"
+    mem: "0"
+    gpu: 0
+  al:
+    partition: ""
+    qos: ""
+    nodes: 1
+    cores: 1
+    time: "24:00:00"
+    mem: "0"
+    gpu: 0
+

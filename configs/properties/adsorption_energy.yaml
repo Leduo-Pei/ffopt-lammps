@@ -1,0 +1,39 @@
+# Adsorption energy module.
+#
+# Target:
+#   ead = E(Au+BTAH) - E(Au slab) - E(BTAH molecule)   [kcal/mol]
+#
+# The Au slab LJ parameters are read from the data file and are not optimised.
+# BTAH LJ/charges are written by atom label from the active atom_types module.
+
+targets:
+  ead:
+    # Experimental/reference adsorption energy target. More negative means
+    # stronger binding. Current unit follows LAMMPS real units: kcal/mol.
+    value: -28.826
+    # Increase weight if interface binding should dominate BO; decrease if it
+    # should act only as a soft constraint beside bulk/sublimation.
+    weight: 1.0
+    unit: "kcal/mol"
+    tolerance: 5.0
+
+adsorption:
+  enabled: true
+  data_files:
+    complex: "data/adsorption/ad_complex.data"
+    slab: "data/adsorption/ad_slab.data"
+    mol: "data/adsorption/ad_mol.data"
+  inputs:
+    complex: "lammps/inputs/adsorption/in.complex"
+    slab: "lammps/inputs/adsorption/in.slab"
+    mol: "lammps/inputs/adsorption/in.mol"
+  metal:
+    label: "Au"
+  md:
+    cutoff: 7.0
+    timestep: 1.0
+    temp: 300.0
+    seed: 101
+    equil_steps: 20000
+    prod_steps: 20000
+    kspace_accuracy: 1.0e-4

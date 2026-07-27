@@ -1,0 +1,86 @@
+# ============================================================================
+# plot_config.yaml -- Figure styling for Force Field BO + NN pipeline v8
+#
+# Consumed by: run.py --plot  →  viz.load_plot_config()
+#
+# All sizes are in inches (matplotlib default).
+# Colors follow the Seaborn "deep" palette for colorblind safety.
+# ============================================================================
+
+# ── Typography ────────────────────────────────────────────────────────────────
+font:
+  family:          "DejaVu Sans"    # or "Arial" / "Helvetica" on most systems
+  size:            11               # base font size (pt)
+  axes_labelsize:  12
+  tick_labelsize:  10
+  legend_fontsize: 10
+  title_fontsize:  13
+  math_fontset:    "dejavusans"     # "cm" for Computer Modern (LaTeX-style)
+
+# ── Export ────────────────────────────────────────────────────────────────────
+export:
+  dpi:     300                      # raster (PNG) resolution
+  formats: ["pdf", "png"]          # both vector and raster saved per figure
+  bbox_inches: "tight"
+
+# ── Figure sizes [width, height] in inches ───────────────────────────────────
+figure_size:
+  convergence:      [8.0, 4.0]     # BO convergence curve
+  param_space:      [9.0, 9.0]     # pair-plot grid (auto-scaled for N params)
+  feasibility:      [6.5, 5.0]     # feasibility heatmap / scatter
+  parity:           [6.0, 6.0]     # NN predicted vs. actual
+  optimize_result:  [8.0, 4.5]     # NN optimization summary bar chart
+  candidates:       [7.0, 5.0]     # candidate scatter with uncertainty
+  lammps_val:       [7.0, 4.5]     # LAMMPS validation bar comparison
+  al_curve:         [8.0, 5.0]     # active learning convergence curves
+
+# ── Colors ────────────────────────────────────────────────────────────────────
+colors:
+  # BO scatter categories
+  bo_initial:       "#4C72B0"      # blue    -- LHS initial samples
+  bo_valid:         "#55A868"      # green   -- valid BO acquisition points
+  bo_infeasible:    "#C44E52"      # red     -- LAMMPS-failed points
+  bo_best:          "#DD8452"      # orange  -- best point found
+
+  # NN parity plot
+  nn_parity_points: "#4C72B0"      # blue scatter
+  nn_parity_line:   "#C44E52"      # red identity line
+
+  # NN optimization
+  nn_bar_pred:      "#4C72B0"      # blue   -- NN-predicted objective bar
+  nn_bar_lammps:    "#55A868"      # green  -- LAMMPS-validated bar
+
+  # Active learning
+  al_max_std:       "#DD8452"      # orange -- max ensemble std curve
+  al_mean_std:      "#4C72B0"      # blue   -- mean ensemble std curve
+  al_r2:            "#55A868"      # green  -- test R² curve
+  al_best_obj:      "#C44E52"      # red    -- best LAMMPS objective curve
+
+  # Feasibility
+  feasible:         "#55A868"      # green
+  infeasible:       "#C44E52"      # red
+
+  # Reference / grid
+  grid:             "#CCCCCC"
+  refline:          "#888888"      # dashed reference line
+
+# ── Marker / line styles ──────────────────────────────────────────────────────
+markers:
+  bo_initial:    "o"
+  bo_valid:      "o"
+  bo_infeasible: "x"
+  bo_best:       "*"
+  markersize:    5
+  best_markersize: 12
+
+lines:
+  lw_main:    1.5
+  lw_ref:     1.0
+  ls_ref:     "--"
+
+# ── Axes ─────────────────────────────────────────────────────────────────────
+axes:
+  grid:        true
+  grid_alpha:  0.3
+  spine_top:   false             # remove top spine for cleaner look
+  spine_right: false             # remove right spine

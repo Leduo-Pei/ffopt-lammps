@@ -1,0 +1,78 @@
+include:
+  - btah_common.yaml
+
+project:
+  name: "btah_charge_only"
+  default_machine: "local"
+  run_root: "runs/btah_charge_only"
+
+modules:
+  # 13 free dimensions: epsilon and sigma are fixed; charges are optimized.
+  system: "configs/systems/btah_822_fix_epi_si.yaml"
+
+stages:
+  sample:
+    # Start from the newest BO stability results in this project's run root.
+    source: "auto"
+    n_points: 2000
+    seeds: [101, 202, 303]
+    elite_centers: 24
+    center_selection: "diverse"
+    center_pool_multiplier: 5
+    radii: [0.010, 0.020, 0.035, 0.050]
+    global_fraction: 0.0
+    design_seed: 20260719
+  # NN inputs and objective cutoffs are intentionally omitted until the
+  # corrected CHARMM BO and three-seed sampling stages finish. The previous
+  # 0.30/0.40 thresholds described the invalid non-CHARMM fixed-LJ landscape.
+
+overrides:
+  nn:
+    # Charge-only cell responses benefit from local kernel/tree interpolation;
+    # the ANN remains the default for a, density and sublimation energy.
+    property_models:
+      b:
+        model: "svr_rbf"
+        training_source: "core_only"
+      c:
+        model: "svr_rbf"
+        training_source: "core_only"
+      density:
+        model: "polynomial_ridge"
+        training_source: "core_only"
+      esub_proxy:
+        model: "polynomial_ridge"
+        training_source: "core_only"
+    multitask:
+      enabled: true
+      # Shared labels improve a; b/c retain their stronger local experts.
+      use_for_properties: ["a"]
+      hidden_layers: [256, 256, 128]
+      activation: "silu"
+      dropout: 0.10
+      ensemble_size: 5
+      learning_rate: 5.0e-4
+      weight_decay: 1.0e-3
+      max_epochs: 3000
+      patience: 250
+    training_data:
+      # The 2000-point refinement identified a smooth, well-populated basin at
+      # robust objective <= 0.015. Wider cutoffs mix distinct response regimes.
+      core_objective_max: 0.015
+  active_learning:
+    # Keep AL inside the smooth charge-only basin established by the 1583-point
+    # three-seed refinement. Wider domains mix distinct NPT response regimes.
+    sampling_domain: "core_envelope"
+    sampling_objective_max: 0.015
+    envelope_margin: 0.03
+    local_sampling_fraction: 0.90
+    local_elite_objective_max: 0.015
+    local_elite_core_only: true
+    local_center_top_k: 100
+    local_radii: [0.0025, 0.0050, 0.0100]
+    exploitation_fraction: 0.85
+    uncertainty_penalty: 0.75
+    promising_quantile: 0.15
+    # This comparison must execute both AL rounds. A zero threshold disables
+    # uncertainty-only early stopping; improvement is judged by LAMMPS results.
+    uncertainty_threshold: 0.0

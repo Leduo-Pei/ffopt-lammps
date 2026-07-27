@@ -1,0 +1,25 @@
+# Charge-only BTAH system recentered on the neutral CHARMM charge set.
+# The 13 free charges use center +/- 0.300 e. bhN1 is excluded from BO and
+# recovered from molecular charge neutrality at every evaluation.
+
+include:
+  - btah_822_fix_epi_si.yaml
+
+manifest:
+  system_name: "BTAH_822_fix_epi_si_charmm_center"
+
+atom_types:
+  - {type: 1,  label: bhN1, mass: 14.007,   params: {epsilon: 0.2000000142, sigma: 3.2963252376, charge: {min: -0.909, max: -0.309}}}
+  - {type: 2,  label: bhHn, mass: 1.008,    params: {epsilon: 0.0473512033, sigma: 0.3980865645, charge: {min:  0.130, max:  0.730}}}
+  - {type: 3,  label: bhN2, mass: 14.007,   params: {epsilon: 0.2000000142, sigma: 3.2963252376, charge: {min: -0.387, max:  0.213}}}
+  - {type: 4,  label: bhN3, mass: 14.007,   params: {epsilon: 0.2000000142, sigma: 3.2963252376, charge: {min: -0.801, max: -0.201}}}
+  - {type: 5,  label: bhC2, mass: 12.01115, params: {epsilon: 0.0989999944, sigma: 3.3141432470, charge: {min: -0.213, max:  0.387}}}
+  - {type: 6,  label: bhH2, mass: 1.008,    params: {epsilon: 0.0300001052, sigma: 2.4200365710, charge: {min: -0.296, max:  0.304}}}
+  - {type: 7,  label: bhC1, mass: 12.01115, params: {epsilon: 0.0989999944, sigma: 3.3141432470, charge: {min: -0.426, max:  0.174}}}
+  - {type: 8,  label: bhH1, mass: 1.008,    params: {epsilon: 0.0300001052, sigma: 2.4200365710, charge: {min: -0.289, max:  0.311}}}
+  - {type: 9,  label: bhC6, mass: 12.01115, params: {epsilon: 0.0989999944, sigma: 3.3141432470, charge: {min: -0.404, max:  0.196}}}
+  - {type: 10, label: bhH6, mass: 1.008,    params: {epsilon: 0.0300001052, sigma: 2.4200365710, charge: {min: -0.229, max:  0.371}}}
+  - {type: 11, label: bhC5, mass: 12.01115, params: {epsilon: 0.0989999944, sigma: 3.3141432470, charge: {min: -0.251, max:  0.349}}}
+  - {type: 12, label: bhH5, mass: 1.008,    params: {epsilon: 0.0300001052, sigma: 2.4200365710, charge: {min: -0.192, max:  0.408}}}
+  - {type: 13, label: bhC4, mass: 12.01115, params: {epsilon: 0.0699999881, sigma: 3.5500532624, charge: {min: -0.126, max:  0.474}}}
+  - {type: 14, label: bhC3, mass: 12.01115, params: {epsilon: 0.0699999881, sigma: 3.5500532624, charge: {min:  0.193, max:  0.793}}}

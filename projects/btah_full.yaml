@@ -1,0 +1,23 @@
+include:
+  - btah_common.yaml
+
+project:
+  name: "btah_full"
+  default_machine: "local"
+  run_root: "runs/btah_full"
+
+modules:
+  # 41 free dimensions: epsilon, sigma and 13 independent charges.
+  system: "configs/systems/btah_822.yaml"
+
+stages:
+  sample:
+    source: "auto"
+    n_points: 1600
+    seeds: [101]
+    elite_centers: 8
+    radii: [0.005, 0.015, 0.040, 0.080]
+    global_fraction: 0.10
+    design_seed: 20260715
+  # NN and AL discover outputs produced inside this project's run root. No
+  # historical campaign-specific result path is required.

@@ -1,0 +1,120 @@
+# BO method module: TuRBO-style trust-region Bayesian optimization.
+#
+# How BO method selection works:
+#   - method: "turbo" means the USER explicitly selects TuRBO.
+#   - method: "gp" or "saasbo" explicitly selects those methods.
+#   - method: "auto" lets optimizer.py choose by parameter dimension.
+#
+# For high-dimensional BTAH-like searches, TuRBO is the recommended default.
+# For a lower-dimensional subspace, try ../bo/gp.yaml.
+# For sparse high-dimensional problems, try ../bo/saasbo.yaml.
+# For a quick restart after interruption:
+#   python ffopt.py bo --resume
+
+optimization:
+  # Optional path to a seed parameter file. Empty string means no manual seed.
+  seed_params: ""
+
+  # Main BO method. This file explicitly sets TuRBO. To let the code choose,
+  # use configs/methods/bo/auto.yaml in the recipe instead.
+  method: "turbo"
+
+  # true makes auto mode choose SAASBO earlier for high-dimensional spaces.
+  # This has no effect when method is explicitly "turbo".
+  accuracy_priority: true
+
+  # Number of initial Latin-hypercube/random design points before BO begins.
+  n_initial: 48
+
+  # Number of BO rounds after the initial design. Each round evaluates
+  # parallel.max_workers candidates, so total LAMMPS calls are approximately:
+  # n_initial + n_bo_iterations * parallel.max_workers.
+  n_bo_iterations: 300
+
+  # Objective used by lammps_interface.py. Keep weighted_rmse unless you add
+  # another objective implementation.
+  objective: "weighted_rmse"
+
+  # Pareto settings are only active when surface energy is computed. For the
+  # current BTAH bulk/interface recipes, posthoc is harmless and low-risk.
+  pareto:
+    mode: "posthoc"
+    reference_point:
+      structural: 30.0
+      surface: 50.0
+    knee_method: "min_distance"
+
+  # TuRBO trust-region settings. length_min controls when a trust region is
+  # considered exhausted; smaller values search more locally but cost more.
+  turbo:
+    n_trust_regions: 1
+    length_init: 0.8
+    length_min: 0.005
+    length_max: 1.6
+
+  # SAASBO settings are kept here so bo/saasbo.yaml can override only method
+  # and the few knobs that matter.
+  saasbo:
+    num_samples: 256
+    warmup_steps: 512
+
+  # Stop BO if the best objective has not improved enough for patience rounds.
+  early_stop:
+    enabled: true
+    patience: 40
+    min_improvement: 0.001
+
+  # Periodically inject exploration candidates so BO does not overfit early
+  # noisy regions of parameter space.
+  exploration:
+    every_n_rounds: 5
+    n_random: 48
+    n_uncertain: 2
+
+  # Feasibility model learns which regions fail LAMMPS or sanity checks and
+  # steers acquisition away from them.
+  feasibility:
+    penalty_cap_multiplier: 3.0
+    classifier: true
+
+  # Reproducible BO sampling seed.
+  random_seed: 42
+
+  # Live progress reporting. After every completed BO round, print the
+  # calculated value, experimental target, and relative error of every active
+  # property for the current GLOBAL best candidate. This is not merely the
+  # best member of that round. Two monitor-friendly files are also maintained
+  # in the bo_* directory:
+  #   progress_latest.csv  - current best, one row per property (overwritten)
+  #   progress_history.csv - one row per completed round (appended)
+  progress_report:
+    enabled: true
+    property_table_every: 1
+    save_csv: true
+
+  # After BO, re-evaluate top candidates with multiple NPT seeds. Stable
+  # candidates are written to stable_results.csv and are preferred by NN.
+  stability_audit:
+    enabled: true
+    # Number of best BO candidates to actually re-run during the audit.
+    # Candidates are sorted by BO objective; this is not a display limit and
+    # not the NN training cutoff percentage.
+    top_k: 20
+    # Independent NPT seeds used for each audited candidate. Three seeds are a
+    # practical default; increase to five only for final confirmation runs.
+    seeds: [101, 202, 303]
+    # Number of candidates audited concurrently. Each candidate still runs its
+    # seeds sequentially. Total CPU ranks are approximately:
+    # max_workers * parallel.cores_per_worker * parallel.omp_threads_per_worker.
+    # Use 48 with the 192-core cluster BO profile (48 * 4 * 1 = 192).
+    max_workers: 48
+    max_objective_std: 0.02
+    max_property_rel_std: 0.03
+    noise_penalty: 1.0
+    failure_penalty: 10.0
+
+checkpoint:
+  # Checkpoints enable --resume. They are written inside each bo_* output dir.
+  enabled: true
+  interval: 10
+  directory: "checkpoints"

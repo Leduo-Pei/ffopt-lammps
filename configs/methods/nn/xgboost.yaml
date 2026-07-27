@@ -1,0 +1,13 @@
+# NN/ML surrogate module: XGBoost.
+#
+# Use this when the BO dataset is small or noisy and a tree model is preferred.
+# The current nn_surrogate.py already accepts --model xgboost; model-specific
+# hyperparameters can be added here as the implementation grows.
+
+nn:
+  enabled: true
+  model: "xgboost"
+  physics_features: true
+  train_top_fraction: 0.05
+  prefer_stable_results: true
+

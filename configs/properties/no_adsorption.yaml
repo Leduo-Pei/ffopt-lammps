@@ -1,0 +1,5 @@
+# Disable adsorption while keeping the config key present.
+
+adsorption:
+  enabled: false
+

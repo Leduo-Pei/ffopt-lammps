@@ -1,0 +1,32 @@
+# in.complex -- adsorption box 1/3 : Au + BTAH   (0 K ENERGY MINIMIZATION)
+# Deterministic (no velocity seed) -> reproducible E_ad, matches 0 K DFT target.
+# Au uncharged; BTAH eps/sig/charge injected via pair_coeffs.lmp.
+# Prints: DATA_AD: <pe_min>
+units           real
+atom_style      full
+boundary        p p p
+bond_style      harmonic
+angle_style     harmonic
+dihedral_style  harmonic
+improper_style  cvff
+special_bonds   lj/coul 0.0 0.0 1.0
+
+pair_style      lj/cut/coul/long ${cutoff}
+read_data       ${data}
+include         pair_coeffs.lmp
+# kspace AFTER read_data: data box is triclinic (pppm requires this order)
+kspace_style    pppm ${kspace_accuracy}
+neighbor        2.0 bin
+neigh_modify    delay 0 every 1 check yes
+
+thermo          50
+thermo_style    custom step pe evdwl ecoul elong fmax
+min_style       cg
+if "${save_traj} == 1" then &
+  "dump TRAJ all custom 10 ad_complex_min_trajectory.lammpstrj id type q x y z"
+if "${save_traj} == 1" then "dump_modify TRAJ sort id"
+minimize        1.0e-8 1.0e-10 100000 1000000
+
+print           "DATA_AD: $(pe)"
+if "${save_traj} == 1" then "undump TRAJ"
+if "${save_traj} == 1" then "write_data ad_complex_min.lammps nocoeff"

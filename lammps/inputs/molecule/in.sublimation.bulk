@@ -1,0 +1,29 @@
+# in.sublimation.bulk -- BTAH bulk 0 K energy for sublimation proxy
+# Prints: DATA_SUB_BULK: <pe_min>
+units           real
+dimension       3
+boundary        p p p
+atom_style      full
+newton          on
+
+bond_style      harmonic
+angle_style     harmonic
+dihedral_style  harmonic
+improper_style  cvff
+special_bonds   lj/coul 0.0 0.0 1.0
+
+pair_style      lj/cut/coul/long ${cutoff}
+read_data       ${data}
+include         pair_coeffs.lmp
+kspace_style    pppm ${kspace_accuracy}
+
+neighbor        2.0 bin
+neigh_modify    delay 0 every 1 check yes
+
+thermo          100
+thermo_style    custom step pe evdwl ecoul elong fmax
+min_style       cg
+minimize        1.0e-8 1.0e-10 100000 1000000
+
+print           "DATA_SUB_BULK: $(pe)"
+if "${save_traj} == 1" then "write_data sublimation_bulk_min.lammps nocoeff"

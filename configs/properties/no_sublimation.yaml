@@ -1,0 +1,5 @@
+# Disable sublimation while keeping the config key present.
+
+sublimation:
+  enabled: false
+

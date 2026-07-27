@@ -1,0 +1,32 @@
+# Independent charge-only campaign centered on the corrected neutral CHARMM
+# charge set. Existing btah_charge_only runs remain untouched.
+
+include:
+  - btah_common.yaml
+
+project:
+  name: "btah_charge_only_charmm_center"
+  default_machine: "cluster"
+  run_root: "runs/btah_charge_only_charmm_center"
+
+modules:
+  system: "configs/systems/btah_822_fix_epi_si_charmm_center.yaml"
+
+stages:
+  sample:
+    # Use only the three-seed-audited BO candidates as local centers.
+    source: "auto"
+    n_points: 2000
+    seeds: [101, 202, 303]
+    elite_centers: 16
+    center_selection: "diverse"
+    center_pool_multiplier: 5
+    # Normalized by the 0.600 e free-charge width: maximum shifts are
+    # 0.006, 0.012, 0.021 and 0.030 e per independent dimension.
+    radii: [0.010, 0.020, 0.035, 0.050]
+    global_fraction: 0.0
+    design_seed: 20260722
+
+overrides:
+  workflow:
+    active_properties: ["bulk_npt", "sublimation_proxy"]

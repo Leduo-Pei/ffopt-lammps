@@ -1,0 +1,24 @@
+# Portable local defaults.
+#
+# Do not put workstation-specific paths in a project. Configure them once with:
+#   ffopt machine configure --name local --backend local --lammps /path/to/lmp
+# A user profile overrides these defaults without changing scientific inputs.
+
+machine:
+  backend: "local"
+
+lammps:
+  executable: "lmp"
+  mpiexec: "mpiexec"
+  timeout: 21600
+
+parallel:
+  # Independent parameter points evaluated concurrently.
+  max_workers: 1
+  # MPI ranks assigned to each LAMMPS evaluation.
+  cores_per_worker: 1
+  # OpenMP threads used by each MPI rank.
+  omp_threads_per_worker: 1
+  # The portable default is serial. Enable MPI in the user machine profile.
+  use_mpi: false
+

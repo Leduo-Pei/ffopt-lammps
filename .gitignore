@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+.venv/
+venv/
+
+# FFOpt runtime state and generated data
+runs/
+archive/
+analyses/
+dry_run/
+logs/
+**/checkpoints/
+**/_configs/
+*.pt
+*.pth
+*.ckpt
+*.lammpstrj
+log.lammps
+lammps_stdout.log
+slurm-*.out
+
+# Presentation and local analysis products
+docs/presentation/outputs/
+docs/presentation/*.pptx
+docs/presentation/*.vsdx
+/docs/presentation/
+/docs/status/
+
+# BTAH research history retained locally but not part of the reusable package
+/analysis/
+/tools/
+/configs/recipes/
+/configs/sampling/
+/data/reference_dft/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini

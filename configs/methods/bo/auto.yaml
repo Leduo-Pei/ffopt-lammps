@@ -1,0 +1,22 @@
+# BO method module: automatic method selection.
+#
+# Include this when you want optimizer.py to choose the BO backend from the
+# number of free parameters:
+#   accuracy_priority=true:
+#     n_params < 7        -> GP
+#     7 <= n_params < 10  -> TuRBO
+#     n_params >= 10      -> SAASBO
+#   accuracy_priority=false:
+#     n_params < 7        -> GP
+#     7 <= n_params < 16  -> TuRBO
+#     n_params >= 16      -> SAASBO
+#
+# For current 41D BTAH, explicit turbo.yaml is usually more practical unless
+# SAASBO dependencies and runtime budget are ready.
+
+include:
+  - turbo.yaml
+
+optimization:
+  method: "auto"
+

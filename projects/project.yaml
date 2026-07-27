@@ -1,0 +1,8 @@
+# Active project selector. Change only the include below when switching tasks.
+# Options:
+#   - btah_full.yaml         (41D: epsilon + sigma + charge)
+#   - btah_fix_sigma.yaml    (27D: epsilon + charge)
+#   - btah_charge_only.yaml  (13D: charge only)
+
+include:
+  - btah_full.yaml

@@ -1,0 +1,47 @@
+# BTAH 822 charge-only optimization system.
+#
+# The 14 epsilon/sigma values below are fixed at the validated BTAH_v2.0
+# CHARMM reference. Only charge mappings with min/max bounds are BO dimensions.
+# Type 1 (bhN1) is additionally removed from the search space and derived from
+# molecular charge neutrality, leaving 13 independent charge dimensions.
+
+manifest:
+  system_name: "BTAH_822_fix_epi_si"
+  crystal_structure: "molecular"
+  surface_facet: "none"
+  data_files:
+    bulk: "data/bulk/BTAH_822_bulk.data"
+
+pair_params:
+  mixing_rule: "geometric"
+  explicit_pairs: []
+  derived_params: []
+
+charge:
+  enabled: true
+  kspace_accuracy: 1.0e-5
+  neutrality_constraint:
+    enabled: true
+    derive_from_type: 1        # bhN1 charge is computed from total neutrality.
+    # BTAH contains one atom of every listed type per molecule.
+    feature_type_counts: {bhN1: 1, bhHn: 1, bhN2: 1, bhN3: 1, bhC2: 1, bhH2: 1, bhC1: 1, bhH1: 1, bhC6: 1, bhH6: 1, bhC5: 1, bhH5: 1, bhC4: 1, bhC3: 1}
+  constraints:
+    abs_max: 1.0               # Reject a candidate if any resolved |q| >= 1 e.
+
+# Charge ranges and fixed LJ values are retained from the validated BTAH_v2.0
+# CHARMM baseline used to seed the full BTAH_v2.1 search.
+atom_types:
+  - {type: 1,  label: bhN1, mass: 14.007,   params: {epsilon: 0.2000000142, sigma: 3.2963252376, charge: {min: -1.000, max: -0.543}}}
+  - {type: 2,  label: bhHn, mass: 1.008,    params: {epsilon: 0.0473512033, sigma: 0.3980865645, charge: {min:  0.184, max:  0.784}}}
+  - {type: 3,  label: bhN2, mass: 14.007,   params: {epsilon: 0.2000000142, sigma: 3.2963252376, charge: {min: -0.351, max:  0.249}}}
+  - {type: 4,  label: bhN3, mass: 14.007,   params: {epsilon: 0.2000000142, sigma: 3.2963252376, charge: {min: -0.846, max: -0.246}}}
+  - {type: 5,  label: bhC2, mass: 12.01115, params: {epsilon: 0.0989999944, sigma: 3.3141432470, charge: {min: -0.281, max:  0.319}}}
+  - {type: 6,  label: bhH2, mass: 1.008,    params: {epsilon: 0.0300001052, sigma: 2.4200365710, charge: {min: -0.203, max:  0.397}}}
+  - {type: 7,  label: bhC1, mass: 12.01115, params: {epsilon: 0.0989999944, sigma: 3.3141432470, charge: {min: -0.328, max:  0.272}}}
+  - {type: 8,  label: bhH1, mass: 1.008,    params: {epsilon: 0.0300001052, sigma: 2.4200365710, charge: {min: -0.236, max:  0.364}}}
+  - {type: 9,  label: bhC6, mass: 12.01115, params: {epsilon: 0.0989999944, sigma: 3.3141432470, charge: {min: -0.369, max:  0.231}}}
+  - {type: 10, label: bhH6, mass: 1.008,    params: {epsilon: 0.0300001052, sigma: 2.4200365710, charge: {min: -0.196, max:  0.404}}}
+  - {type: 11, label: bhC5, mass: 12.01115, params: {epsilon: 0.0989999944, sigma: 3.3141432470, charge: {min: -0.239, max:  0.361}}}
+  - {type: 12, label: bhH5, mass: 1.008,    params: {epsilon: 0.0300001052, sigma: 2.4200365710, charge: {min: -0.246, max:  0.354}}}
+  - {type: 13, label: bhC4, mass: 12.01115, params: {epsilon: 0.0699999881, sigma: 3.5500532624, charge: {min: -0.054, max:  0.546}}}
+  - {type: 14, label: bhC3, mass: 12.01115, params: {epsilon: 0.0699999881, sigma: 3.5500532624, charge: {min:  0.107, max:  0.707}}}
