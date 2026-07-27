@@ -532,7 +532,7 @@ def cmd_nn(args: argparse.Namespace) -> None:
         elif not args.allow_bo_only:
             raise SystemExit(
                 "NN preflight failed: this project defines a sample stage, but no "
-                "local_results.csv was found. Run 'python ffopt.py sample "
+                "local_results.csv was found. Run 'ffopt sample "
                 f"--project {project.path} --machine {machine}' first, or pass "
                 "--allow-bo-only to deliberately train from BO data alone."
             )
@@ -748,16 +748,109 @@ def cmd_inspect(args: argparse.Namespace) -> None:
         )
 
 
+def cmd_plugins(args: argparse.Namespace) -> None:
+    from engine.property_evaluators import PROPERTY_EVALUATORS
+
+    descriptions = PROPERTY_EVALUATORS.describe()
+    if args.json:
+        print(json.dumps(descriptions, indent=2))
+        return
+    print("Property evaluators:")
+    for item in descriptions:
+        dependencies = ",".join(item["dependencies"]) or "-"
+        provides = ",".join(item["provides"]) or "dynamic"
+        print(
+            f"  {item['name']:14s} dependencies={dependencies:12s} "
+            f"provides={provides}"
+        )
+        print(f"  {'':14s} source={item['source']}  class={item['class']}")
+
+
+def cmd_init(args: argparse.Namespace) -> None:
+    from .scaffold import create_project, parse_target_spec
+
+    try:
+        targets = [parse_target_spec(value) for value in args.target]
+        result = create_project(
+            name=args.name,
+            data_file=args.data_file,
+            single_data=args.single_data,
+            destination=args.destination or args.name,
+            targets=targets,
+            mode=args.mode,
+            cells=tuple(args.cells),
+            mixing_rule=args.mixing_rule,
+            derive_charge=args.derive_charge,
+            epsilon_scale=tuple(args.epsilon_scale),
+            sigma_scale=tuple(args.sigma_scale),
+            charge_window=args.charge_window,
+            charge_limit=args.charge_limit,
+            force=args.force,
+        )
+    except (FileNotFoundError, FileExistsError, TypeError, ValueError) as exc:
+        raise SystemExit(f"Project initialization failed: {exc}") from exc
+
+    print(f"Project created : {result.root}")
+    print(f"Project file    : {result.project_file}")
+    print(f"Atom types      : {result.atom_types}")
+    print(f"Free dimensions : {result.dimensions}")
+    print(f"Targets         : {', '.join(result.targets)}")
+    for warning in result.warnings:
+        print(f"WARNING: {warning}")
+    print("\nNext:")
+    print(f"  cd {result.root}")
+    print("  ffopt show --project project.yaml")
+    print("  ffopt doctor --project project.yaml --machine local")
+    print("  ffopt run --project project.yaml --machine local --dry-run")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ffopt",
         description="One command for BO, sampling, surrogate training and active learning.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
+    init = sub.add_parser(
+        "init", help="Create a portable molecular project from a LAMMPS data file."
+    )
+    init.add_argument("name", help="Project and system name.")
+    init.add_argument("--data-file", required=True, help="Bulk molecular-crystal data file.")
+    init.add_argument("--single-data", help="Isolated molecule data file for esub_proxy.")
+    init.add_argument("--destination", help="Output directory; defaults to NAME.")
+    init.add_argument(
+        "--target", action="append", required=True,
+        help="Repeat NAME=VALUE[,WEIGHT[,UNIT]], e.g. a=4.24,1.0,A.",
+    )
+    init.add_argument(
+        "--mode", choices=["full", "fix_sigma", "charge_only", "lj_only"],
+        default="full",
+    )
+    init.add_argument(
+        "--cells", type=int, nargs=3, metavar=("NX", "NY", "NZ"),
+        default=[1, 1, 1],
+        help="Primitive-cell repeats already present in the bulk data file.",
+    )
+    init.add_argument(
+        "--mixing-rule", choices=["geometric", "arithmetic"], default="geometric"
+    )
+    init.add_argument(
+        "--derive-charge", default="auto",
+        help="auto, none, or atom type ID used to enforce total neutrality.",
+    )
+    init.add_argument("--epsilon-scale", type=float, nargs=2, default=[0.5, 2.0])
+    init.add_argument("--sigma-scale", type=float, nargs=2, default=[0.85, 1.15])
+    init.add_argument("--charge-window", type=float, default=0.30)
+    init.add_argument("--charge-limit", type=float, default=2.0)
+    init.add_argument("--force", action="store_true")
+    init.set_defaults(function=cmd_init)
+
     inspect = sub.add_parser("inspect", help="Inspect atom types and parameters in a LAMMPS data file.")
     inspect.add_argument("data_file")
     inspect.add_argument("--json", action="store_true", help="Emit a machine-readable summary.")
     inspect.set_defaults(function=cmd_inspect)
+    plugins = sub.add_parser("plugins", help="List built-in and installed property evaluators.")
+    plugins.add_argument("--json", action="store_true")
+    plugins.set_defaults(function=cmd_plugins)
     machine = sub.add_parser("machine", help="Configure reusable local or SLURM execution profiles.")
     machine.add_argument("action", choices=["configure", "show", "list"])
     machine.add_argument("--name", default="local")

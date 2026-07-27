@@ -22,3 +22,5 @@ jobs:
         run: python -m pytest -q
       - name: Build wheel
         run: python -m build --wheel
+      - name: Verify installed project resources
+        run: python tests/check_wheel.py dist/*.whl

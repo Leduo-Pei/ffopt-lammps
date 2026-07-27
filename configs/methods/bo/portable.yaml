@@ -1,0 +1,63 @@
+# Portable Bayesian-optimization defaults for newly scaffolded projects.
+# These are intentionally molecule-independent starting values. Tune the BO
+# budget only after a dry-run and a small pilot establish the evaluation cost.
+
+optimization:
+  seed_params: ""
+  # Select GP, TuRBO, or SAASBO from the free-parameter dimension.
+  method: "auto"
+  accuracy_priority: false
+  n_initial: 48
+  n_bo_iterations: 200
+  objective: "weighted_rmse"
+
+  pareto:
+    mode: "posthoc"
+    reference_point: {structural: 30.0, surface: 50.0}
+    knee_method: "min_distance"
+
+  turbo:
+    n_trust_regions: 1
+    length_init: 0.8
+    length_min: 0.005
+    length_max: 1.6
+
+  saasbo:
+    num_samples: 256
+    warmup_steps: 512
+
+  early_stop:
+    enabled: true
+    patience: 30
+    min_improvement: 0.001
+
+  exploration:
+    every_n_rounds: 5
+    n_random: 16
+    n_uncertain: 2
+
+  feasibility:
+    penalty_cap_multiplier: 3.0
+    classifier: true
+
+  random_seed: 42
+  progress_report:
+    enabled: true
+    property_table_every: 1
+    save_csv: true
+
+  # Multi-seed values, not single-seed BO outputs, become the NN stable core.
+  stability_audit:
+    enabled: true
+    top_k: 20
+    seeds: [101, 202, 303]
+    # max_workers is omitted so the selected machine profile controls it.
+    max_objective_std: 0.05
+    max_property_rel_std: 0.05
+    noise_penalty: 1.0
+    failure_penalty: 10.0
+
+checkpoint:
+  enabled: true
+  interval: 10
+  directory: "checkpoints"

@@ -9,6 +9,10 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from importlib import metadata
+import inspect
+import re
+from threading import Lock
 from typing import Any, Iterable
 
 import numpy as np
@@ -218,6 +222,108 @@ DEFAULT_EVALUATORS = {
 }
 
 
+class PropertyEvaluatorRegistry:
+    """Registry for built-in and third-party property evaluators."""
+
+    def __init__(self, evaluators: Iterable[PropertyEvaluator] = ()):
+        self._evaluators: dict[str, PropertyEvaluator] = {}
+        self._sources: dict[str, str] = {}
+        self._discovered = False
+        self._lock = Lock()
+        self._discovery_lock = Lock()
+        for evaluator in evaluators:
+            self.register(evaluator, source="built-in")
+
+    @staticmethod
+    def _materialize(candidate: Any) -> PropertyEvaluator:
+        if inspect.isclass(candidate) and issubclass(candidate, PropertyEvaluator):
+            candidate = candidate()
+        elif not isinstance(candidate, PropertyEvaluator) and callable(candidate):
+            candidate = candidate()
+        if not isinstance(candidate, PropertyEvaluator):
+            raise TypeError(
+                "Property evaluator plugins must expose a PropertyEvaluator "
+                "instance, subclass, or zero-argument factory"
+            )
+        return candidate
+
+    def register(
+        self,
+        evaluator: PropertyEvaluator | type[PropertyEvaluator] | Any,
+        *,
+        source: str = "runtime",
+        replace: bool = False,
+    ) -> PropertyEvaluator:
+        instance = self._materialize(evaluator)
+        name = str(instance.name).strip()
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+            raise ValueError(
+                f"Invalid property evaluator name {name!r}; use snake_case"
+            )
+        with self._lock:
+            if name in self._evaluators and not replace:
+                raise ValueError(
+                    f"Property evaluator {name!r} is already registered from "
+                    f"{self._sources[name]}"
+                )
+            self._evaluators[name] = instance
+            self._sources[name] = source
+        return instance
+
+    def discover(self) -> None:
+        """Load ``ffopt.property_evaluators`` package entry points once."""
+        with self._discovery_lock:
+            if self._discovered:
+                return
+            discovered = metadata.entry_points()
+            if hasattr(discovered, "select"):
+                entries = discovered.select(group="ffopt.property_evaluators")
+            else:  # pragma: no cover - Python/importlib-metadata compatibility
+                entries = discovered.get("ffopt.property_evaluators", [])
+            for entry in entries:
+                try:
+                    self.register(
+                        entry.load(),
+                        source=f"entry-point:{entry.value}",
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Failed to load property evaluator entry point "
+                        f"{entry.name!r}: {exc}"
+                    ) from exc
+            self._discovered = True
+
+    def evaluators(self, *, discover: bool = True) -> dict[str, PropertyEvaluator]:
+        if discover:
+            self.discover()
+        return dict(self._evaluators)
+
+    def describe(self, *, discover: bool = True) -> list[dict[str, Any]]:
+        evaluators = self.evaluators(discover=discover)
+        return [
+            {
+                "name": name,
+                "source": self._sources[name],
+                "dependencies": list(evaluator.dependencies),
+                "provides": sorted(evaluator.provides),
+                "class": f"{type(evaluator).__module__}.{type(evaluator).__qualname__}",
+            }
+            for name, evaluator in evaluators.items()
+        ]
+
+
+PROPERTY_EVALUATORS = PropertyEvaluatorRegistry(DEFAULT_EVALUATORS.values())
+
+
+def register_property_evaluator(
+    evaluator: PropertyEvaluator | type[PropertyEvaluator] | Any,
+    *,
+    replace: bool = False,
+) -> PropertyEvaluator:
+    """Register an evaluator from application code without an entry point."""
+    return PROPERTY_EVALUATORS.register(evaluator, replace=replace)
+
+
 class PropertyExecutionPlan:
     def __init__(self, evaluators: Iterable[PropertyEvaluator]):
         self.evaluators = tuple(evaluators)
@@ -240,13 +346,15 @@ class PropertyExecutionPlan:
         return PropertyStageResult(True, accumulated)
 
 
-def _topological_order(names: set[str]) -> list[str]:
+def _topological_order(
+    names: set[str], evaluators: dict[str, PropertyEvaluator]
+) -> list[str]:
     ordered: list[str] = []
     visiting: set[str] = set()
 
-    unknown = names - DEFAULT_EVALUATORS.keys()
+    unknown = names - evaluators.keys()
     if unknown:
-        choices = ", ".join(sorted(DEFAULT_EVALUATORS))
+        choices = ", ".join(sorted(evaluators))
         raise ValueError(
             f"Unknown property evaluator(s) {sorted(unknown)}. Available: {choices}"
         )
@@ -256,20 +364,25 @@ def _topological_order(names: set[str]) -> list[str]:
             return
         if name in visiting:
             raise ValueError(f"Property evaluator dependency cycle at '{name}'")
+        if name not in evaluators:
+            raise ValueError(
+                f"Property evaluator dependency {name!r} is not registered"
+            )
         visiting.add(name)
-        for dependency in DEFAULT_EVALUATORS[name].dependencies:
+        for dependency in evaluators[name].dependencies:
             names.add(dependency)
             visit(dependency)
         visiting.remove(name)
         ordered.append(name)
 
-    for selected in DEFAULT_EVALUATORS:
+    for selected in evaluators:
         if selected in names:
             visit(selected)
     return ordered
 
 
 def build_property_plan(config: dict[str, Any], runner: Any) -> PropertyExecutionPlan:
+    available = PROPERTY_EVALUATORS.evaluators()
     selected = set()
     if runner.bulk_required:
         selected.add("bulk")
@@ -287,8 +400,8 @@ def build_property_plan(config: dict[str, Any], runner: Any) -> PropertyExecutio
         else:
             selected.discard(name)
 
-    ordered_names = _topological_order(selected)
-    evaluators = [DEFAULT_EVALUATORS[name] for name in ordered_names]
+    ordered_names = _topological_order(selected, available)
+    evaluators = [available[name] for name in ordered_names]
 
     provided = set()
     for evaluator in evaluators:

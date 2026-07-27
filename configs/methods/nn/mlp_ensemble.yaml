@@ -1,7 +1,7 @@
 # NN surrogate module: ANN/MLP ensemble.
 #
 # This is the default neural-network stage. Override from CLI without editing:
-#   python ffopt.py nn
+#   ffopt nn
 #
 # Alternative model modules can live next to this file and be selected by
 # include or by the --model CLI flag.

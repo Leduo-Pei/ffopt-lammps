@@ -33,6 +33,32 @@ ffopt machine show --name local
 Machine profiles are stored outside the repository under
 `~/.config/ffopt/machines/`. Projects contain scientific inputs only.
 
+## Start a molecular project
+
+`ffopt init` inspects atom types, masses, Pair Coeffs, and per-type charges,
+then creates a portable project outside the FFOpt source checkout:
+
+```bash
+ffopt init my_crystal \
+  --data-file crystal.data \
+  --single-data molecule.data \
+  --cells 2 2 2 \
+  --mode full \
+  --target a=10.1,1.0,A \
+  --target b=12.3,1.0,A \
+  --target density=1.25,1.0,g/cm3 \
+  --target esub_proxy=80.0,0.3,kJ/mol
+
+cd my_crystal
+ffopt doctor --project project.yaml --machine local
+ffopt run --project project.yaml --machine local --dry-run
+```
+
+The generated project owns its data, LAMMPS inputs, system ranges, and target
+modules. Reusable BO/NN/AL and machine defaults use `builtin:` resources shipped
+inside the wheel. See [New molecular projects](docs/NEW_PROJECT.md) for current
+force-field assumptions and range rules.
+
 ## Run the complete workflow
 
 The normal interface is one command. Outputs are deterministic under
@@ -73,12 +99,13 @@ ffopt finalize --project projects/btah_full.yaml --audit path/to/audit
 ffopt validate --project projects/btah_full.yaml --machine local
 ```
 
-The legacy `python ffopt.py ...` entry point remains available during the
-migration. See [README_BTAH.md](README_BTAH.md) for the BTAH-specific history.
+`python -m ffopt ...` is equivalent to the installed `ffopt ...` command. See
+[README_BTAH.md](README_BTAH.md) for the BTAH-specific history.
 
 ## Development status
 
 This is an alpha research package. BTAH regression tests are authoritative.
 Bulk, sublimation, adsorption, and surface calculations now implement the
-property-evaluator interface; the next boundary is a public plugin registry for
-third-party property modules.
+property-evaluator interface. Third-party packages can add properties through
+the `ffopt.property_evaluators` entry-point group; see
+[Property plugins](docs/PROPERTY_PLUGINS.md).

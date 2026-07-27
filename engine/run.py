@@ -685,10 +685,10 @@ def main():
             print(f"{'='*60}")
             machine = "cluster" if "cluster" in config else "local"
             print("\nNext steps:")
-            print(f"  1. python ffopt.py nn --machine {machine}")
-            print(f"  2. python ffopt.py al --machine {machine}")
-            print("  3. python ffopt.py plot")
-            print(f"  4. python ffopt.py validate --machine {machine}")
+            print(f"  1. ffopt nn --machine {machine}")
+            print(f"  2. ffopt al --machine {machine}")
+            print("  3. ffopt plot")
+            print(f"  4. ffopt validate --machine {machine}")
         else:
             print("\nBO failed — no valid results found.")
             sys.exit(1)
@@ -696,7 +696,7 @@ def main():
         print("\n\nInterrupted — saving checkpoint...")
         optimizer._save_checkpoint()
         machine = "cluster" if "cluster" in config else "local"
-        print(f"Checkpoint saved. Resume with: python ffopt.py bo --machine {machine} --resume")
+        print(f"Checkpoint saved. Resume with: ffopt bo --machine {machine} --resume")
         sys.exit(130)
 
 

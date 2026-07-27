@@ -18,6 +18,8 @@ from typing import Any, Dict, Iterable, List, Set
 
 import yaml
 
+from .resources import resolve_config_reference
+
 
 class ConfigIncludeError(RuntimeError):
     """Raised when a composable config cannot be expanded."""
@@ -87,10 +89,7 @@ def _resolve_include(base_dir: Path, item: Any) -> Path:
         if "path" not in item:
             raise ConfigIncludeError(f"include mapping must contain 'path': {item}")
         item = item["path"]
-    rel = Path(str(item)).expanduser()
-    if not rel.is_absolute():
-        rel = base_dir / rel
-    return rel.resolve()
+    return resolve_config_reference(str(item), base=base_dir)
 
 
 def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:

@@ -9,7 +9,7 @@
 # For a lower-dimensional subspace, try ../bo/gp.yaml.
 # For sparse high-dimensional problems, try ../bo/saasbo.yaml.
 # For a quick restart after interruption:
-#   python ffopt.py bo --resume
+#   ffopt bo --resume
 
 optimization:
   # Optional path to a seed parameter file. Empty string means no manual seed.

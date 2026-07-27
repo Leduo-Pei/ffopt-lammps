@@ -22,6 +22,9 @@ LAMMPS paths, SLURM partitions, or conda activation commands.
 
 All project-relative paths are resolved from the directory containing
 `project.yaml`. A project can be cloned or moved without editing its paths.
+References beginning with `builtin:` resolve from the installed wheel's
+`share/ffopt/` data directory, allowing external projects to reuse versioned
+method modules without depending on the source checkout.
 
 ## Runtime boundary
 
@@ -34,6 +37,9 @@ NN, AL, or objective values.
 Bulk, sublimation, adsorption, and surface evaluators declare dependencies and
 compose only the tasks selected by a project. Sublimation, for example,
 declares bulk as a prerequisite and reuses its molecular-crystal energy.
+The public registry discovers third-party evaluators through Python package
+entry points and validates their names, declared outputs, and dependencies
+before any LAMMPS evaluation starts.
 
 ## Persistent execution graph
 

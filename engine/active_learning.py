@@ -1248,8 +1248,8 @@ class ActiveLearner:
         print(f"    {self.output_dir}/active_learning_history.json")
         print()
         print("  Next steps:")
-        print("    python ffopt.py validate               # validate best params")
-        print("    python ffopt.py plot                   # generate all figures")
+        print("    ffopt validate               # validate best params")
+        print("    ffopt plot                   # generate all figures")
         print("=" * 70)
 
 
