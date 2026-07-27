@@ -11,19 +11,19 @@ For normal work, edit only the `include` in `projects/project.yaml` and use one
 command style:
 
 ```powershell
-python ffopt.py show
-python ffopt.py status
-python ffopt.py doctor
-python ffopt.py bo --dry-run          # preview only; no calculation
-python ffopt.py bo --smoke            # one real local LAMMPS check
-python ffopt.py bo --machine local
-python ffopt.py bo --machine cluster --resume
-python ffopt.py sample --machine cluster
-python ffopt.py nn --machine local --no-validate
-python ffopt.py al --machine local
-python ffopt.py audit --machine local
-python ffopt.py validate --machine local
-python ffopt.py plot
+ffopt show
+ffopt status
+ffopt doctor
+ffopt bo --dry-run          # preview only; no calculation
+ffopt bo --smoke            # one real local LAMMPS check
+ffopt bo --machine local
+ffopt bo --machine cluster --resume
+ffopt sample --machine cluster
+ffopt nn --machine local --no-validate
+ffopt al --machine local
+ffopt audit --machine local
+ffopt validate --machine local
+ffopt plot
 ```
 
 The project file selects the system, property modules, BO/NN/AL methods and
@@ -47,7 +47,7 @@ machine profile. Expanded configs and new outputs are placed under
 
 The stages are intentionally independent. Completing BO does not automatically
 start NN, and completing NN does not automatically start AL. The user inspects
-`python ffopt.py status` and explicitly starts the next stage.
+`ffopt status` and explicitly starts the next stage.
 
 The default ANN module uses a low-noise core plus a wider BO trend buffer:
 
@@ -58,7 +58,7 @@ The default ANN module uses a low-noise core plus a wider BO trend buffer:
 
 Additional audited or sampled CSV files are listed once under
 `stages.nn.additional_core_files` in the project file. The same data contract
-is then reused by every `ffopt.py nn` invocation.
+is then reused by every `ffopt nn` invocation.
 
 ## Current Property Modules
 

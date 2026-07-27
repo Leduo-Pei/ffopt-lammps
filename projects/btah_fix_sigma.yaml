@@ -20,7 +20,7 @@ stages:
     global_fraction: 0.50
     design_seed: 20260714
   # NN inputs are intentionally omitted until the corrected CHARMM BO and
-  # three-seed sampling stages finish. ffopt.py will then discover the newest
+  # three-seed sampling stages finish. ffopt will then discover the newest
   # compatible run under this clean project root.
 
 overrides:

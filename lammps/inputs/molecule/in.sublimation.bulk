@@ -1,4 +1,4 @@
-# in.sublimation.bulk -- BTAH bulk 0 K energy for sublimation proxy
+# in.sublimation.bulk -- molecular-crystal 0 K energy for sublimation proxy
 # Prints: DATA_SUB_BULK: <pe_min>
 units           real
 dimension       3

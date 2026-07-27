@@ -1,4 +1,4 @@
-# in.sublimation.single -- isolated BTAH molecule 0 K energy for sublimation proxy
+# in.sublimation.single -- isolated molecule 0 K energy for sublimation proxy
 # Prints: DATA_SUB_SINGLE: <pe_min>
 units           real
 dimension       3

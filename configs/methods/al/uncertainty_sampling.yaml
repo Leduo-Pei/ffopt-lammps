@@ -1,8 +1,8 @@
 # Active-learning module.
 #
 # AL is optional. You can run only BO, inspect results, then later run:
-#   python ffopt.py nn
-#   python ffopt.py al
+#   ffopt nn
+#   ffopt al
 
 active_learning:
   enabled: true

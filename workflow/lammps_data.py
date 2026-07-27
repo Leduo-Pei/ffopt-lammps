@@ -60,6 +60,7 @@ class LammpsDataSummary:
     molecule_count: int | None
     total_charge: float | None
     atom_types: list[AtomTypeSummary]
+    section_styles: dict[str, str]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -69,6 +70,7 @@ class LammpsDataSummary:
             "declared_counts": self.declared_counts,
             "molecule_count": self.molecule_count,
             "total_charge": self.total_charge,
+            "section_styles": self.section_styles,
             "atom_types": [item.to_dict() for item in self.atom_types],
         }
 
@@ -114,6 +116,7 @@ def inspect_lammps_data(path: str | Path) -> LammpsDataSummary:
     atom_ids: set[int] = set()
     bond_edges: list[tuple[int, int]] = []
     atom_style: str | None = None
+    section_styles: dict[str, str] = {}
     section: str | None = None
 
     for line in lines:
@@ -122,6 +125,8 @@ def inspect_lammps_data(path: str | Path) -> LammpsDataSummary:
             section = header
             if header == "Atoms":
                 atom_style = qualifier.lower() if qualifier else None
+            elif qualifier:
+                section_styles[header] = qualifier.lower()
             continue
         columns, comment = _numeric_payload(line)
         if not columns or not columns[0].lstrip("+-").isdigit():
@@ -213,4 +218,5 @@ def inspect_lammps_data(path: str | Path) -> LammpsDataSummary:
         ),
         total_charge=sum(charge_values) if charge_values else None,
         atom_types=summaries,
+        section_styles=section_styles,
     )

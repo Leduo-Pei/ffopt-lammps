@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ffopt-lammps"
-version = "0.1.0a1"
+version = "0.1.0a2"
 description = "Restartable force-field parameter optimization with LAMMPS, Bayesian optimization, surrogate models, and active learning."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -45,6 +45,10 @@ dev = ["pytest>=8.0", "build>=1.2", "ruff>=0.6"]
 [project.scripts]
 ffopt = "ffopt.cli:main"
 
+# Third-party packages may expose PropertyEvaluator instances, classes, or
+# zero-argument factories under this entry-point group.
+[project.entry-points."ffopt.property_evaluators"]
+
 [project.urls]
 Repository = "https://github.com/Leduo-Pei/ffopt-lammps"
 Issues = "https://github.com/Leduo-Pei/ffopt-lammps/issues"
@@ -59,6 +63,14 @@ workflow = "workflow"
 utils = "utils"
 viz = "viz"
 slurm = "slurm"
+
+[tool.setuptools.data-files]
+"share/ffopt/configs/machines" = ["configs/machines/*.yaml"]
+"share/ffopt/configs/methods/bo" = ["configs/methods/bo/*.yaml"]
+"share/ffopt/configs/methods/nn" = ["configs/methods/nn/*.yaml"]
+"share/ffopt/configs/methods/al" = ["configs/methods/al/*.yaml"]
+"share/ffopt/lammps/inputs/bulk" = ["lammps/inputs/bulk/*"]
+"share/ffopt/lammps/inputs/molecule" = ["lammps/inputs/molecule/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
