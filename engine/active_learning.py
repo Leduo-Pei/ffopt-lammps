@@ -88,13 +88,15 @@ class ActiveLearner:
                  nn_dir:       str,
                  output_dir:   str,
                  no_validate:  bool = False,
-                 save_traj:    bool = False):
+                 save_traj:    bool = False,
+                 resume:       bool = False):
         self.config      = config
         self.bo_dir      = bo_dir
         self.nn_dir      = nn_dir
         self.output_dir  = output_dir
         self.no_validate = no_validate
         self.save_traj   = save_traj
+        self.resume      = resume
 
         # -- active_learning config --------------------------------------------
         al_cfg = config["active_learning"]
@@ -194,6 +196,55 @@ class ActiveLearner:
     # Main entry point                                                        #
     # ====================================================================== #
 
+    def _restore_progress(self, initial_data: pd.DataFrame):
+        """Recover the last fully recorded AL round and its trained model."""
+        all_data = initial_data
+        start_round = 1
+        model_dir = self.nn_dir
+        early_stopped = False
+        history_path = os.path.join(
+            self.output_dir, "active_learning_history.json"
+        )
+        if not self.resume or not os.path.exists(history_path):
+            return all_data, start_round, model_dir, early_stopped
+
+        with open(history_path, encoding="utf-8") as handle:
+            history_document = json.load(handle)
+        self._history = list(history_document.get("rounds", []))
+        completed_rounds = [
+            int(entry["round"])
+            for entry in self._history
+            if int(entry.get("n_new_evals", 0)) > 0
+            and os.path.exists(os.path.join(
+                self.output_dir,
+                f"data_round_{int(entry['round'])}",
+                "all_results.csv",
+            ))
+        ]
+        if completed_rounds:
+            last_round = max(completed_rounds)
+            data_path = os.path.join(
+                self.output_dir,
+                f"data_round_{last_round}",
+                "all_results.csv",
+            )
+            all_data = pd.read_csv(data_path)
+            round_model = os.path.join(
+                self.output_dir, f"nn_round_{last_round}"
+            )
+            if os.path.exists(os.path.join(round_model, "forward_nn.pt")):
+                model_dir = round_model
+            start_round = last_round + 1
+            print(
+                f"  Resumed completed AL round {last_round}: "
+                f"{len(all_data)} accumulated rows"
+            )
+        early_stopped = bool(history_document.get("early_stopped", False))
+        if early_stopped or int(history_document.get("final_round", 0)) >= self.n_rounds:
+            start_round = self.n_rounds + 1
+            print("  AL history is already complete; rebuilding final artifacts only")
+        return all_data, start_round, model_dir, early_stopped
+
     def run(self):
         t0 = time.time()
         mf  = self.config["manifest"]
@@ -212,6 +263,7 @@ class ActiveLearner:
         print(f"  Sampling     : {self.candidate_sampling}")
         print(f"  Threshold    : {self.uncertainty_threshold}  (max ensemble std)")
         print(f"  Obj bias     : {self.objective_bias}  (avoid poor predicted basins)")
+        print(f"  Resume       : {self.resume}")
         print("=" * 70)
 
         # -- Load initial BO data ---------------------------------------------
@@ -219,17 +271,24 @@ class ActiveLearner:
         all_data_df = self._load_bo_csv()
         n_bo = len(all_data_df)
         print(f"  BO valid rows: {n_bo}")
+
+        all_data_df, start_round, model_dir, early_stopped = (
+            self._restore_progress(all_data_df)
+        )
+
         self._configure_sampling_bounds(all_data_df)
 
         # Snapshot round-0 data (BO only, no AL yet)
         round0_dir = os.path.join(self.output_dir, "data_round_0")
-        os.makedirs(round0_dir, exist_ok=True)
-        all_data_df.to_csv(os.path.join(round0_dir, "all_results.csv"), index=False)
+        round0_path = os.path.join(round0_dir, "all_results.csv")
+        if start_round == 1 or not os.path.exists(round0_path):
+            os.makedirs(round0_dir, exist_ok=True)
+            all_data_df.to_csv(round0_path, index=False)
 
         # -- Load initial ensemble --------------------------------------------
         print("\nLoading initial ensemble")
-        pt_path = os.path.join(self.nn_dir, "forward_nn.pt")
-        hybrid_manifest = os.path.join(self.nn_dir, "hybrid_manifest.json")
+        pt_path = os.path.join(model_dir, "forward_nn.pt")
+        hybrid_manifest = os.path.join(model_dir, "hybrid_manifest.json")
         use_focused_hybrid = os.path.exists(hybrid_manifest)
         if not os.path.exists(pt_path):
             if use_focused_hybrid:
@@ -252,7 +311,7 @@ class ActiveLearner:
             if local_module_dir not in sys.path:
                 sys.path.insert(0, local_module_dir)
             from focused_hybrid_surrogate import FocusedHybridSurrogate
-            hybrid = FocusedHybridSurrogate(self.nn_dir)
+            hybrid = FocusedHybridSurrogate(model_dir)
             ensembles = hybrid.as_property_ensembles()
             feat_builder = None
             param_names = hybrid.parameter_columns
@@ -286,14 +345,19 @@ class ActiveLearner:
         derived_charge_enabled = bool(
             meta.get("derived_charge_feature", False)
         )
-        best_lammps_obj: float = float("inf")
-        last_nn_round_dir: Optional[str] = None
-        early_stopped = False
+        completed_objectives = [
+            float(entry["best_lammps_obj_so_far"])
+            for entry in self._history
+            if entry.get("best_lammps_obj_so_far") is not None
+            and np.isfinite(float(entry["best_lammps_obj_so_far"]))
+        ]
+        best_lammps_obj = min(completed_objectives, default=float("inf"))
+        last_nn_round_dir: Optional[str] = model_dir
 
         # Per-property target reference values for uncertainty normalisation
         targets_cfg = self.config["targets"]
 
-        for round_idx in range(1, self.n_rounds + 1):
+        for round_idx in range(start_round, self.n_rounds + 1):
             round_t0 = time.time()
             print(f"\n{'-'*60}")
             print(f"AL Round {round_idx}/{self.n_rounds}")
@@ -1241,6 +1305,9 @@ def main():
     parser.add_argument(
         "--save-traj", action="store_true",
         help="Save LAMMPS trajectory files during evaluation.")
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="Continue after the last fully recorded AL round.")
     args = parser.parse_args()
 
     # -- Load config -----------------------------------------------------------
@@ -1317,6 +1384,7 @@ def main():
         output_dir=args.output_dir,
         no_validate=args.no_validate,
         save_traj=args.save_traj,
+        resume=args.resume,
     )
     learner.run()
 

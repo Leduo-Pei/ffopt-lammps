@@ -289,14 +289,18 @@ class ForceFieldOptimizer:
         # ------------------------------------------------------------------ #
         # Work directory and checkpoint                                        #
         # ------------------------------------------------------------------ #
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         sys_name  = config["manifest"]["system_name"]
         run_root = config.get("workflow", {}).get("run_root", ".")
         self.run_root = os.path.abspath(os.path.expanduser(str(run_root)))
         os.makedirs(self.run_root, exist_ok=True)
-        self.work_dir = os.path.join(
-            self.run_root, f"bo_{sys_name}_{timestamp}"
-        )
+        configured_output = config.get("workflow", {}).get("bo_output_dir")
+        if configured_output:
+            self.work_dir = os.path.abspath(os.path.expanduser(str(configured_output)))
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.work_dir = os.path.join(
+                self.run_root, f"bo_{sys_name}_{timestamp}"
+            )
         os.makedirs(self.work_dir, exist_ok=True)
         save_config_snapshot(config, self.work_dir)
 

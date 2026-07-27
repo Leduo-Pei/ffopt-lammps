@@ -100,8 +100,25 @@ def main() -> None:
                 f"# {row['label']}\n"
             )
 
+    selected_replicates = Path(best["audit_directory"]) / "stability_replicates.csv"
+    selected_seeds = []
+    if selected_replicates.exists():
+        replicate_frame = pd.read_csv(selected_replicates)
+        if "candidate_id" in replicate_frame and "seed" in replicate_frame:
+            selected_seeds = sorted(
+                pd.to_numeric(
+                    replicate_frame.loc[
+                        replicate_frame["candidate_id"].astype(int).eq(
+                            int(best["candidate_id"])
+                        ),
+                        "seed",
+                    ],
+                    errors="coerce",
+                ).dropna().astype(int).unique().tolist()
+            )
+
     summary = {
-        "selection_rule": "minimum robust objective = three-seed mean + std",
+        "selection_rule": "minimum robust objective = audit-seed mean + std",
         "source_audit": str(best["audit_directory"]),
         "source_candidate_id": int(best["candidate_id"]),
         "single_seed_center_objective": float(best["center_objective"]),
@@ -110,7 +127,7 @@ def main() -> None:
         "robust_objective": float(best["objective"]),
         "n_success": int(best["n_success"]),
         "n_seeds": int(best["n_seeds"]),
-        "seeds": [101, 202, 303],
+        "seeds": selected_seeds,
         "raw_free_parameters": raw_params,
         "resolved_parameters": resolved,
     }

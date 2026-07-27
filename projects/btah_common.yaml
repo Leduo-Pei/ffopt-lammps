@@ -19,3 +19,16 @@ modules:
 overrides:
   workflow:
     active_properties: ["bulk_npt", "sublimation_proxy"]
+
+# End-to-end stage graph used by:
+#   ffopt run --project projects/btah_charge_only.yaml --machine local
+# Each stage has a deterministic directory under
+# runs/<project>/pipelines/<run-id>/ and can be resumed independently.
+pipeline:
+  stages: [bo, sample, nn, al, audit, finalize, validate]
+  audit:
+    # Final AL candidates re-evaluated before parameter export.
+    top_k: 8
+    # Independent LAMMPS seeds used to rank reproducibility.
+    seeds: [101, 202, 303]
+    # Omit max_workers to inherit parallel.max_workers from the machine profile.

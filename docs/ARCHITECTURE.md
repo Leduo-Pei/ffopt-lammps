@@ -30,33 +30,37 @@ The current alpha keeps the validated numerical implementation in the
 entry point delegates to that implementation, so migration does not change BO,
 NN, AL, or objective values.
 
-The next runtime boundary replaces `engine.lammps_interface.LAMMPSRunner` with
-property evaluators. Each evaluator will declare required files, construct
-LAMMPS tasks, parse typed results, and apply property-specific sanity checks.
-The workflow will execute only the evaluators selected by a project.
+`engine.lammps_interface.LAMMPSRunner` supplies validated LAMMPS primitives.
+Bulk, sublimation, adsorption, and surface evaluators declare dependencies and
+compose only the tasks selected by a project. Sublimation, for example,
+declares bulk as a prerequisite and reuses its molecular-crystal energy.
 
 ## Persistent execution graph
 
-The target workflow stores every task in `state.sqlite`. A task identity is a
-content hash of the project schema, resolved parameter vector, random seed,
-property evaluator version, and input assets. Completed task identities are
-immutable and reusable.
+Each named run stores stage records in `state.sqlite`. A stage identity hashes
+its scientific configuration, stage settings, and upstream identity. Verified
+completed artifacts are reused; changing sampling settings invalidates sampling
+and downstream stages while preserving BO. BO checkpoints, sampling replicate
+CSVs, and final audit replicate CSVs provide finer-grained continuation inside
+the expensive LAMMPS stages.
 
 The graph is:
 
 ```text
-preflight -> BO -> stability audit -> focused sampling -> surrogate
-          -> AL proposal -> LAMMPS validation -> final audit -> export
+BO -> focused sampling -> surrogate -> AL -> final audit -> export
+   -> trajectory-producing validation
 ```
 
-Local and SLURM schedulers consume the same task records. `ffopt run --resume`
-will submit only missing or retryable tasks, including after a wall-time kill.
+Local and SLURM backends consume the same stage records. `ffopt run --resume`
+runs only missing or retryable stages. SLURM mode records Job IDs and can either
+return after each submission or remain attached with `--watch`.
 
 ## Public artifacts
 
-Each run will contain a manifest, state database, tabular dataset, optimized
-parameters, patched LAMMPS data files, trajectories, structures, figures, and a
-validation report. Every artifact records configuration and code provenance.
+Each pipeline run contains a state database, BO and sampling tables, trained
+surrogate, AL history, robust audit, exported parameters, trajectories, final
+structures, and a validation report. Expanded configuration snapshots retain
+the scientific and execution inputs used by the run.
 
 ## Acceptance criteria
 
@@ -65,6 +69,5 @@ validation report. Every artifact records configuration and code provenance.
 - Machine-specific values never need to enter a project or Git history.
 - A new LAMMPS data file can be inspected without molecule-specific code.
 - Killing any stage and rerunning with `--resume` never repeats completed work.
-- Adding a new system eventually requires data, YAML, and optional LAMMPS
+- Adding a new system requires data, YAML, and optional LAMMPS
   templates, but no edits under `src/ffopt` or `engine`.
-

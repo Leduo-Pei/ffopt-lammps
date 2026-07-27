@@ -7,6 +7,9 @@
 # selected 98.5 kJ/mol reference. It is not a rigorously thermally corrected
 # standard-state sublimation enthalpy; no empirical offset is applied here.
 
+property_evaluators:
+  sublimation: {enabled: true}
+
 targets:
   esub_proxy:
     # User-selected fitting target for the PE-based proxy.

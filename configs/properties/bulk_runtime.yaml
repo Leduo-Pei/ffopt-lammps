@@ -5,6 +5,9 @@
 # target to the objective. Add bulk_targets.yaml when you want a/b/c/angles/rho
 # to participate in BO/NN/AL fitting.
 
+property_evaluators:
+  bulk: {enabled: true}
+
 lammps:
   bulk_input: "lammps/inputs/bulk/in.bulk.mol"
   surf_input: "lammps/inputs/surface/in.surf.charged"  # only used if compute_surface=true
@@ -41,4 +44,3 @@ output_mapping:
 surf_energy_sanity:
   min: 0.1
   max: 10.0
-
