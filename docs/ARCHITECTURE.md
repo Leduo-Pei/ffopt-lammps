@@ -1,79 +1,70 @@
 # FFOpt-LAMMPS architecture
 
-## Design rule
+## Public boundary
 
-The reusable runtime must not contain molecule names, atom-type labels, target
-values, or machine paths. BTAH is a regression project composed from the same
-interfaces that future molecular systems use.
+The portable scientific interface is one `ffopt.in` plus the referenced
+LAMMPS data files. Machine paths and scheduler resources live in the user's
+`~/.config/ffopt/machines.toml` and never enter the scientific project.
 
-## Configuration layers
+```text
+ffopt.in
+   -> lexer and typed input model
+   -> semantic and physical validation
+   -> compiled engine configuration
+   -> BO / sampling / ANN / AL / validation
+```
 
-FFOpt composes configuration in this order:
+The compiled configuration is saved as generated JSON for provenance. Users do
+not edit it. Project YAML recipes are no longer part of the public interface.
 
-1. Portable machine defaults from the project.
-2. System definition and parameter space.
-3. Selected property modules.
-4. BO, surrogate, and active-learning method modules.
-5. A user machine profile from `~/.config/ffopt/machines/`.
-6. Explicit project overrides.
+## Input compiler
 
-Scientific project files can therefore be committed and shared without local
-LAMMPS paths, SLURM partitions, or conda activation commands.
+`workflow.input_file` owns syntax and source-located errors. It recognizes
+parameter tables, global and per-type ranges/fixes, charge neutrality,
+properties, targets, workflows, and common method overrides.
 
-All project-relative paths are resolved from the directory containing
-`project.yaml`. A project can be cloned or moved without editing its paths.
-References beginning with `builtin:` resolve from the installed wheel's
-`share/ffopt/` data directory, allowing external projects to reuse versioned
-method modules without depending on the source checkout.
+`workflow.input_compiler` resolves data paths, checks type IDs against LAMMPS
+data, constructs the independent parameter space, assigns target-bearing
+properties to fitting, assigns targetless properties to final validation, and
+emits the established engine schema. Defaults are typed dictionaries in
+`workflow.defaults`, not duplicated recipe files.
 
-## Runtime boundary
+## Property execution
 
-The current alpha keeps the validated numerical implementation in the
-`engine`, `utils`, and `viz` compatibility packages. The installed `ffopt`
-entry point delegates to that implementation, so migration does not change BO,
-NN, AL, or objective values.
+`engine.lammps_interface.LAMMPSRunner` supplies the validated LAMMPS
+primitives. Bulk, sublimation, adsorption, and surface evaluators declare
+dependencies and are ordered by the property registry.
 
-`engine.lammps_interface.LAMMPSRunner` supplies validated LAMMPS primitives.
-Bulk, sublimation, adsorption, and surface evaluators declare dependencies and
-compose only the tasks selected by a project. Sublimation, for example,
-declares bulk as a prerequisite and reuses its molecular-crystal energy.
-The public registry discovers third-party evaluators through Python package
-entry points and validates their names, declared outputs, and dependencies
-before any LAMMPS evaluation starts.
+- Bulk always performs fixed-box minimization followed by finite-temperature
+  NPT equilibration and production.
+- Sublimation reuses the bulk NPT mean potential energy and combines it with a
+  minimized isolated-molecule potential energy.
+- A property with targets runs during fitting and validation.
+- A property without targets is enabled only by final validation.
+- Intermediate optimization evaluations do not save trajectories; final
+  validation does.
 
 ## Persistent execution graph
 
-Each named run stores stage records in `state.sqlite`. A stage identity hashes
-its scientific configuration, stage settings, and upstream identity. Verified
-completed artifacts are reused; changing sampling settings invalidates sampling
-and downstream stages while preserving BO. BO checkpoints, sampling replicate
-CSVs, and final audit replicate CSVs provide finer-grained continuation inside
-the expensive LAMMPS stages.
-
-The graph is:
+Each named run stores stage records in `state.sqlite`. A stage signature hashes
+its scientific configuration, stage settings, and upstream signature.
+Completed stages with verified artifacts are reused. The public graph is
+selected by the input, for example:
 
 ```text
-BO -> focused sampling -> surrogate -> AL -> final audit -> export
-   -> trajectory-producing validation
+BO -> focused sampling -> ANN -> AL -> validation
 ```
 
-Local and SLURM backends consume the same stage records. `ffopt run --resume`
-runs only missing or retryable stages. SLURM mode records Job IDs and can either
-return after each submission or remain attached with `--watch`.
-
-## Public artifacts
-
-Each pipeline run contains a state database, BO and sampling tables, trained
-surrogate, AL history, robust audit, exported parameters, trajectories, final
-structures, and a validation report. Expanded configuration snapshots retain
-the scientific and execution inputs used by the run.
+Audit and finalize remain optional stages. Validation can consume a BO, ANN,
+AL, or finalized optimum directly. Repeating `ffopt run ffopt.in` resumes a
+compatible run automatically. A changed scientific input is rejected unless
+the user starts an independent run with `--new`.
 
 ## Acceptance criteria
 
-- BTAH 41D, 27D, and 13D project composition remains unchanged numerically.
-- A project outside the source checkout resolves every path from its own root.
-- Machine-specific values never need to enter a project or Git history.
-- A new LAMMPS data file can be inspected without molecule-specific code.
-- Killing any stage and rerunning with `--resume` never repeats completed work.
-- Adding a new system requires data, YAML, and optional LAMMPS
-  templates, but no edits under `src/ffopt` or `engine`.
+- The BTAH charge-only and full inputs compile to 13 and 41 dimensions.
+- Adding or removing `fix epsilon sigma` is the only mode difference.
+- A targetless adsorption block never enters BO/ANN/AL labels.
+- A project generated by `ffopt init` contains no editable YAML configuration.
+- Local and SLURM hosts consume the same scientific input.
+- Killing a stage and repeating the same command does not repeat verified work.

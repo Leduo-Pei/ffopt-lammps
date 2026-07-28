@@ -11,9 +11,8 @@ Two methods:
             (faster, less rigorous, good for a quick ranking)
 
 Usage:
-  python utils/sensitivity.py --config configs/recipes/cluster_full.yaml --nn-dir nn_output_*/
-  python utils/sensitivity.py --config configs/recipes/cluster_full.yaml --nn-dir nn_output_*/ --method grad
-  python utils/sensitivity.py --config configs/recipes/cluster_full.yaml --nn-dir nn_output_*/ --n-samples 8192
+  python utils/sensitivity.py --config runs/.../_configs/project_local.json \\
+      --nn-dir runs/.../nn
 
 Outputs (in --nn-dir):
   sensitivity_sobol.csv  — Sobol total-order indices per parameter
@@ -33,8 +32,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy.stats import qmc
-import yaml
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from engine.config_loader import load_config
@@ -213,7 +210,7 @@ def plot_sensitivity(param_names: List[str],
 def main():
     parser = argparse.ArgumentParser(
         description="Parameter Sensitivity Analysis via trained NN ensemble")
-    parser.add_argument("--config",    default="configs/recipes/cluster_full.yaml")
+    parser.add_argument("--config", required=True)
     parser.add_argument("--nn-dir",    default=None,
                         help="NNSurrogate output dir with forward_nn.pt. "
                              "Default: auto-discover newest nn_output_*/")

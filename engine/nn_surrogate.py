@@ -4,7 +4,7 @@ nn_surrogate.py  |  Independent per-property Ensemble MLP surrogate  |  v8
 
 Architecture:
   raw BO params -> PhysicsFeatureBuilder -> {prop: EnsembleMLP_prop}
-  One EnsembleMLP per target property in the selected config YAML
+  One EnsembleMLP per target property in the compiled FFOpt configuration
   (a, b, c, alpha, beta,
   gamma_ang, density, surf_energy, ...).
   Each NN predicts the actual property value (not errors).
@@ -12,8 +12,8 @@ Architecture:
   Uncertainty: aggregated normalized std across all property NNs.
 
 Usage:
-  python nn_surrogate.py --config configs/recipes/cluster_full.yaml --bo-dir bo_*/
-  python nn_surrogate.py --config configs/recipes/cluster_full.yaml --bo-dir bo_* --no-validate
+  python -m engine.nn_surrogate --config runs/.../_configs/project_local.json \\
+      --bo-dir runs/.../bo
 
 Outputs (nn_output_SYSTEM_TIMESTAMP/):
   forward_nn.pt           - all per-property ensemble weights + metadata
@@ -42,8 +42,6 @@ import torch.nn as nn
 import torch.optim as optim
 from scipy.optimize import differential_evolution, minimize
 from scipy.stats import qmc
-import yaml
-
 from .config_loader import load_config as load_expanded_config, save_config_snapshot
 
 # `python -m engine.nn_surrogate` executes this file as __main__. Register its
@@ -1739,7 +1737,7 @@ def load_ensemble_from_file(
 def main():
     parser = argparse.ArgumentParser(
         description="NN Surrogate v8 - Independent per-property Ensemble MLP")
-    parser.add_argument("--config",      default="configs/recipes/cluster_full.yaml")
+    parser.add_argument("--config", required=True)
     parser.add_argument("--bo-dir",      default=None,
                         help="BO output dir; stable_results.csv preferred, "
                              "all_results.csv fallback.")

@@ -1,0 +1,92 @@
+# FFOpt BTAH example: optimize 13 independent charges.
+ffopt 1
+project btah_charge_only
+workflow bo sample nn al validate
+
+parameters
+    range epsilon factor 0.50 2.00
+    range sigma   factor 0.85 1.15
+    range charge  delta  0.30
+    charge_limit 1.0
+    neutrality derive bhN1
+    mixing geometric
+
+    # This is the only difference from the full-parameter example.
+    fix epsilon sigma
+
+    # id  label  epsilon(kcal/mol)  sigma(A)     charge(e)
+    type  1  bhN1  0.2000000142  3.2963252376  -0.609
+    type  2  bhHn  0.0473512033  0.3980865645   0.430
+    type  3  bhN2  0.2000000142  3.2963252376  -0.087
+    type  4  bhN3  0.2000000142  3.2963252376  -0.501
+    type  5  bhC2  0.0989999944  3.3141432470   0.087
+    type  6  bhH2  0.0300001052  2.4200365710   0.004
+    type  7  bhC1  0.0989999944  3.3141432470  -0.126
+    type  8  bhH1  0.0300001052  2.4200365710   0.011
+    type  9  bhC6  0.0989999944  3.3141432470  -0.104
+    type 10  bhH6  0.0300001052  2.4200365710   0.071
+    type 11  bhC5  0.0989999944  3.3141432470   0.049
+    type 12  bhH5  0.0300001052  2.4200365710   0.108
+    type 13  bhC4  0.0699999881  3.5500532624   0.174
+    type 14  bhC3  0.0699999881  3.5500532624   0.493
+end
+
+property bulk
+    data ../../data/bulk/BTAH_822_bulk.data
+    cells_in_data 8 2 2
+    temperature 300 K
+    pressure 1 atm
+    equilibration 20000
+    production 40000
+
+    target a         4.2422 A      weight 1.0 tolerance 0.1
+    target b        17.8270 A      weight 1.0 tolerance 0.3
+    target c        20.6850 A      weight 1.0 tolerance 0.3
+    target alpha    72.6300 degree weight 0.5 tolerance 1.0
+    target beta     87.1500 degree weight 0.5 tolerance 1.0
+    target gamma    86.2300 degree weight 0.5 tolerance 1.0
+    target density   1.3285 g/cm3  weight 1.0 tolerance 0.03
+end
+
+property sublimation
+    bulk ../../data/bulk/BTAH_822_bulk.data
+    single ../../data/molecule/BTAH_822_single.data
+    temperature 298.15 K
+    target 98.5 kJ/mol weight 0.3 tolerance 10.0
+end
+
+# No target: adsorption is skipped during fitting and run only by validate.
+property adsorption
+    data complex ../../data/adsorption/ad_complex.data
+    data slab ../../data/adsorption/ad_slab.data
+    data molecule ../../data/adsorption/ad_mol.data
+    protocol minimize
+    metal Au
+end
+
+bo
+    method turbo
+    initial_points 48
+    max_rounds 300
+    early_stop patience 20
+end
+
+sample
+    points 2000
+    centers 16
+    center_selection diverse
+    radii 0.010 0.020 0.035 0.050
+    global_fraction 0.0
+    seeds 101 202 303
+end
+
+nn
+    method ann
+    ensemble 8
+end
+
+al
+    acquisition uncertainty
+    rounds 2
+    candidates 20
+end

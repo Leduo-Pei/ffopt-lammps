@@ -6,16 +6,16 @@ import argparse
 import csv
 import importlib.util
 import json
+import math
 import os
 import shutil
 import subprocess
 import sys
-from datetime import datetime
+from collections.abc import Iterable
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
 
-import yaml
-
+from .lammps_data import inspect_lammps_data
 from .machine import (
     available_machine_profiles,
     build_machine_profile,
@@ -23,7 +23,6 @@ from .machine import (
     machine_path,
     save_machine_profile,
 )
-from .lammps_data import inspect_lammps_data
 from .project import (
     SOURCE_ROOT,
     Project,
@@ -33,18 +32,17 @@ from .project import (
     write_generated_config,
 )
 
-
-DEFAULT_PROJECT = "project.yaml"
+DEFAULT_PROJECT = "ffopt.in"
 
 
 def _timestamp() -> str:
-    return datetime.now().strftime("%Y%m%d_%H%M%S")
+    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
 def _run(command: list[object]) -> None:
     command = [str(item) for item in command]
     print("\n> " + subprocess.list2cmdline(command))
-    completed = subprocess.run(command, cwd=Path.cwd())
+    completed = subprocess.run(command, cwd=Path.cwd(), check=False)
     if completed.returncode:
         raise SystemExit(completed.returncode)
 
@@ -177,7 +175,7 @@ def _validate_nn_inputs(config: dict, bo_dir: Path, core_files: list[Path]) -> N
                         objective = float(row["objective"])
                     except (KeyError, TypeError, ValueError):
                         continue
-                    if objective == objective and abs(objective) != float("inf"):
+                    if math.isfinite(objective):
                         values.append(objective)
             return values
 
@@ -215,7 +213,8 @@ def _validate_nn_inputs(config: dict, bo_dir: Path, core_files: list[Path]) -> N
 
 
 def _common(args: argparse.Namespace) -> tuple[Project, str, Path]:
-    project = load_project(args.project)
+    selector = getattr(args, "input", None) or args.project
+    project = load_project(selector)
     os.chdir(project.root)
     machine = args.machine or project.default_machine
     return project, machine, write_generated_config(project, machine)
@@ -325,12 +324,17 @@ def cmd_run(args: argparse.Namespace) -> None:
     project, machine, config_path = _common(args)
     from .pipeline import PipelineRunner
 
+    run_id = args.run_id
+    if args.new and run_id == "default":
+        run_id = _timestamp()
+    auto_resume = project.runtime_config is not None and not args.new
+
     runner = PipelineRunner(
         project=project,
         machine=machine,
         config_path=config_path,
-        run_id=args.run_id,
-        resume=args.resume,
+        run_id=run_id,
+        resume=args.resume or auto_resume,
         dry_run=args.dry_run,
         watch=args.watch,
         poll_seconds=args.poll_seconds,
@@ -339,10 +343,13 @@ def cmd_run(args: argparse.Namespace) -> None:
     )
     outcome = runner.run()
     if outcome == "waiting":
-        print(
-            "A SLURM stage is active. Run the same command with --resume to "
-            "continue, or add --watch to advance automatically."
-        )
+        if project.runtime_config is not None:
+            print("A SLURM stage is active. Run the same command again to continue, or add --watch.")
+        else:
+            print(
+                "A SLURM stage is active. Run the same command with --resume to "
+                "continue, or add --watch to advance automatically."
+            )
     elif outcome == "completed":
         print(f"Pipeline completed: {runner.root}")
 
@@ -386,9 +393,20 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     if not lammps_files.get("compute_surface", False):
         lammps_files.pop("surf_input", None)
     visit_files(lammps_files, "lammps")
-    if config.get("sublimation", {}).get("enabled", False):
+    validation = config.get("validation", {})
+    validation_settings = validation.get("property_settings", {})
+    validation_evaluators = validation.get("property_evaluators", {})
+
+    def property_requested(name: str) -> bool:
+        return bool(
+            config.get(name, {}).get("enabled", False)
+            or validation_settings.get(name, {}).get("enabled", False)
+            or validation_evaluators.get(name, {}).get("enabled", False)
+        )
+
+    if property_requested("sublimation"):
         visit_files(config["sublimation"], "sublimation")
-    if config.get("adsorption", {}).get("enabled", False):
+    if property_requested("adsorption"):
         visit_files(config["adsorption"], "adsorption")
 
     if backend == "local":
@@ -397,7 +415,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
             gpu = bool(torch.cuda.is_available())
             detail = torch.cuda.get_device_name(0) if gpu else f"torch {torch.__version__}, CUDA unavailable"
             checks.append(("PyTorch CUDA", gpu, detail))
-        except Exception as exc:
+        except (ImportError, OSError, RuntimeError) as exc:
             checks.append(("PyTorch CUDA", False, str(exc)))
     else:
         gpu_request = int(config.get("cluster", {}).get("nn", {}).get("gpu", 0))
@@ -631,21 +649,30 @@ def cmd_audit(args: argparse.Namespace) -> None:
 
 def cmd_validate(args: argparse.Namespace) -> None:
     project, _, config_path = _common(args)
-    parameters = resolve_path(args.parameters) if args.parameters else _newest([
-        f"runs/{project.name}/**/final_summary.json",
-        f"runs/{project.name}/**/final_parameters.json",
-        f"runs/{project.name}/legacy/**/final_summary.json",
-        f"runs/{project.name}/legacy/**/final_parameters.json",
-    ])
-    if parameters is None:
-        raise SystemExit("No final parameter JSON found. Pass --parameters explicitly.")
     output = resolve_path(args.output_dir) if args.output_dir else project.run_root / f"validation_{_timestamp()}"
     command = _module(
         "engine.validate_final_parameters", "--config", config_path,
-        "--parameters", parameters, "--output-dir", output,
+        "--output-dir", output,
     )
+    if args.initial:
+        command.append("--initial")
+    else:
+        parameters = resolve_path(args.parameters) if args.parameters else _newest([
+            f"runs/{project.name}/**/final_summary.json",
+            f"runs/{project.name}/**/final_parameters.json",
+            f"runs/{project.name}/legacy/**/final_summary.json",
+            f"runs/{project.name}/legacy/**/final_parameters.json",
+        ])
+        if parameters is None:
+            raise SystemExit(
+                "No final parameter JSON found. Pass --parameters or --initial."
+            )
+        command.extend(["--parameters", parameters])
     if args.overwrite:
         command.append("--overwrite")
+    if args.dry_run:
+        _preview(command)
+        return
     _run(command)
 
 
@@ -681,7 +708,7 @@ def _add_context(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--project",
         default=DEFAULT_PROJECT,
-        help="Project YAML (default: project.yaml, with projects/project.yaml compatibility).",
+        help="FFOpt command input (default: ffopt.in).",
     )
     parser.add_argument("--machine", default=None, help="Project or user execution profile; defaults to the project setting.")
 
@@ -695,11 +722,10 @@ def cmd_machine(args: argparse.Namespace) -> None:
         profile = load_machine_profile(args.name)
         if profile is None:
             raise SystemExit(f"Machine profile not found: {machine_path(args.name)}")
-        print(yaml.safe_dump(
+        print(json.dumps(
             {key: value for key, value in profile.items() if not key.startswith("_")},
-            sort_keys=False,
-            allow_unicode=True,
-        ).rstrip())
+            indent=2,
+        ))
         return
     profile = build_machine_profile(
         name=args.name,
@@ -746,6 +772,80 @@ def cmd_inspect(args: argparse.Namespace) -> None:
             f"{item.type_id:4d}  {item.label:16.16s}  {item.atom_count:5d}  "
             f"{mass:12s}  {pair:23.23s}  {charge_range}"
         )
+
+
+def cmd_check(args: argparse.Namespace) -> None:
+    """Parse and semantically validate one public command input."""
+    project = load_project(args.input)
+    if project.runtime_config is None:
+        raise SystemExit("ffopt check expects a .in/.inp command file")
+    compilation = project.compilation
+    print(f"OK: {project.path}")
+    print(f"Project               : {project.name}")
+    print(f"Free dimensions       : {compilation.dimensions}")
+    print(f"Fitted properties     : {', '.join(compilation.fitted_properties) or '-'}")
+    print(f"Validation-only       : {', '.join(compilation.validation_properties) or '-'}")
+    print(f"Workflow              : {' -> '.join(project.data['pipeline']['stages'])}")
+
+
+def cmd_explain(args: argparse.Namespace) -> None:
+    """Explain the expanded parameter/property plan without writing a config."""
+    project = load_project(args.input)
+    if project.runtime_config is None:
+        raise SystemExit("ffopt explain expects a .in/.inp command file")
+    compilation = project.compilation
+    config = project.runtime_config
+    free = []
+    fixed = []
+    for atom_type in config["atom_types"]:
+        for name, value in atom_type["params"].items():
+            label = f"{atom_type['label']}_{name}"
+            (free if isinstance(value, dict) else fixed).append(label)
+    neutrality = config["charge"]["neutrality_constraint"]
+    derived = "-"
+    if neutrality.get("enabled"):
+        type_id = neutrality.get("derive_from_type")
+        atom_type = next(item for item in config["atom_types"] if item["type"] == type_id)
+        derived = f"{atom_type['label']}_charge"
+        free = [name for name in free if name != derived]
+    print(f"Input                 : {project.path}")
+    print(f"Project               : {project.name}")
+    print(f"Workflow              : {' -> '.join(project.data['pipeline']['stages'])}")
+    print(f"Independent dimensions: {compilation.dimensions}")
+    print(f"Free parameters       : {len(free)}")
+    print(f"Fixed parameters      : {len(fixed)}")
+    print(f"Derived parameter     : {derived}")
+    mixing = config["pair_params"]["mixing_rule"]
+    mixing_detail = (
+        "epsilon geometric, sigma geometric"
+        if mixing == "geometric"
+        else "epsilon geometric, sigma arithmetic"
+    )
+    print(f"LAMMPS mixing rule    : {mixing} ({mixing_detail})")
+    print("\nProperties:")
+    for prop in compilation.document.properties:
+        role = "fit + final validation" if prop.fitted else "final validation only"
+        protocol = prop.settings.get("protocol")
+        if prop.name == "bulk":
+            protocol = "minimize + NPT"
+        elif prop.name == "sublimation":
+            protocol = "bulk NPT PE + single minimize PE"
+        print(f"  {prop.name:14s} {role:24s} protocol={protocol or 'module default'}")
+        for target in prop.targets:
+            target_name = (
+                "sublimation_enthalpy"
+                if target.name == "esub_proxy"
+                else target.name
+            )
+            print(
+                f"    target {target_name}={target.value:g} "
+                f"{target.unit} weight={target.weight:g}"
+            )
+    sample = project.data.get("stages", {}).get("sample", {})
+    if "sample" in project.data["pipeline"]["stages"]:
+        seeds = sample.get("seeds", [])
+        points = int(sample.get("n_points", 0))
+        print(f"\nSampling              : {points} points x {len(seeds)} seeds")
 
 
 def cmd_plugins(args: argparse.Namespace) -> None:
@@ -799,9 +899,9 @@ def cmd_init(args: argparse.Namespace) -> None:
         print(f"WARNING: {warning}")
     print("\nNext:")
     print(f"  cd {result.root}")
-    print("  ffopt show --project project.yaml")
-    print("  ffopt doctor --project project.yaml --machine local")
-    print("  ffopt run --project project.yaml --machine local --dry-run")
+    print("  ffopt check ffopt.in")
+    print("  ffopt explain ffopt.in")
+    print("  ffopt run ffopt.in --dry-run")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -815,7 +915,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init.add_argument("name", help="Project and system name.")
     init.add_argument("--data-file", required=True, help="Bulk molecular-crystal data file.")
-    init.add_argument("--single-data", help="Isolated molecule data file for esub_proxy.")
+    init.add_argument(
+        "--single-data",
+        help="Isolated molecule data file for the sublimation-enthalpy estimate.",
+    )
     init.add_argument("--destination", help="Output directory; defaults to NAME.")
     init.add_argument(
         "--target", action="append", required=True,
@@ -848,6 +951,12 @@ def build_parser() -> argparse.ArgumentParser:
     inspect.add_argument("data_file")
     inspect.add_argument("--json", action="store_true", help="Emit a machine-readable summary.")
     inspect.set_defaults(function=cmd_inspect)
+    check = sub.add_parser("check", help="Validate one ffopt.in file without running LAMMPS.")
+    check.add_argument("input")
+    check.set_defaults(function=cmd_check)
+    explain = sub.add_parser("explain", help="Explain parameters, properties, and workflow in ffopt.in.")
+    explain.add_argument("input")
+    explain.set_defaults(function=cmd_explain)
     plugins = sub.add_parser("plugins", help="List built-in and installed property evaluators.")
     plugins.add_argument("--json", action="store_true")
     plugins.set_defaults(function=cmd_plugins)
@@ -885,9 +994,14 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser(
         "run", help="Run the restartable BO -> sampling -> NN -> AL pipeline."
     )
+    run.add_argument("input", nargs="?", help="Public .in input file (recommended).")
     _add_context(run)
     run.add_argument("--run-id", default="default")
     run.add_argument("--resume", action="store_true")
+    run.add_argument(
+        "--new", action="store_true",
+        help="Start an independent timestamped run instead of auto-resuming.",
+    )
     run.add_argument("--dry-run", action="store_true")
     run.add_argument(
         "--watch", action="store_true",
@@ -979,9 +1093,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     validate = sub.add_parser("validate", help="Run final trajectory-producing LAMMPS validation.")
     _add_context(validate)
-    validate.add_argument("--parameters")
+    validation_source = validate.add_mutually_exclusive_group()
+    validation_source.add_argument("--parameters")
+    validation_source.add_argument(
+        "--initial",
+        action="store_true",
+        help="Use initial type values from ffopt.in.",
+    )
     validate.add_argument("--output-dir")
     validate.add_argument("--overwrite", action="store_true")
+    validate.add_argument("--dry-run", action="store_true")
     validate.set_defaults(function=cmd_validate)
 
     plot = sub.add_parser("plot", help="Generate BO/NN figures.")

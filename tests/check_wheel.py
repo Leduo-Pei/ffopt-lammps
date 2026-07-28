@@ -7,16 +7,12 @@ import zipfile
 
 wheel = Path(sys.argv[1])
 required_suffixes = (
-    "share/ffopt/configs/machines/local.yaml",
-    "share/ffopt/configs/machines/cluster.yaml",
-    "share/ffopt/configs/methods/bo/auto.yaml",
-    "share/ffopt/configs/methods/bo/portable.yaml",
-    "share/ffopt/configs/methods/nn/mlp_ensemble.yaml",
-    "share/ffopt/configs/methods/nn/portable.yaml",
-    "share/ffopt/configs/methods/al/uncertainty_sampling.yaml",
-    "share/ffopt/configs/methods/al/portable.yaml",
     "share/ffopt/lammps/inputs/bulk/in.bulk.mol",
+    "share/ffopt/lammps/inputs/molecule/in.sublimation.bulk",
     "share/ffopt/lammps/inputs/molecule/in.sublimation.single",
+    "share/ffopt/lammps/inputs/adsorption/in.complex",
+    "share/ffopt/lammps/inputs/adsorption/in.slab",
+    "share/ffopt/lammps/inputs/adsorption/in.mol",
 )
 with zipfile.ZipFile(wheel) as archive:
     names = archive.namelist()

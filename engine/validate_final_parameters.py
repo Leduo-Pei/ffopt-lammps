@@ -10,15 +10,90 @@ from pathlib import Path
 
 import pandas as pd
 
-from .config_loader import load_config
+from .config_loader import deep_merge, load_config
 from .lammps_interface import LAMMPSRunner
 from .optimizer import ForceFieldOptimizer
+
+
+def _load_parameters(path: Path) -> dict[str, float]:
+    """Accept final summaries, NN/AL result JSON, or BO text exports."""
+    if path.suffix.lower() == ".txt":
+        values: dict[str, float] = {}
+        for raw in path.read_text(encoding="utf-8-sig").splitlines():
+            body = raw.split("#", 1)[0].strip()
+            if not body or "=" not in body:
+                continue
+            name, value = body.split("=", 1)
+            values[name.strip()] = float(value.strip())
+        return values
+
+    with path.open(encoding="utf-8") as handle:
+        document = json.load(handle)
+    if "raw_free_parameters" in document:
+        raw = document["raw_free_parameters"]
+    elif isinstance(document.get("best"), dict):
+        raw = document["best"].get("params", document["best"])
+    elif isinstance(document.get("best_lammps"), dict):
+        raw = document["best_lammps"].get("params", document["best_lammps"])
+    else:
+        raise ValueError(
+            f"Unsupported parameter document {path}; expected raw_free_parameters "
+            "or a best.params record"
+        )
+    return {key: float(value) for key, value in raw.items()}
+
+
+def _parameter_space(config: dict) -> list[tuple[str, float, float]]:
+    """Return the free space, allowing a fully fixed validation-only input."""
+    try:
+        return ForceFieldOptimizer._build_param_space(config)
+    except ValueError as exc:
+        if "No free BO parameters found" not in str(exc):
+            raise
+        return []
+
+
+def _initial_parameters(config: dict) -> dict[str, float]:
+    """Extract the user-entered initial value for every free parameter."""
+    names = {name for name, _, _ in _parameter_space(config)}
+    values: dict[str, float] = {}
+    for atom_type in config["atom_types"]:
+        label = atom_type["label"]
+        for parameter, spec in atom_type["params"].items():
+            name = f"{label}_{parameter}"
+            if name not in names or not isinstance(spec, dict):
+                continue
+            initial = spec.get("init")
+            if initial is None:
+                initial = (float(spec["min"]) + float(spec["max"])) / 2.0
+            values[name] = float(initial)
+    for pair in config.get("pair_params", {}).get("explicit_pairs", []):
+        type_1, type_2 = pair["types"]
+        for parameter in ("epsilon", "sigma"):
+            name = f"cross_{type_1}_{type_2}_{parameter}"
+            if name not in names:
+                continue
+            spec = pair[parameter]
+            initial = spec.get("init")
+            if initial is None:
+                initial = (float(spec["min"]) + float(spec["max"])) / 2.0
+            values[name] = float(initial)
+    missing = sorted(names - values.keys())
+    if missing:
+        raise ValueError(f"Initial values are missing from the config: {missing}")
+    return values
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
-    parser.add_argument("--parameters", required=True, type=Path)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--parameters", type=Path)
+    source.add_argument(
+        "--initial",
+        action="store_true",
+        help="Validate the initial type values compiled from ffopt.in.",
+    )
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
@@ -32,15 +107,19 @@ def main() -> None:
     args.output_dir.mkdir(parents=True)
 
     config = load_config(args.config)
-    with open(args.parameters, encoding="utf-8") as fh:
-        document = json.load(fh)
-    params = {
-        key: float(value)
-        for key, value in document["raw_free_parameters"].items()
+    validation = config.get("validation", {})
+    overrides = {
+        "property_evaluators": validation.get("property_evaluators", {}),
     }
-    expected = [
-        item[0] for item in ForceFieldOptimizer._build_param_space(config)
-    ]
+    overrides.update(validation.get("property_settings", {}))
+    config = deep_merge(config, overrides)
+    if args.initial:
+        params = _initial_parameters(config)
+        parameter_source = "initial force-field values from ffopt.in"
+    else:
+        params = _load_parameters(args.parameters)
+        parameter_source = str(args.parameters.resolve())
+    expected = [item[0] for item in _parameter_space(config)]
     missing = [name for name in expected if name not in params]
     if missing:
         raise ValueError(f"Final parameter file is missing: {missing}")
@@ -61,17 +140,20 @@ def main() -> None:
             "property": name,
             "value": float(value),
             "reference": reference,
-            "unit": target.get("unit", ""),
+            "unit": target.get(
+                "unit", validation.get("property_units", {}).get(name, "")
+            ),
             "error_percent": result.per_property_error.get(name),
         })
     pd.DataFrame(rows).to_csv(
         args.output_dir / "computed_properties.csv", index=False
     )
+    objective = float(result.objective) if config.get("targets") else None
     summary = {
         "success": True,
-        "objective": float(result.objective),
+        "objective": objective,
         "config": str(Path(args.config).resolve()),
-        "parameters": str(args.parameters.resolve()),
+        "parameters": parameter_source,
         "properties": result.properties,
         "per_property_error": result.per_property_error,
     }
@@ -79,7 +161,7 @@ def main() -> None:
         json.dump(summary, fh, indent=2)
 
     print(f"success   : {result.success}")
-    print(f"objective : {result.objective:.9f}")
+    print(f"objective : {objective:.9f}" if objective is not None else "objective : n/a (no targets)")
     for row in rows:
         print(
             f"{row['property']:24s} {row['value']: .9f} "

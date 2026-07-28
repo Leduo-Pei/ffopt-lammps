@@ -9,6 +9,13 @@ from typing import Any
 
 import yaml
 
+try:  # Python 3.11+
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10
+    import tomli as tomllib
+
+import tomli_w
+
 
 def config_home() -> Path:
     """Return the FFOpt user configuration directory.
@@ -24,33 +31,53 @@ def config_home() -> Path:
 
 
 def machine_dir() -> Path:
+    """Legacy per-profile YAML directory, retained for read compatibility."""
     return config_home() / "machines"
 
 
 def machine_path(name: str) -> Path:
     if not name or any(char in name for char in "\\/:"):
         raise ValueError(f"Invalid machine profile name: {name!r}")
-    return machine_dir() / f"{name}.yaml"
+    return config_home() / "machines.toml"
+
+
+def _machine_document() -> dict[str, Any]:
+    path = config_home() / "machines.toml"
+    if not path.exists():
+        return {"machines": {}}
+    with path.open("rb") as handle:
+        data = tomllib.load(handle)
+    if not isinstance(data, dict) or not isinstance(data.get("machines", {}), dict):
+        raise ValueError(f"Invalid FFOpt machine configuration: {path}")
+    data.setdefault("machines", {})
+    return data
 
 
 def load_machine_profile(name: str) -> dict[str, Any] | None:
     path = machine_path(name)
-    if not path.exists():
-        return None
-    with path.open(encoding="utf-8") as handle:
-        data = yaml.safe_load(handle) or {}
+    document = _machine_document()
+    data = document["machines"].get(name)
+    if data is None:
+        legacy_path = machine_dir() / f"{name}.yaml"
+        if not legacy_path.exists():
+            return None
+        with legacy_path.open(encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+        path = legacy_path
     if not isinstance(data, dict):
-        raise ValueError(f"Machine profile must contain a YAML mapping: {path}")
+        raise ValueError(f"Machine profile must contain a mapping: {path}")
+    data = dict(data)
     data.setdefault("machine", {})["name"] = name
     data["_machine_profile_path"] = str(path)
     return data
 
 
 def available_machine_profiles() -> list[str]:
+    names = set(_machine_document()["machines"])
     directory = machine_dir()
-    if not directory.exists():
-        return []
-    return sorted(path.stem for path in directory.glob("*.yaml"))
+    if directory.exists():
+        names.update(path.stem for path in directory.glob("*.yaml"))
+    return sorted(names)
 
 
 def _detect_lammps() -> str:
@@ -138,16 +165,17 @@ def save_machine_profile(
     overwrite: bool = False,
 ) -> Path:
     path = machine_path(name)
-    if path.exists() and not overwrite:
+    document = _machine_document()
+    machines = document["machines"]
+    if name in machines and not overwrite:
         raise FileExistsError(
-            f"Machine profile already exists: {path}. Pass --force to replace it."
+            f"Machine profile {name!r} already exists in {path}. Pass --force to replace it."
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     serializable = {
         key: value for key, value in profile.items() if not key.startswith("_")
     }
-    with path.open("w", encoding="utf-8", newline="\n") as handle:
-        handle.write("# User-specific FFOpt execution profile.\n")
-        yaml.safe_dump(serializable, handle, sort_keys=False, allow_unicode=True)
+    machines[name] = serializable
+    with path.open("wb") as handle:
+        handle.write(tomli_w.dumps(document).encode("utf-8"))
     return path
-

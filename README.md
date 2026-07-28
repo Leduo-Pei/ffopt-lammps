@@ -1,28 +1,31 @@
 # FFOpt-LAMMPS
 
-FFOpt-LAMMPS is a restartable workflow for fitting molecular force-field
-parameters to experimental observables. It combines LAMMPS evaluations,
-Bayesian optimization, stability-aware sampling, surrogate modelling, active
-learning, and final trajectory-producing validation.
+FFOpt-LAMMPS fits molecular force-field parameters to experimental properties
+with LAMMPS, Bayesian optimization, stability-aware sampling, ANN surrogates,
+active learning, and final trajectory-producing validation.
 
-The current alpha release uses the BTAH workflow as its regression example.
-The migration is deliberately preserving the validated BO/NN/AL numerical
-implementations while their project, machine, property, and scheduler
-boundaries are made molecule-independent.
+The public interface is one command file. A calculation project contains only
+the input and its LAMMPS data files:
 
-## Install from a clone
+```text
+my_project/
+|-- ffopt.in
+|-- data/
+`-- runs/                 # generated automatically
+```
+
+## Install
 
 ```bash
 python -m pip install -e ".[full]"
-ffopt show --project projects/project.yaml
-ffopt doctor --project projects/project.yaml --machine local
 ```
 
-CUDA-enabled PyTorch should be installed for the user's CUDA version before
-installing the package extras. LAMMPS is an external dependency and is never
-bundled with FFOpt.
+LAMMPS is an external dependency. Install a CUDA build of PyTorch separately
+when GPU ANN/AL training is required.
 
-## Configure a machine once
+## Configure the machine once
+
+Machine settings do not belong in the scientific input:
 
 ```bash
 ffopt machine configure --name local --backend local \
@@ -30,13 +33,10 @@ ffopt machine configure --name local --backend local \
 ffopt machine show --name local
 ```
 
-Machine profiles are stored outside the repository under
-`~/.config/ffopt/machines/`. Projects contain scientific inputs only.
+Profiles are stored in `~/.config/ffopt/machines.toml`. The same `ffopt.in`
+can therefore run locally or with a named SLURM profile.
 
-## Start a molecular project
-
-`ffopt init` inspects atom types, masses, Pair Coeffs, and per-type charges,
-then creates a portable project outside the FFOpt source checkout:
+## Create a project
 
 ```bash
 ffopt init my_crystal \
@@ -45,67 +45,93 @@ ffopt init my_crystal \
   --cells 2 2 2 \
   --mode full \
   --target a=10.1,1.0,A \
-  --target b=12.3,1.0,A \
   --target density=1.25,1.0,g/cm3 \
-  --target esub_proxy=80.0,0.3,kJ/mol
+  --target sublimation=80.0,0.3,kJ/mol
+```
 
+`ffopt init` writes every type, epsilon, sigma, charge, range, target, and
+workflow stage explicitly into `ffopt.in`. It does not create a tree of YAML
+recipes. The inferred values are a draft and must be reviewed by the user.
+
+```bash
 cd my_crystal
-ffopt doctor --project project.yaml --machine local
-ffopt run --project project.yaml --machine local --dry-run
+ffopt check ffopt.in
+ffopt explain ffopt.in
+ffopt run ffopt.in --dry-run
+ffopt run ffopt.in
 ```
 
-The generated project owns its data, LAMMPS inputs, system ranges, and target
-modules. Reusable BO/NN/AL and machine defaults use `builtin:` resources shipped
-inside the wheel. See [New molecular projects](docs/NEW_PROJECT.md) for current
-force-field assumptions and range rules.
+Running the same command again automatically resumes the latest compatible
+pipeline. If the scientific input changed, FFOpt refuses to mix checkpoints;
+start an independent run with `ffopt run ffopt.in --new`.
 
-## Run the complete workflow
+For a direct calculation at the user-entered type values, set
+`workflow validate`. No BO result is required; all requested properties are
+reported and trajectories are saved under the validation run directory.
+The equivalent one-off command is `ffopt validate --project ffopt.in --initial`.
 
-The normal interface is one command. Outputs are deterministic under
-`runs/<project>/pipelines/<run-id>/`, and `state.sqlite` records each stage,
-attempt, artifact set, and SLURM job ID.
+## Parameters
 
-```bash
-# Preview every stage without running LAMMPS.
-ffopt run --project projects/btah_charge_only.yaml --machine local --dry-run
+```text
+parameters
+    range epsilon factor 0.50 2.00
+    range sigma   factor 0.85 1.15
+    range charge  delta  0.30
+    charge_limit 1.0
+    neutrality derive bhN1
+    mixing geometric
 
-# Run locally through final trajectory-producing validation.
-ffopt run --project projects/btah_charge_only.yaml --machine local
+    # Add this one line for charge-only optimization.
+    fix epsilon sigma
 
-# Continue after interruption without repeating verified completed stages.
-ffopt run --project projects/btah_charge_only.yaml --machine local --resume
-
-# Submit to SLURM and keep advancing when each stage finishes.
-ffopt run --project projects/btah_charge_only.yaml --machine cluster --watch
-
-ffopt status --project projects/btah_charge_only.yaml --run-id default
+    # id label epsilon sigma charge
+    type 1 bhN1 0.2000 3.2963 -0.609
+    type 2 bhHn 0.0474 0.3981  0.430
+end
 ```
 
-Use `--until nn` to stop at a chosen stage, or `--from-stage al --resume` to
-continue a deliberately staged campaign. On SLURM without `--watch`, one job is
-submitted at a time; rerunning the same command with `--resume` checks its Job
-ID and submits the next missing stage.
+No `fix` command means all ranged epsilon, sigma, and charge values are free.
+Per-type ranges and fixes are also supported.
 
-## Individual stages
+`mixing geometric` maps to LAMMPS `pair_modify mix geometric` (geometric
+epsilon and sigma). `mixing arithmetic` maps to LAMMPS arithmetic mixing
+(geometric epsilon and arithmetic sigma).
 
-```bash
-ffopt show --project projects/btah_full.yaml
-ffopt bo --project projects/btah_full.yaml --machine local
-ffopt sample --project projects/btah_full.yaml --machine cluster
-ffopt nn --project projects/btah_full.yaml --machine local
-ffopt al --project projects/btah_full.yaml --machine local
-ffopt audit --project projects/btah_full.yaml --source path/to/all_results.csv
-ffopt finalize --project projects/btah_full.yaml --audit path/to/audit
-ffopt validate --project projects/btah_full.yaml --machine local
+## Properties and workflow
+
+A property with at least one `target` participates in BO, sampling, ANN, AL,
+and final validation. A property without a target is skipped during fitting and
+computed only by the `validate` stage. Final validation saves trajectories by
+default; optimization batches do not.
+
+```text
+workflow bo sample nn al validate
+
+property bulk
+    data data/crystal.data
+    cells_in_data 2 2 2
+    target density 1.25 g/cm3 weight 1.0
+end
+
+property adsorption
+    data complex data/complex.data
+    data slab data/slab.data
+    data molecule data/molecule.data
+    protocol minimize
+end
 ```
 
-`python -m ffopt ...` is equivalent to the installed `ffopt ...` command. See
-[README_BTAH.md](README_BTAH.md) for the BTAH-specific history.
+The bulk evaluator always follows the validated standard sequence: 0 K
+minimization, then finite-temperature NPT equilibration and production. The
+current sublimation estimator uses the bulk NPT mean potential energy and a
+minimized isolated-molecule potential energy.
+
+See [the BTAH charge-only example](examples/btah/charge_only.in),
+[the full 41-dimensional example](examples/btah/full.in), and
+[the input reference](docs/INPUT_FILE.md).
 
 ## Development status
 
-This is an alpha research package. BTAH regression tests are authoritative.
-Bulk, sublimation, adsorption, and surface calculations now implement the
-property-evaluator interface. Third-party packages can add properties through
-the `ffopt.property_evaluators` entry-point group; see
-[Property plugins](docs/PROPERTY_PLUGINS.md).
+This is an alpha research package. BTAH remains the numerical regression
+system. Bulk, sublimation, adsorption, and surface evaluators use a plugin
+registry; see [property plugins](docs/PROPERTY_PLUGINS.md).

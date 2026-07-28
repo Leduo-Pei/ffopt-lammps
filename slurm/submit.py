@@ -2,7 +2,7 @@
 """
 slurm/submit.py  |  Unified SLURM Job Submission  |  v8
 
-Reads cluster settings from the selected modular recipe and auto-generates
+Reads cluster settings from the generated runtime configuration and creates
 a SLURM script, then submits it with sbatch.
 
 Usage:
@@ -10,13 +10,7 @@ Usage:
   python slurm/submit.py nn               # submit NN training job
   python slurm/submit.py al               # submit Active Learning job
   python slurm/submit.py bo --dry-run     # print generated script without submitting
-  python slurm/submit.py bo --config configs/recipes/cluster_full.yaml
-
-Cluster nodes configured in configs/machines/cluster.yaml:
-  parallel_vip_1amd_12h   192 cores  12 h  AMD
-  parallel_vip_24h         76 cores  24 h  Intel
-  parallel_vip_1intel_12h  76 cores  12 h  Intel
-  gpu_vip_24h              16 cores  24 h  A100 GPU
+  python slurm/submit.py bo --config runs/.../_configs/project_cluster.json
 
 Job scripts generated:
   bo  -> python -m engine.run                (+ optional --resume)
@@ -33,8 +27,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-import yaml
-
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
@@ -46,7 +38,7 @@ from engine.config_loader import load_config as load_expanded_config
 # Script templates
 # ============================================================================
 
-def _job_commands(job: str, extra_args: str, config: str = "configs/recipes/cluster_full.yaml",
+def _job_commands(job: str, extra_args: str, config: str = "",
                   al_output_dir: str = "active_learning_output") -> str:
     """Return the shell commands that run inside the SLURM job."""
     if job == "bo":
@@ -77,7 +69,7 @@ python -u -m engine.run --config {config} --dry-run --save-traj
 
 
 def build_script(job: str, cluster_cfg: dict, extra_args: str,
-                 log_dir: str = "logs", config: str = "configs/recipes/cluster_full.yaml",
+                 log_dir: str = "logs", config: str = "",
                  al_output_dir: str = "active_learning_output") -> str:
     """
     Generate a complete SLURM batch script string.
@@ -168,8 +160,9 @@ def main():
         description="Unified SLURM job submission for material_v8 pipeline")
     parser.add_argument("job", choices=["bo", "nn", "al"],
                         help="Job to submit: bo | nn | al")
-    parser.add_argument("--config",    default="configs/recipes/cluster_full.yaml",
-                        help="Path to config YAML or modular recipe.")
+    parser.add_argument(
+        "--config", required=True,
+        help="Path to the generated internal JSON configuration.")
     parser.add_argument("--dry-run",   action="store_true",
                         help="Print generated SLURM script without submitting")
     parser.add_argument("--resume",    action="store_true",

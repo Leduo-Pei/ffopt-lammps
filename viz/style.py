@@ -23,7 +23,7 @@ _FIXED_COLS = frozenset({
 })
 
 
-def load_plot_config(path: str = "configs/plot.yaml") -> dict:
+def load_plot_config(path: str | None = None) -> dict:
     """
     Load plot_config.yaml.
 
@@ -31,6 +31,8 @@ def load_plot_config(path: str = "configs/plot.yaml") -> dict:
     file does not exist — this allows the pipeline to produce figures even
     without a plot_config.yaml in the working directory.
     """
+    if path is None:
+        return {}
     p = Path(path)
     if not p.exists():
         print(f"  plot config not found at {path}; using defaults")

@@ -21,7 +21,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--config",
-        default="configs/recipes/cluster_fix_epi_si_sampling.yaml",
+        required=True,
     )
     parser.add_argument("--source", default=None)
     parser.add_argument("--output-dir", default=None)

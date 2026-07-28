@@ -2,20 +2,19 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-import json
 import os
-from pathlib import Path
 import re
 import shlex
 import subprocess
 import sys
 import time
-from typing import Any, Iterable
+from collections.abc import Iterable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
-from .project import Project, SOURCE_ROOT, compose_config
+from .project import Project, compose_config
 from .state import StageRecord, WorkflowState, canonical_hash
-
 
 PIPELINE_STAGES = (
     "bo",
@@ -132,17 +131,21 @@ class PipelineRunner:
                 raise ValueError(
                     f"--{label}={value!r} is not active; choose from {self.stage_names}"
                 )
-        if self.from_stage and self.until:
-            if self.stage_names.index(self.from_stage) > self.stage_names.index(self.until):
-                raise ValueError("--from-stage must not come after --until")
+        if (
+            self.from_stage
+            and self.until
+            and self.stage_names.index(self.from_stage)
+            > self.stage_names.index(self.until)
+        ):
+            raise ValueError("--from-stage must not come after --until")
 
     def _validate_stage_dependencies(self) -> None:
         required = {
             "sample": {"bo"},
             "nn": {"bo"},
             "al": {"bo", "nn"},
+            "audit": {"bo"},
             "finalize": {"audit"},
-            "validate": {"finalize"},
         }
         active = set(self.stage_names)
         for stage, dependencies in required.items():
@@ -294,13 +297,26 @@ class PipelineRunner:
                 "--output-dir", output,
             )
         if name == "validate":
-            return self._python_module(
+            parameters = None
+            if "finalize" in self.stage_names:
+                parameters = self.root / "finalize" / "final_summary.json"
+            elif "al" in self.stage_names:
+                parameters = self.root / "al" / "nn_round_final" / "nn_optimize_result.json"
+            elif "nn" in self.stage_names:
+                parameters = self.root / "nn" / "nn_optimize_result.json"
+            elif "bo" in self.stage_names:
+                parameters = self.root / "bo" / "best_parameters.txt"
+            command = self._python_module(
                 "engine.validate_final_parameters",
                 "--config", self.config_path,
-                "--parameters", self.root / "finalize" / "final_summary.json",
                 "--output-dir", output,
                 "--overwrite",
             )
+            if parameters is not None:
+                command.extend(["--parameters", parameters])
+            else:
+                command.append("--initial")
+            return command
         raise ValueError(f"Unsupported stage: {name}")
 
     @staticmethod
@@ -396,6 +412,7 @@ class PipelineRunner:
             ["squeue", "-h", "-j", job_id, "-o", "%T"],
             capture_output=True,
             text=True,
+            check=False,
         )
         state = queued.stdout.strip().splitlines()
         if state:
@@ -404,6 +421,7 @@ class PipelineRunner:
             ["sacct", "-n", "-X", "-j", job_id, "--format", "State", "-P"],
             capture_output=True,
             text=True,
+            check=False,
         )
         values = [line.split("|")[0].strip().upper() for line in accounting.stdout.splitlines() if line.strip()]
         return values[0].split()[0].rstrip("+") if values else "UNKNOWN"
@@ -441,7 +459,7 @@ class PipelineRunner:
     def _submit_slurm(self, state: WorkflowState, spec: StageSpec) -> None:
         script = self._write_slurm_script(spec)
         completed = subprocess.run(
-            ["sbatch", str(script)], capture_output=True, text=True
+            ["sbatch", str(script)], capture_output=True, text=True, check=False
         )
         if completed.returncode:
             message = completed.stderr.strip() or completed.stdout.strip()
@@ -466,7 +484,9 @@ class PipelineRunner:
         state.transition(spec.name, "running", increment_attempt=True)
         print(f"\n[{spec.name}] > {_command_text(spec.command)}", flush=True)
         try:
-            completed = subprocess.run(spec.command, cwd=self.project.root)
+            completed = subprocess.run(
+                spec.command, cwd=self.project.root, check=False
+            )
         except BaseException as exc:
             state.transition(spec.name, "failed", message=str(exc))
             raise
@@ -529,6 +549,17 @@ class PipelineRunner:
             return "dry-run"
         self.root.mkdir(parents=True, exist_ok=True)
         with WorkflowState(self.state_path) as state:
+            previous = state.metadata()
+            current_hash = canonical_hash(_serializable_config(self.config))
+            scientific_hash = canonical_hash(_scientific_config(self.config))
+            if (
+                previous.get("scientific_hash") not in {None, scientific_hash}
+                and state.list()
+            ):
+                raise RuntimeError(
+                    "The scientific input changed after this pipeline started. "
+                    "Use --new to create an independent run instead of mixing checkpoints."
+                )
             state.initialize({
                 "project": self.project.name,
                 "project_file": str(self.project.path),
@@ -536,7 +567,8 @@ class PipelineRunner:
                 "backend": self.backend,
                 "run_id": self.run_id,
                 "config": str(self.config_path),
-                "config_hash": canonical_hash(_serializable_config(self.config)),
+                "config_hash": current_hash,
+                "scientific_hash": scientific_hash,
             })
             while True:
                 outcome = self._run_once(state, self.build_specs())

@@ -1,7 +1,0 @@
-# Compatibility alias for recipes created before the production target was
-# unified. The canonical BTAH proxy module now already uses 98.5 kJ/mol with no
-# empirical thermal correction, so keeping a second numerical copy would risk
-# future target drift.
-
-include:
-  - sublimation_proxy.yaml

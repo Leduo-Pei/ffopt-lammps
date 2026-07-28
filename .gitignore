@@ -37,8 +37,6 @@ docs/presentation/*.vsdx
 # BTAH research history retained locally but not part of the reusable package
 /analysis/
 /tools/
-/configs/recipes/
-/configs/sampling/
 /data/reference_dft/
 
 # Editors and operating systems

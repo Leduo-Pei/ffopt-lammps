@@ -1,12 +1,14 @@
 from pathlib import Path
 
+import pytest
+
 from workflow.pipeline import PipelineRunner
 from workflow.project import Project
 
 
 def _project(tmp_path: Path) -> Project:
-    path = tmp_path / "project.yaml"
-    path.write_text("project: {name: demo}\nmodules: {}\n", encoding="utf-8")
+    path = tmp_path / "ffopt.in"
+    path.write_text("ffopt 1\nproject demo\n", encoding="utf-8")
     return Project(path, {
         "project": {"name": "demo", "run_root": "runs/demo"},
         "modules": {},
@@ -50,6 +52,25 @@ def test_pipeline_paths_and_commands_are_deterministic(tmp_path, monkeypatch):
     assert specs[0].output_dir == project.run_root / "pipelines" / "trial" / "bo"
     assert "--n-points" in specs[1].command
     assert specs[1].command[specs[1].command.index("--n-points") + 1] == "12"
+
+
+def test_validate_only_uses_initial_input_parameters(tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    project.data["pipeline"]["stages"] = ["validate"]
+    config_path = tmp_path / "expanded.json"
+    config_path.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: _config())
+
+    runner = PipelineRunner(
+        project=project,
+        machine="local",
+        config_path=config_path,
+        run_id="initial_validation",
+        dry_run=True,
+    )
+    command = runner.build_specs()[0].command
+    assert "--initial" in command
+    assert "--parameters" not in command
 
 
 def test_pipeline_reuses_complete_stage_and_invalidates_downstream_only(
@@ -123,3 +144,75 @@ def test_slurm_script_omits_empty_optional_directives(tmp_path, monkeypatch):
     assert "#SBATCH --mem=0" not in script
     assert "#SBATCH --cpus-per-task=4" in script
     assert "source ~/.bashrc" in script
+
+
+def test_pipeline_allows_method_change_and_reuses_upstream_bo(tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    project.data["pipeline"]["stages"] = ["bo", "nn"]
+    config_path = tmp_path / "expanded.json"
+    config_path.write_text("{}\n", encoding="utf-8")
+    config = _config()
+    config["nn"] = {"enabled": True, "model": "mlp_ensemble"}
+    monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: config)
+    calls = []
+
+    def fake_run_local(self, state, spec):
+        calls.append(spec.name)
+        state.transition(spec.name, "running", increment_attempt=True)
+        for artifact in spec.artifacts:
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text("test\n", encoding="utf-8")
+        state.transition(spec.name, "completed")
+
+    monkeypatch.setattr(PipelineRunner, "_run_local", fake_run_local)
+    first = PipelineRunner(
+        project=project, machine="local", config_path=config_path, run_id="trial"
+    )
+    assert first.run() == "completed"
+    assert calls == ["bo", "nn"]
+
+    calls.clear()
+    config["nn"]["model"] = "random_forest"
+    second = PipelineRunner(
+        project=project,
+        machine="local",
+        config_path=config_path,
+        run_id="trial",
+        resume=True,
+    )
+    assert second.run() == "completed"
+    assert calls == ["nn"]
+
+
+def test_pipeline_rejects_scientific_change_in_same_run(tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    project.data["pipeline"]["stages"] = ["bo"]
+    config_path = tmp_path / "expanded.json"
+    config_path.write_text("{}\n", encoding="utf-8")
+    config = _config()
+    config["targets"] = {"density": {"value": 1.0, "weight": 1.0}}
+    monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: config)
+
+    def fake_run_local(self, state, spec):
+        state.transition(spec.name, "running", increment_attempt=True)
+        for artifact in spec.artifacts:
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text("test\n", encoding="utf-8")
+        state.transition(spec.name, "completed")
+
+    monkeypatch.setattr(PipelineRunner, "_run_local", fake_run_local)
+    first = PipelineRunner(
+        project=project, machine="local", config_path=config_path, run_id="trial"
+    )
+    assert first.run() == "completed"
+
+    config["targets"]["density"]["value"] = 1.1
+    second = PipelineRunner(
+        project=project,
+        machine="local",
+        config_path=config_path,
+        run_id="trial",
+        resume=True,
+    )
+    with pytest.raises(RuntimeError, match="scientific input changed"):
+        second.run()

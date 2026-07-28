@@ -18,7 +18,7 @@ def builtin_resource_roots() -> Iterable[Path]:
         yield Path(override).expanduser().resolve()
 
     source_root = Path(__file__).resolve().parents[1]
-    if (source_root / "configs").is_dir():
+    if (source_root / "lammps").is_dir():
         yield source_root
 
     data_root = Path(sysconfig.get_path("data")).resolve()
@@ -60,4 +60,3 @@ def resolve_config_reference(
     if not path.is_absolute():
         path = Path(base) / path
     return path.resolve()
-

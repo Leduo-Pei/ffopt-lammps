@@ -124,6 +124,8 @@ class LAMMPSRunner:
         self.bulk_npt_seed = bulk_md["npt_seed"]
         self.bulk_equil    = bulk_md["equil_steps"]   # NPT equilibration steps (discarded)
         self.bulk_prod     = bulk_md["prod_steps"]    # NPT production steps (time-averaged)
+        self.bulk_temperature = float(bulk_md.get("temperature", 300.0))
+        self.bulk_pressure = float(bulk_md.get("pressure", 1.0))
         self.timestep      = lmp_cfg["timestep"]
         self.cutoff        = lmp_cfg["cutoff"]
         self.timeout       = lmp_cfg["timeout"]
@@ -171,7 +173,9 @@ class LAMMPSRunner:
         self.ads_enabled = ads_cfg.get("enabled", False)
         self._slab_pe = None
         if self.ads_enabled:
-            adf = ads_cfg["data_files"]; adi = ads_cfg["inputs"]; adm = ads_cfg["md"]
+            adf = ads_cfg["data_files"]
+            adi = ads_cfg["inputs"]
+            adm = ads_cfg["md"]
             self.ads_complex       = os.path.abspath(adf["complex"])
             self.ads_slab          = os.path.abspath(adf["slab"])
             self.ads_mol           = os.path.abspath(adf["mol"])
@@ -600,6 +604,8 @@ class LAMMPSRunner:
             "npt_seed":       seed_override if seed_override is not None else self.bulk_npt_seed,
             "equil_steps":    self.bulk_equil,
             "prod_steps":     self.bulk_prod,
+            "temperature":    self.bulk_temperature,
+            "pressure":       self.bulk_pressure,
             "save_traj":      _sv,
         }
         if self.use_charge:
@@ -863,9 +869,9 @@ class LAMMPSRunner:
             q = resolved.get(f"{label}_charge")
             if q is None:
                 continue
-            if abs_max is not None and abs(q) >= float(abs_max):
+            if abs_max is not None and abs(q) > float(abs_max):
                 return (f"charge infeasible: |q({label})|={abs(q):.3f} "
-                        f">= abs_max {abs_max}")
+                        f"> abs_max {abs_max}")
             if label in pos_labels and q <= 0.0:
                 return f"charge infeasible: q({label})={q:.3f} must be > 0"
         return None

@@ -1,12 +1,11 @@
 # Documentation index
 
-- `status/BTAH_WORKFLOW_STATUS.md`: accumulated workflow decisions, completed work and pending work.
-- `status/UNIFIED_NN_AL_STRATEGY.md`: shared diagnosis and strategy for NN/AL across parameter regimes.
-- `status/README_FIX_EPI_SI.md`: charge-only experiment notes.
-- `status/README_FIX_SI.md`: fixed-sigma experiment notes.
-- `status/README_SAMPLING_CAMPAIGNS.md`: sampling campaign definitions and submission notes.
-- `presentation/BTAH_workflow_detailed.vsdx`: editable detailed workflow diagram.
-- `presentation/BTAH_parameter_table.vsdx`: editable force-field parameter table.
+- [Input file reference](INPUT_FILE.md)
+- [New molecular projects](NEW_PROJECT.md)
+- [Architecture](ARCHITECTURE.md)
+- [Property evaluator plugins](PROPERTY_PLUGINS.md)
+- [BTAH parameter baseline audit](BTAH_PARAMETER_BASELINE_AUDIT_20260716.md)
 
-The operational starting point remains `README_BTAH.md`; normal task settings
-belong in `projects/project.yaml`.
+The operational BTAH examples are
+[`examples/btah/charge_only.in`](../examples/btah/charge_only.in) and
+[`examples/btah/full.in`](../examples/btah/full.in).

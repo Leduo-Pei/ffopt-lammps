@@ -11,9 +11,8 @@ Workflow per round:
   5. Early-stop when max aggregated uncertainty < uncertainty_threshold
 
 Usage:
-  python active_learning.py --config configs/recipes/cluster_full.yaml \\
-      --bo-dir bo_*/ --nn-dir nn_output_*/
-  python active_learning.py --config configs/recipes/cluster_full.yaml --bo-dir bo_* --no-validate
+  python -m engine.active_learning --config runs/.../_configs/project_local.json \\
+      --bo-dir runs/.../bo --nn-dir runs/.../nn
 
 Outputs (active_learning_output/):
   data_round_{N}/all_results.csv   - accumulated data after round N
@@ -37,8 +36,6 @@ import numpy as np
 import pandas as pd
 from scipy.stats import qmc
 from sklearn.ensemble import ExtraTreesRegressor
-import yaml
-
 from .config_loader import load_config as load_expanded_config, save_config_snapshot
 
 # Same directory as active_learning.py -> lammps_interface, optimizer, nn_surrogate
@@ -1270,8 +1267,8 @@ def main():
         epilog=__doc__,
     )
     parser.add_argument(
-        "--config", default="configs/recipes/cluster_full.yaml",
-        help="Path to config YAML or modular recipe.")
+        "--config", required=True,
+        help="Path to the generated internal JSON configuration.")
     parser.add_argument(
         "--bo-dir", default=None,
         help="BO results directory (stable_results.csv preferred, "

@@ -4,14 +4,14 @@ import math
 import unittest
 from pathlib import Path
 
-from engine.config_loader import load_config
+from workflow.input_compiler import compile_input
+from workflow.input_file import parse_input_file
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def atom_types(path: str) -> dict[str, dict]:
-    config = load_config(ROOT / path)
+def atom_types(config: dict) -> dict[str, dict]:
     return {item["label"]: item for item in config["atom_types"]}
 
 
@@ -44,9 +44,15 @@ def pair_coefficients(path: Path) -> dict[str, tuple[float, float]]:
 
 class BtahCharmmBaselineTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.full = atom_types("configs/systems/btah_822.yaml")
-        self.fix_sigma = atom_types("configs/systems/btah_822_fix_si.yaml")
-        self.charge_only = atom_types("configs/systems/btah_822_fix_epi_si.yaml")
+        full_document = parse_input_file(ROOT / "examples/btah/full.in")
+        self.full = atom_types(compile_input(full_document).config)
+
+        fix_sigma_document = parse_input_file(ROOT / "examples/btah/full.in")
+        fix_sigma_document.parameters.fixed.add("sigma")
+        self.fix_sigma = atom_types(compile_input(fix_sigma_document).config)
+
+        charge_document = parse_input_file(ROOT / "examples/btah/charge_only.in")
+        self.charge_only = atom_types(compile_input(charge_document).config)
 
     def test_reduced_projects_derive_from_full_charmm_reference(self) -> None:
         self.assertEqual(set(self.full), set(self.fix_sigma))

@@ -4,7 +4,7 @@ Force Field BO + NN Pipeline -- v8 entry point.
 
 Modes
 -----
-  python run.py                            # full BO with configs/recipes/cluster_full.yaml
+  python -m engine.run --config runs/.../_configs/project_local.json
   python run.py --resume                   # resume BO from checkpoint
   python run.py --dry-run                  # single LAMMPS at best known params
   python run.py --dry-run --no-mpi         # same, serial (login/management nodes)
@@ -26,8 +26,7 @@ v8 changes vs v6:
   - ForceFieldOptimizer v8: auto-selects GP / TuRBO / SAASBO by n_params.
 
 After BO completes:
-  python slurm/submit.py nn --config configs/recipes/cluster_full.yaml
-  python slurm/submit.py al --config configs/recipes/cluster_full.yaml
+  ffopt run ffopt.in
   python run.py --plot <bo_dir>
 """
 
@@ -38,8 +37,6 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-
-import yaml
 
 from .config_loader import load_config as load_expanded_config
 
@@ -280,7 +277,7 @@ def _load_best_params(config: dict = None):
 # ============================================================================
 
 def cmd_dry_run(config: dict,
-                config_path: str = "configs/recipes/cluster_full.yaml",
+                config_path: str = "",
                 no_mpi: bool = False,
                 save_traj: bool = False) -> bool:
     """
@@ -403,8 +400,7 @@ def cmd_dry_run(config: dict,
     if r.success:
         print("  Pipeline wiring: OK")
         print(f"  Current config validated: {config_path}")
-        print("  To launch production BO, use a production recipe such as "
-              "configs/recipes/local_full.yaml or configs/recipes/cluster_full.yaml")
+        print("  To launch the configured workflow, run: ffopt run ffopt.in")
     return True
 
 
@@ -428,7 +424,7 @@ def _reference_params(config: dict) -> dict:
 
 
 def cmd_sublimation_test(config: dict,
-                         config_path: str = "configs/recipes/cluster_full.yaml",
+                         config_path: str = "",
                          no_mpi: bool = False,
                          save_traj: bool = False) -> bool:
     """Run the NPT-bulk sublimation-energy proxy audit for one parameter set."""
@@ -505,7 +501,7 @@ def cmd_plot(config: dict, bo_dir: str, nn_dir: str = None) -> bool:
         print(f"ERROR: {bo_csv} not found")
         return False
 
-    plot_cfg  = load_plot_config("configs/plot.yaml")
+    plot_cfg  = load_plot_config()
     apply_style(plot_cfg)
     figs_dir  = Path("figures")
     figs_dir.mkdir(exist_ok=True)
@@ -581,8 +577,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--config", default="configs/recipes/cluster_full.yaml",
-                        help="Path to config YAML or modular recipe.")
+    parser.add_argument(
+        "--config", required=True,
+        help="Path to the generated internal JSON configuration.",
+    )
     parser.add_argument("--resume", action="store_true",
                         help="Resume BO from latest checkpoint")
     parser.add_argument("--checkpoint", default=None,

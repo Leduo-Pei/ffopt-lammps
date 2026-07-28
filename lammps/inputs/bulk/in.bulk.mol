@@ -111,8 +111,8 @@ variable a_0K equal $(cella*v_inv_nx)
 # Molecular crystal held together by vdW + electrostatics; tri lets all 6 box
 # DOF relax so a wrong force field is exposed rather than hidden.
 # ----------------------------------------------------------------------------
-velocity        all create 300.0 ${npt_seed} mom yes rot yes dist gaussian
-fix NPT all npt temp 300.0 300.0 100.0 tri 1.0 1.0 1000.0
+velocity        all create ${temperature} ${npt_seed} mom yes rot yes dist gaussian
+fix NPT all npt temp ${temperature} ${temperature} 100.0 tri ${pressure} ${pressure} 1000.0
 timestep        ${timestep_value}
 
 thermo          5000

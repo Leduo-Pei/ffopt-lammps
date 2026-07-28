@@ -4,18 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ffopt-lammps"
-version = "0.1.0a2"
+version = "0.2.0a1"
 description = "Restartable force-field parameter optimization with LAMMPS, Bayesian optimization, surrogate models, and active learning."
 readme = "README.md"
 requires-python = ">=3.10"
-license = {file = "LICENSE"}
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
   {name = "Leduo-Pei", email = "ziyu.pei@gtiit.edu.cn"},
 ]
 keywords = ["LAMMPS", "force field", "Bayesian optimization", "active learning"]
 classifiers = [
   "Development Status :: 3 - Alpha",
-  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
@@ -24,6 +24,8 @@ classifiers = [
 ]
 dependencies = [
   "PyYAML>=6.0",
+  "tomli>=2.0; python_version<'3.11'",
+  "tomli-w>=1.0",
   "numpy>=1.24",
   "pandas>=2.0",
   "scipy>=1.10",
@@ -65,12 +67,10 @@ viz = "viz"
 slurm = "slurm"
 
 [tool.setuptools.data-files]
-"share/ffopt/configs/machines" = ["configs/machines/*.yaml"]
-"share/ffopt/configs/methods/bo" = ["configs/methods/bo/*.yaml"]
-"share/ffopt/configs/methods/nn" = ["configs/methods/nn/*.yaml"]
-"share/ffopt/configs/methods/al" = ["configs/methods/al/*.yaml"]
 "share/ffopt/lammps/inputs/bulk" = ["lammps/inputs/bulk/*"]
 "share/ffopt/lammps/inputs/molecule" = ["lammps/inputs/molecule/*"]
+"share/ffopt/lammps/inputs/adsorption" = ["lammps/inputs/adsorption/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = [".", "src"]

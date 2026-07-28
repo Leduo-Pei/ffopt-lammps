@@ -65,12 +65,12 @@ except ImportError:
 try:
     from botorch.acquisition.multi_objective.logei import (
         qLogNoisyExpectedHypervolumeImprovement)
-            # is_non_dominated expects maximization, so negate.
+    from botorch.utils.multi_objective.pareto import is_non_dominated
     _PARETO_AVAILABLE = True
 except ImportError:
     _PARETO_AVAILABLE = False
 
-from .lammps_interface import LAMMPSRunner, EvalResult, LARGE_PENALTY
+from .lammps_interface import LAMMPSRunner, LARGE_PENALTY
 
 # Suppress repetitive BoTorch / GPyTorch warnings
 warnings.filterwarnings("ignore", message=".*qNoisyExpectedImprovement.*")
@@ -849,8 +849,18 @@ class ForceFieldOptimizer:
             [[r["obj_structural"], r["obj_surface"]] for r in valid],
             dtype=torch.double,
         )
-            # is_non_dominated expects maximization, so negate.
-            # is_non_dominated expects maximization, so negate.
+        if _PARETO_AVAILABLE:
+            # is_non_dominated expects maximization, so negate both objectives.
+            mask = is_non_dominated(-Y)
+        else:
+            values = Y.numpy()
+            mask = torch.tensor([
+                not any(
+                    np.all(other <= candidate) and np.any(other < candidate)
+                    for other in values
+                )
+                for candidate in values
+            ])
         front = [r for r, m in zip(valid, mask.tolist()) if m]
         front.sort(key=lambda r: r["obj_structural"])
 
