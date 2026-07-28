@@ -75,6 +75,27 @@ class ProjectConfigTests(unittest.TestCase):
             (ROOT / "data/bulk/BTAH_822_bulk.data").resolve(),
         )
 
+    def test_two_node_slurm_profile_distributes_lammps_but_not_nn(self) -> None:
+        profile = build_machine_profile(
+            name="ccelab-2node",
+            backend="slurm",
+            lammps="/opt/ffopt/bin/lmp",
+            mpi="srun",
+            workers=24,
+            ranks=4,
+            omp_threads=1,
+            nodes=2,
+            cores=96,
+            partition="CPU",
+        )
+        self.assertEqual(profile["cluster"]["bo"]["nodes"], 2)
+        self.assertEqual(profile["cluster"]["bo"]["tasks"], 96)
+        self.assertTrue(profile["cluster"]["bo"]["distributed_steps"])
+        self.assertEqual(profile["cluster"]["nn"]["nodes"], 1)
+        self.assertEqual(profile["cluster"]["nn"]["cores"], 48)
+        self.assertNotIn("gpu", profile["cluster"]["nn"])
+        self.assertEqual(profile["cluster"]["validate"]["tasks"], 4)
+
     def test_generated_json_config_is_reloadable(self) -> None:
         path = write_generated_config(self.project, "local")
         self.assertTrue(path.exists())

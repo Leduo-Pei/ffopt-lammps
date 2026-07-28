@@ -1126,6 +1126,19 @@ class LAMMPSRunner:
     # Private: LAMMPS execution                                              #
     # ====================================================================== #
 
+    def _mpi_prefix(self, ranks: int) -> List[str]:
+        """Build a launcher prefix, reserving one exclusive SLURM job step."""
+        launcher = os.path.basename(str(self.mpiexec)).lower()
+        if launcher in {"srun", "srun.exe"}:
+            return [
+                self.mpiexec,
+                "--exclusive",
+                "--nodes=1",
+                "--ntasks", str(ranks),
+                "--cpus-per-task", str(self.omp_threads),
+            ]
+        return [self.mpiexec, "-n", str(ranks)]
+
     def _run_one(self,
                  cwd: str,
                  input_file: str,
@@ -1156,15 +1169,17 @@ class LAMMPSRunner:
 
         # Build MPI command
         if self.use_mpi:
-            cmd = [self.mpiexec, "-n", str(self.cores),
-                   self.lammps_exe, "-in", input_file] + var_args
+            cmd = self._mpi_prefix(self.cores) + [
+                self.lammps_exe, "-in", input_file,
+            ] + var_args
         else:
             # use_mpi=False (--no-mpi): single-rank MPI via mpiexec -n 1.
             # Requires Intel MPI module: module load mpi/2021.15
             # I_MPI_FABRICS=shm forces shared-memory transport; bypasses OFI/InfiniBand
             # which may be unavailable on login/management nodes.
-            cmd = [self.mpiexec, "-n", "1",
-                   self.lammps_exe, "-in", input_file] + var_args
+            cmd = self._mpi_prefix(1) + [
+                self.lammps_exe, "-in", input_file,
+            ] + var_args
 
         _env = {**os.environ,
                 "OMP_NUM_THREADS": str(self.omp_threads),

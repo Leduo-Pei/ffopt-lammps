@@ -128,7 +128,10 @@ minimized isolated-molecule potential energy.
 
 See [the BTAH charge-only example](examples/btah/charge_only.in),
 [the full 41-dimensional example](examples/btah/full.in), and
-[the input reference](docs/INPUT_FILE.md).
+[the input reference](docs/INPUT_FILE.md). For a clean installation on a new
+CPU SLURM cluster, follow the [beginner server guide](docs/NEW_SERVER_GUIDE.md)
+and run the [small full-pipeline BTAH test](examples/btah/cluster_smoke.in)
+before submitting a production fit.
 
 ## Development status
 

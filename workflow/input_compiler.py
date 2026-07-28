@@ -333,6 +333,13 @@ def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: 
             if key == "early_stop" and stage == "bo":
                 destination.setdefault("early_stop", {}).update(value)
                 continue
+            if key == "stability_audit" and stage == "bo":
+                if not isinstance(value, bool):
+                    raise InputFileError(
+                        document.path, 1, "BO stability_audit must be on or off"
+                    )
+                destination.setdefault("stability_audit", {})["enabled"] = value
+                continue
             if key == "acquisition" and stage == "al":
                 if str(value).lower() != "uncertainty":
                     raise InputFileError(document.path, 1, "AL acquisition currently supports uncertainty")

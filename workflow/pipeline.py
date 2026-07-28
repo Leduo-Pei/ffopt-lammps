@@ -357,9 +357,14 @@ class PipelineRunner:
             print(f"\n[{spec.name}]\n> {_command_text(spec.command)}")
 
     def _slurm_profile(self, stage: str) -> dict[str, Any]:
-        profile_name = "nn" if stage == "nn" else "al" if stage == "al" else "bo"
         cluster = self.config.get("cluster", {})
-        profile = dict(cluster.get(profile_name, {}))
+        fallback = {
+            "sample": "bo",
+            "audit": "bo",
+            "validate": "bo",
+            "finalize": "nn",
+        }.get(stage, stage)
+        profile = dict(cluster.get(stage, cluster.get(fallback, {})))
         if "env_setup" not in profile:
             profile["env_setup"] = cluster.get("env_setup", [])
         return profile
@@ -370,13 +375,22 @@ class PipelineRunner:
         jobs.mkdir(parents=True, exist_ok=True)
         logs.mkdir(parents=True, exist_ok=True)
         profile = self._slurm_profile(spec.name)
+        if bool(profile.get("distributed_steps", False)):
+            task_directives = [
+                f"#SBATCH --ntasks={profile.get('tasks', profile.get('cores', 1))}",
+                f"#SBATCH --cpus-per-task={profile.get('cpus_per_task', 1)}",
+            ]
+        else:
+            task_directives = [
+                "#SBATCH --ntasks=1",
+                f"#SBATCH --cpus-per-task={profile.get('cores', 1)}",
+            ]
         directives = [
             f"#SBATCH --job-name=ffopt_{spec.name}",
             f"#SBATCH --output={logs / (spec.name + '_%j.out')}",
             f"#SBATCH --error={logs / (spec.name + '_%j.err')}",
             f"#SBATCH --nodes={profile.get('nodes', 1)}",
-            "#SBATCH --ntasks=1",
-            f"#SBATCH --cpus-per-task={profile.get('cores', 1)}",
+            *task_directives,
             f"#SBATCH --time={profile.get('time', '24:00:00')}",
         ]
         if str(profile.get("partition", "")).strip():

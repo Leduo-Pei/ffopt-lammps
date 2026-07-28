@@ -359,7 +359,9 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     config = compose_config(project, machine)
     checks: list[tuple[str, bool, str]] = []
     checks.append(("Python >= 3.10", sys.version_info >= (3, 10), sys.version.split()[0]))
-    for module in ("yaml", "numpy", "pandas", "torch", "sklearn"):
+    for module in (
+        "yaml", "numpy", "pandas", "torch", "sklearn", "botorch", "gpytorch",
+    ):
         installed = importlib.util.find_spec(module) is not None
         checks.append((f"Python module: {module}", installed, "installed" if installed else "missing"))
 
@@ -372,6 +374,11 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     else:
         sbatch = shutil.which("sbatch")
         checks.append(("SLURM sbatch", sbatch is not None, sbatch or "not on this host"))
+        executable = Path(config["lammps"]["executable"])
+        checks.append(("LAMMPS executable", executable.exists(), str(executable)))
+        launcher_name = str(config["lammps"].get("mpiexec", "srun"))
+        launcher = shutil.which(launcher_name)
+        checks.append(("SLURM launcher", launcher is not None, launcher or launcher_name))
 
     def visit_files(value: object, key: str = "") -> None:
         if isinstance(value, dict):
@@ -419,7 +426,8 @@ def cmd_doctor(args: argparse.Namespace) -> None:
             checks.append(("PyTorch CUDA", False, str(exc)))
     else:
         gpu_request = int(config.get("cluster", {}).get("nn", {}).get("gpu", 0))
-        checks.append(("SLURM NN GPU request", gpu_request > 0, f"gpu={gpu_request}"))
+        detail = f"gpu={gpu_request}" if gpu_request else "CPU profile; no GPU requested"
+        checks.append(("SLURM NN resources", True, detail))
 
     failed = False
     print(f"Doctor: {project.name} [{machine}]\nConfig: {config_path}\n")
@@ -739,6 +747,8 @@ def cmd_machine(args: argparse.Namespace) -> None:
         partition=args.partition,
         qos=args.qos,
         cores=args.cores,
+        nodes=args.nodes,
+        gpus=args.gpus,
         walltime=args.walltime,
     )
     path = save_machine_profile(args.name, profile, overwrite=args.force)
@@ -973,6 +983,14 @@ def build_parser() -> argparse.ArgumentParser:
     machine.add_argument("--partition")
     machine.add_argument("--qos")
     machine.add_argument("--cores", type=int)
+    machine.add_argument(
+        "--nodes", type=int, default=1,
+        help="SLURM nodes used by parallel LAMMPS stages (default: 1).",
+    )
+    machine.add_argument(
+        "--gpus", type=int, default=0,
+        help="GPUs requested by NN/AL stages (default: 0).",
+    )
     machine.add_argument("--walltime", default="24:00:00")
     machine.add_argument("--force", action="store_true")
     machine.set_defaults(function=cmd_machine)

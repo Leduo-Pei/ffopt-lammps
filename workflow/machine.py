@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import shutil
 from pathlib import Path
@@ -115,6 +116,8 @@ def build_machine_profile(
     partition: str | None = None,
     qos: str | None = None,
     cores: int | None = None,
+    nodes: int = 1,
+    gpus: int = 0,
     walltime: str = "24:00:00",
 ) -> dict[str, Any]:
     if backend not in {"local", "slurm"}:
@@ -122,6 +125,8 @@ def build_machine_profile(
     cpu_count = max(1, os.cpu_count() or 1)
     ranks = max(1, int(ranks))
     omp_threads = max(1, int(omp_threads))
+    nodes = max(1, int(nodes))
+    gpus = max(0, int(gpus))
     workers = max(1, int(workers or max(1, cpu_count // (ranks * omp_threads))))
     profile: dict[str, Any] = {
         "machine": {
@@ -143,17 +148,54 @@ def build_machine_profile(
         "machine_learning": {"device": "auto"},
     }
     if backend == "slurm":
+        required_cpus = workers * ranks * omp_threads
+        allocated_cpus = int(cores or required_cpus)
+        if allocated_cpus < required_cpus:
+            raise ValueError(
+                "SLURM cores must cover workers * ranks * omp_threads "
+                f"({allocated_cpus} < {required_cpus})"
+            )
+        if allocated_cpus % omp_threads:
+            raise ValueError("SLURM cores must be divisible by omp_threads")
+        per_node_cpus = max(1, math.ceil(allocated_cpus / nodes))
+
+        distributed = {
+            "partition": partition or "",
+            "qos": qos or "",
+            "nodes": nodes,
+            "cores": allocated_cpus,
+            "tasks": allocated_cpus // omp_threads,
+            "cpus_per_task": omp_threads,
+            "distributed_steps": True,
+            "time": walltime,
+            "mem": "0",
+        }
+        single_lammps = {
+            **distributed,
+            "nodes": 1,
+            "cores": ranks * omp_threads,
+            "tasks": ranks,
+        }
+        single_python = {
+            "partition": partition or "",
+            "qos": qos or "",
+            "nodes": 1,
+            "cores": per_node_cpus,
+            "time": walltime,
+            "mem": "0",
+            **({"gpu": gpus} if gpus else {}),
+        }
         profile["cluster"] = {
-            stage: {
-                "partition": partition or "",
-                "qos": qos or "",
-                "nodes": 1,
-                "cores": int(cores or workers * ranks),
-                "time": walltime,
-                "mem": "0",
-                **({"gpu": 1} if stage in {"nn", "al"} else {}),
-            }
-            for stage in ("bo", "nn", "al")
+            "bo": dict(distributed),
+            "sample": dict(distributed),
+            "nn": dict(single_python),
+            "al": {
+                **distributed,
+                **({"gpu": gpus} if gpus else {}),
+            },
+            "audit": dict(distributed),
+            "validate": dict(single_lammps),
+            "finalize": {**single_python, "cores": 1},
         }
     return profile
 

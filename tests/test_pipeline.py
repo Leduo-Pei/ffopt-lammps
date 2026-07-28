@@ -146,6 +146,37 @@ def test_slurm_script_omits_empty_optional_directives(tmp_path, monkeypatch):
     assert "source ~/.bashrc" in script
 
 
+def test_slurm_script_allocates_distributed_candidate_steps(tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    config_path = tmp_path / "expanded.yaml"
+    config_path.write_text("manifest: {system_name: demo}\n", encoding="utf-8")
+    config = _config()
+    config["machine"]["backend"] = "slurm"
+    config["cluster"] = {
+        "bo": {
+            "partition": "CPU",
+            "nodes": 2,
+            "cores": 96,
+            "tasks": 96,
+            "cpus_per_task": 1,
+            "distributed_steps": True,
+            "time": "14-00:00:00",
+            "mem": "0",
+        },
+    }
+    monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: config)
+    runner = PipelineRunner(
+        project=project, machine="ccelab-2node", config_path=config_path,
+        run_id="distributed", dry_run=True,
+    )
+    script = runner._write_slurm_script(runner.build_specs()[0]).read_text(
+        encoding="utf-8"
+    )
+    assert "#SBATCH --nodes=2" in script
+    assert "#SBATCH --ntasks=96" in script
+    assert "#SBATCH --cpus-per-task=1" in script
+
+
 def test_pipeline_allows_method_change_and_reuses_upstream_bo(tmp_path, monkeypatch):
     project = _project(tmp_path)
     project.data["pipeline"]["stages"] = ["bo", "nn"]

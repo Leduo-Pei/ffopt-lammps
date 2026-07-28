@@ -107,3 +107,14 @@ def test_initial_validation_extracts_only_independent_parameters():
     assert len(initial) == 13
     assert "bhN1_charge" not in initial
     assert initial["bhHn_charge"] == pytest.approx(0.430)
+
+
+def test_bo_stability_audit_can_be_disabled_for_smoke_runs(tmp_path):
+    source = (ROOT / "examples" / "btah" / "charge_only.in").read_text()
+    source = source.replace("    method turbo\n", "    method turbo\n    stability_audit off\n")
+    source = source.replace("../../data/", (ROOT / "data").as_posix() + "/")
+    path = tmp_path / "smoke.in"
+    path.write_text(source, encoding="utf-8")
+
+    compiled = compile_input(parse_input_file(path))
+    assert compiled.config["optimization"]["stability_audit"]["enabled"] is False
