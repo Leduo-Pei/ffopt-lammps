@@ -301,7 +301,7 @@ class PipelineRunner:
             if "finalize" in self.stage_names:
                 parameters = self.root / "finalize" / "final_summary.json"
             elif "al" in self.stage_names:
-                parameters = self.root / "al" / "nn_round_final" / "nn_optimize_result.json"
+                parameters = self.root / "al" / "final_parameters.json"
             elif "nn" in self.stage_names:
                 parameters = self.root / "nn" / "nn_optimize_result.json"
             elif "bo" in self.stage_names:
@@ -325,7 +325,7 @@ class PipelineRunner:
             "bo": ["all_results.csv"],
             "sample": ["local_results.csv", "local_replicates.csv"],
             "nn": ["forward_nn.pt", "nn_optimize_result.json"],
-            "al": ["active_learning_history.json", "nn_round_final/nn_optimize_result.json"],
+            "al": ["active_learning_history.json", "final_parameters.json"],
             "audit": ["stable_results.csv", "stability_replicates.csv"],
             "finalize": ["final_summary.json", "final_parameters.lammps"],
             "validate": ["validation_summary.json", "computed_properties.csv"],
@@ -448,13 +448,6 @@ class PipelineRunner:
         if not record.job_id:
             state.transition(record.name, "failed", message="Missing SLURM job id")
             return "failed"
-        if WorkflowState.artifacts_exist(record):
-            state.transition(
-                record.name,
-                "completed",
-                message=f"Recovered artifacts from SLURM job {record.job_id}",
-            )
-            return "completed"
         scheduler_state = self._slurm_state(record.job_id)
         active = {"PENDING", "RUNNING", "CONFIGURING", "COMPLETING", "SUSPENDED"}
         if scheduler_state in active:
@@ -464,8 +457,12 @@ class PipelineRunner:
                 message=f"SLURM {record.job_id}: {scheduler_state}",
             )
             return "waiting"
-        if scheduler_state == "COMPLETED" and WorkflowState.artifacts_exist(record):
-            state.transition(record.name, "completed", message=f"SLURM {record.job_id} completed")
+        if WorkflowState.artifacts_exist(record):
+            state.transition(
+                record.name,
+                "completed",
+                message=f"SLURM {record.job_id}: {scheduler_state}; artifacts verified",
+            )
             return "completed"
         state.transition(
             record.name,
@@ -550,6 +547,11 @@ class PipelineRunner:
                 if refreshed == "waiting":
                     return "waiting"
                 record = state.get(spec.name)
+                message = record.message if record else "unknown scheduler failure"
+                raise RuntimeError(
+                    f"SLURM stage {spec.name!r} failed: {message}. "
+                    "Inspect its log, then run the same command again to resume."
+                )
             if record and record.status in {"failed", "running"} and not self.resume:
                 raise RuntimeError(
                     f"Stage {spec.name!r} is {record.status}; rerun with --resume"

@@ -4,6 +4,7 @@ import pytest
 
 from workflow.pipeline import PipelineRunner
 from workflow.project import Project
+from workflow.state import WorkflowState
 
 
 def _project(tmp_path: Path) -> Project:
@@ -207,6 +208,66 @@ def test_slurm_script_requests_explicit_memory_per_node(tmp_path, monkeypatch):
         encoding="utf-8"
     )
     assert "#SBATCH --mem=64G" in script
+
+
+def test_running_slurm_stage_is_not_completed_by_partial_artifacts(
+    tmp_path, monkeypatch
+):
+    project = _project(tmp_path)
+    config_path = tmp_path / "expanded.yaml"
+    config_path.write_text("manifest: {system_name: demo}\n", encoding="utf-8")
+    config = _config()
+    config["machine"]["backend"] = "slurm"
+    config["cluster"] = {"bo": {}}
+    monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: config)
+    runner = PipelineRunner(
+        project=project, machine="cluster", config_path=config_path,
+        run_id="partial", resume=True,
+    )
+    spec = runner.build_specs()[0]
+    for artifact in spec.artifacts:
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text("partial\n", encoding="utf-8")
+    monkeypatch.setattr(runner, "_slurm_state", lambda _: "RUNNING")
+
+    with WorkflowState(runner.state_path) as state:
+        state.prepare(
+            spec.name, spec.signature, spec.command, spec.output_dir, spec.artifacts
+        )
+        record = state.transition(spec.name, "waiting", job_id="123")
+        assert runner._refresh_waiting(state, record) == "waiting"
+        assert state.get(spec.name).status == "waiting"
+
+
+def test_watch_stops_after_terminal_slurm_failure(tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    config_path = tmp_path / "expanded.yaml"
+    config_path.write_text("manifest: {system_name: demo}\n", encoding="utf-8")
+    config = _config()
+    config["machine"]["backend"] = "slurm"
+    config["cluster"] = {"bo": {}}
+    monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: config)
+    runner = PipelineRunner(
+        project=project, machine="cluster", config_path=config_path,
+        run_id="failed", resume=True, watch=True, poll_seconds=1,
+    )
+    spec = runner.build_specs()[0]
+    runner.root.mkdir(parents=True, exist_ok=True)
+    with WorkflowState(runner.state_path) as state:
+        state.initialize({"scientific_hash": None})
+        state.prepare(
+            spec.name, spec.signature, spec.command, spec.output_dir, spec.artifacts
+        )
+        state.transition(spec.name, "waiting", job_id="456")
+    monkeypatch.setattr(runner, "_slurm_state", lambda _: "FAILED")
+    submit_calls = []
+    monkeypatch.setattr(
+        runner, "_submit_slurm", lambda *_: submit_calls.append("submitted")
+    )
+
+    with pytest.raises(RuntimeError, match="run the same command again"):
+        runner.run()
+    assert submit_calls == []
 
 
 def test_pipeline_allows_method_change_and_reuses_upstream_bo(tmp_path, monkeypatch):

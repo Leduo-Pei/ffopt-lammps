@@ -19,6 +19,7 @@ Outputs (active_learning_output/):
   nn_round_{N}/                    - NNSurrogate outputs after round N
   nn_round_final/                  - copy of last nn_round_* (run.py target)
   active_learning_history.json     - per-round summary for viz
+  final_parameters.json            - best LAMMPS-verified accumulated point
 """
 
 import argparse
@@ -711,6 +712,9 @@ class ActiveLearner:
             shutil.copytree(last_nn_round_dir, final_dir)
             print(f"\n  Copied {last_nn_round_dir} -> {final_dir}")
 
+        final_parameters = self._write_final_parameters(all_data_df)
+        best_lammps_obj = float(final_parameters["objective"])
+
         # -- Final summary ----------------------------------------------------
         elapsed = time.time() - t0
         final_round = self._history[-1]["round"] if self._history else 0
@@ -1191,6 +1195,54 @@ class ActiveLearner:
     # ====================================================================== #
     # History I/O                                                             #
     # ====================================================================== #
+
+    def _write_final_parameters(self, frame: pd.DataFrame) -> dict:
+        """Export the best successful point that LAMMPS actually evaluated."""
+        objective = pd.to_numeric(frame.get("objective"), errors="coerce")
+        valid = np.isfinite(objective)
+        if "success" in frame.columns:
+            valid &= frame["success"].astype(str).str.lower().eq("true")
+        for name in self.param_names:
+            if name not in frame.columns:
+                raise ValueError(f"Accumulated AL data is missing parameter {name!r}")
+            valid &= np.isfinite(pd.to_numeric(frame[name], errors="coerce"))
+        candidates = frame.loc[valid].copy()
+        if candidates.empty:
+            raise RuntimeError("No successful LAMMPS-evaluated parameters are available")
+        candidates["objective"] = pd.to_numeric(
+            candidates["objective"], errors="raise"
+        )
+        best = candidates.sort_values("objective").iloc[0]
+        raw = {name: float(best[name]) for name in self.param_names}
+        properties = {}
+        for name in self.config.get("targets", {}):
+            value = pd.to_numeric(best.get(f"calc_{name}"), errors="coerce")
+            if np.isfinite(value):
+                properties[name] = float(value)
+        document = {
+            "selection_rule": (
+                "minimum objective among successful accumulated "
+                "LAMMPS evaluations"
+            ),
+            "objective": float(best["objective"]),
+            "source_round": (
+                int(best["round"])
+                if "round" in best and pd.notna(best["round"])
+                else None
+            ),
+            "source_label": str(best.get("label", "")),
+            "raw_free_parameters": raw,
+            "properties": properties,
+            "timestamp": datetime.now().isoformat(),
+        }
+        path = Path(self.output_dir) / "final_parameters.json"
+        with path.open("w", encoding="utf-8") as handle:
+            json.dump(document, handle, indent=2)
+        print(
+            f"  Best verified parameters: objective={document['objective']:.6f} "
+            f"-> {path}"
+        )
+        return document
 
     def _save_history(self):
         """

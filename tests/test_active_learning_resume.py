@@ -3,6 +3,7 @@ import json
 import pandas as pd
 
 from engine.active_learning import ActiveLearner
+from engine.validate_final_parameters import _load_parameters
 
 
 def test_active_learning_restores_last_completed_round(tmp_path):
@@ -61,3 +62,32 @@ def test_active_learning_completed_history_runs_no_more_rounds(tmp_path):
     assert start_round == 3
     assert early_stopped
 
+
+def test_active_learning_exports_best_lammps_verified_parameters(tmp_path):
+    learner = ActiveLearner.__new__(ActiveLearner)
+    learner.output_dir = str(tmp_path)
+    learner.param_names = ["q1", "q2"]
+    learner.config = {"targets": {"density": {"value": 1.0}}}
+    frame = pd.DataFrame([
+        {
+            "round": 0, "label": "bo", "success": True,
+            "objective": 0.20, "q1": 0.1, "q2": -0.1,
+            "calc_density": 0.9,
+        },
+        {
+            "round": 1, "label": "al_round_1", "success": True,
+            "objective": 0.08, "q1": 0.2, "q2": -0.2,
+            "calc_density": 0.98,
+        },
+        {
+            "round": 1, "label": "failed", "success": False,
+            "objective": 0.01, "q1": 0.3, "q2": -0.3,
+            "calc_density": 1.0,
+        },
+    ])
+
+    document = learner._write_final_parameters(frame)
+    path = tmp_path / "final_parameters.json"
+    assert document["objective"] == 0.08
+    assert document["source_label"] == "al_round_1"
+    assert _load_parameters(path) == {"q1": 0.2, "q2": -0.2}
