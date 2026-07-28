@@ -347,6 +347,13 @@ def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: 
             if key not in mapping:
                 raise InputFileError(document.path, 1, f"unknown {stage} setting {key!r}")
             mapped = mapping[key]
+            list_settings = {
+                "sample": {"seeds", "radii"},
+                "nn": {"hidden_layers"},
+                "al": {"local_radii"},
+            }
+            if mapped in list_settings.get(stage, set()) and not isinstance(value, list):
+                value = [value]
             if stage == "nn" and mapped == "model" and str(value).lower() == "ann":
                 value = "mlp_ensemble"
             destination[mapped] = value

@@ -118,3 +118,10 @@ def test_bo_stability_audit_can_be_disabled_for_smoke_runs(tmp_path):
 
     compiled = compile_input(parse_input_file(path))
     assert compiled.config["optimization"]["stability_audit"]["enabled"] is False
+
+
+def test_single_sample_seed_is_normalized_to_a_list():
+    compiled = compile_input(
+        parse_input_file(ROOT / "examples" / "btah" / "cluster_smoke.in")
+    )
+    assert compiled.project_data["stages"]["sample"]["seeds"] == [101]
