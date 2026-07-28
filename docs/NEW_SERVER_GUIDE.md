@@ -108,6 +108,27 @@ job may wait even when many CPUs are free.
 The reusable machine profile is stored in `~/.config/ffopt/machines.toml`. Scientific inputs do
 not contain server paths, core counts, partitions, or MPI commands.
 
+Create a smaller two-node profile for the installation smoke test. It runs two candidates on
+each node and requests only 4 GB per node, so it can often use partially occupied nodes:
+
+```bash
+ffopt machine configure \
+  --name ccelab-smoke4 \
+  --backend slurm \
+  --lammps /storage/home/liguoling/peizy/software/anaconda3/envs/ffopt-cpu/bin/lmp \
+  --mpi /storage/home/liguoling/peizy/software/anaconda3/envs/ffopt-cpu/bin/mpirun \
+  --partition CPU \
+  --nodes 2 \
+  --cores 16 \
+  --workers 4 \
+  --ranks 4 \
+  --omp-threads 1 \
+  --memory-per-node 4G \
+  --walltime 02:00:00 \
+  --timeout 7200 \
+  --force
+```
+
 ## 5. Create an independent BTAH verification project
 
 ```bash
@@ -128,8 +149,8 @@ deliberately short. It verifies the whole software path; it is not a production 
 ```bash
 ffopt check ffopt.in
 ffopt explain ffopt.in
-ffopt doctor --project ffopt.in --machine ccelab-2node
-ffopt run ffopt.in --machine ccelab-2node --run-id install-smoke --dry-run
+ffopt doctor --project ffopt.in --machine ccelab-smoke4
+ffopt run ffopt.in --machine ccelab-smoke4 --run-id install-smoke --dry-run
 ```
 
 Do not submit if `check` or `doctor` reports a failure. `--dry-run` creates no SLURM job and shows
@@ -141,7 +162,7 @@ Interactive automatic progression, while the SSH terminal remains connected:
 
 ```bash
 ffopt run ffopt.in \
-  --machine ccelab-2node \
+  --machine ccelab-smoke4 \
   --run-id install-smoke \
   --watch \
   --poll-seconds 60
@@ -152,14 +173,14 @@ SLURM stage finishes. FFOpt reads `state.sqlite`, keeps completed stages, and su
 stage:
 
 ```bash
-ffopt run ffopt.in --machine ccelab-2node --run-id install-smoke
+ffopt run ffopt.in --machine ccelab-smoke4 --run-id install-smoke
 ```
 
 Monitor without changing the calculation:
 
 ```bash
 squeue -u peizy
-ffopt status --project ffopt.in --machine ccelab-2node --run-id install-smoke
+ffopt status --project ffopt.in --machine ccelab-smoke4 --run-id install-smoke
 ```
 
 The full stage order is `BO -> sample -> ANN -> AL -> validate`. Logs, checkpoints, trained ANN,
