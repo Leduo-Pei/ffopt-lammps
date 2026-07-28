@@ -1239,6 +1239,8 @@ class LAMMPSRunner:
                         "MKL_NUM_THREADS": str(self.omp_threads),
                     },
                     timeout=self.timeout,
+                    mpi_launcher=self.mpiexec if self.use_mpi else None,
+                    mpi_ranks=self.cores if self.use_mpi else 1,
                 )
             else:
                 result = subprocess.run(

@@ -5,11 +5,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import subprocess
 import time
 import uuid
 from pathlib import Path
 from typing import Any
+
+from .mpi_local_exec import build_command
 
 
 def _atomic_json(path: Path, data: dict[str, Any]) -> None:
@@ -18,13 +21,31 @@ def _atomic_json(path: Path, data: dict[str, Any]) -> None:
     os.replace(temporary, path)
 
 
+def request_command(data: dict[str, Any]) -> list[str]:
+    command = [str(item) for item in data["command"]]
+    ranks = int(data.get("mpi_ranks", 1))
+    launcher = str(data.get("mpi_launcher", ""))
+    if ranks <= 1 or not launcher:
+        return command
+    cpus = None
+    if hasattr(os, "sched_getaffinity"):
+        cpus = ",".join(str(cpu) for cpu in sorted(os.sched_getaffinity(0)))
+    return build_command(
+        launcher,
+        ranks,
+        command,
+        hostname=socket.gethostname(),
+        cpu_list=cpus,
+    )
+
+
 def execute_request(data: dict[str, Any]) -> dict[str, Any]:
     environment = {**os.environ, **{
         str(key): str(value) for key, value in data.get("env", {}).items()
     }}
     try:
         result = subprocess.run(
-            [str(item) for item in data["command"]],
+            request_command(data),
             cwd=str(data["cwd"]),
             env=environment,
             capture_output=True,

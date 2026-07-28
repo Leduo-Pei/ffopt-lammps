@@ -157,6 +157,8 @@ class SlurmCommandPool:
         cwd: str,
         env: dict[str, str],
         timeout: int,
+        mpi_launcher: str | None = None,
+        mpi_ranks: int = 1,
     ) -> CommandResult:
         deadline = time.monotonic() + max(1, int(timeout))
         rank, lock_handle = self._acquire_slot(deadline)
@@ -172,6 +174,8 @@ class SlurmCommandPool:
                 "cwd": str(cwd),
                 "env": {str(key): str(value) for key, value in env.items()},
                 "timeout": int(timeout),
+                "mpi_launcher": str(mpi_launcher) if mpi_launcher else "",
+                "mpi_ranks": int(mpi_ranks),
             })
             while time.monotonic() < deadline:
                 if response_path.exists():
