@@ -170,6 +170,7 @@ def build_machine_profile(
             "nodes": nodes,
             "cores": allocated_cpus,
             "tasks": workers,
+            **({"tasks_per_node": workers // nodes} if workers % nodes == 0 else {}),
             "cpus_per_task": ranks * omp_threads,
             "distributed_steps": True,
             "time": walltime,
@@ -180,6 +181,7 @@ def build_machine_profile(
             "nodes": 1,
             "cores": ranks * omp_threads,
             "tasks": 1,
+            "tasks_per_node": 1,
             "cpus_per_task": ranks * omp_threads,
         }
         single_python = {

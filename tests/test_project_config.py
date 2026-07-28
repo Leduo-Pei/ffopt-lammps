@@ -90,6 +90,7 @@ class ProjectConfigTests(unittest.TestCase):
         )
         self.assertEqual(profile["cluster"]["bo"]["nodes"], 2)
         self.assertEqual(profile["cluster"]["bo"]["tasks"], 24)
+        self.assertEqual(profile["cluster"]["bo"]["tasks_per_node"], 12)
         self.assertEqual(profile["cluster"]["bo"]["cpus_per_task"], 4)
         self.assertTrue(profile["cluster"]["bo"]["distributed_steps"])
         self.assertEqual(profile["parallel"]["scheduler_launcher"], "srun")

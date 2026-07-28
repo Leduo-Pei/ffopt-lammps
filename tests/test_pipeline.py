@@ -158,6 +158,7 @@ def test_slurm_script_allocates_distributed_candidate_steps(tmp_path, monkeypatc
             "nodes": 2,
             "cores": 96,
             "tasks": 96,
+            "tasks_per_node": 48,
             "cpus_per_task": 1,
             "distributed_steps": True,
             "time": "14-00:00:00",
@@ -174,6 +175,7 @@ def test_slurm_script_allocates_distributed_candidate_steps(tmp_path, monkeypatc
     )
     assert "#SBATCH --nodes=2" in script
     assert "#SBATCH --ntasks=96" in script
+    assert "#SBATCH --ntasks-per-node=48" in script
     assert "#SBATCH --cpus-per-task=1" in script
 
 

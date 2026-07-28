@@ -109,11 +109,15 @@ class SlurmCommandPool:
             f"--nodes={self.nodes}",
             f"--ntasks={self.workers}",
             f"--cpus-per-task={self.cpus_per_worker}",
+        ]
+        if self.workers % self.nodes == 0:
+            command.append(f"--ntasks-per-node={self.workers // self.nodes}")
+        command.extend([
             "--distribution=block:block",
             sys.executable,
             "-m", "workflow.slurm_worker",
             "--root", str(self.root),
-        ]
+        ])
         self._process = subprocess.Popen(
             command,
             stdout=self._stdout_handle,

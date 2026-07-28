@@ -380,6 +380,10 @@ class PipelineRunner:
                 f"#SBATCH --ntasks={profile.get('tasks', profile.get('cores', 1))}",
                 f"#SBATCH --cpus-per-task={profile.get('cpus_per_task', 1)}",
             ]
+            if profile.get("tasks_per_node"):
+                task_directives.append(
+                    f"#SBATCH --ntasks-per-node={profile['tasks_per_node']}"
+                )
         else:
             task_directives = [
                 "#SBATCH --ntasks=1",
