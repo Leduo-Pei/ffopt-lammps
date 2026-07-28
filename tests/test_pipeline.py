@@ -259,7 +259,9 @@ def test_watch_stops_after_terminal_slurm_failure(tmp_path, monkeypatch):
             spec.name, spec.signature, spec.command, spec.output_dir, spec.artifacts
         )
         state.transition(spec.name, "waiting", job_id="456")
-    monkeypatch.setattr(runner, "_slurm_state", lambda _: "FAILED")
+    scheduler_states = iter(["RUNNING", "FAILED"])
+    monkeypatch.setattr(runner, "_slurm_state", lambda _: next(scheduler_states))
+    monkeypatch.setattr("workflow.pipeline.time.sleep", lambda _: None)
     submit_calls = []
     monkeypatch.setattr(
         runner, "_submit_slurm", lambda *_: submit_calls.append("submitted")
@@ -268,6 +270,41 @@ def test_watch_stops_after_terminal_slurm_failure(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="run the same command again"):
         runner.run()
     assert submit_calls == []
+
+
+def test_new_invocation_resubmits_already_failed_slurm_stage(
+    tmp_path, monkeypatch
+):
+    project = _project(tmp_path)
+    project.data["pipeline"]["stages"] = ["bo"]
+    config_path = tmp_path / "expanded.yaml"
+    config_path.write_text("manifest: {system_name: demo}\n", encoding="utf-8")
+    config = _config()
+    config["machine"]["backend"] = "slurm"
+    config["cluster"] = {"bo": {}}
+    monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: config)
+    runner = PipelineRunner(
+        project=project, machine="cluster", config_path=config_path,
+        run_id="resume", resume=True,
+    )
+    spec = runner.build_specs()[0]
+    runner.root.mkdir(parents=True, exist_ok=True)
+    with WorkflowState(runner.state_path) as state:
+        state.initialize({"scientific_hash": None})
+        state.prepare(
+            spec.name, spec.signature, spec.command, spec.output_dir, spec.artifacts
+        )
+        state.transition(spec.name, "waiting", job_id="old-job")
+    monkeypatch.setattr(runner, "_slurm_state", lambda _: "TIMEOUT")
+    submit_calls = []
+
+    def fake_submit(state, stage):
+        submit_calls.append(stage.name)
+        state.transition(stage.name, "waiting", job_id="new-job")
+
+    monkeypatch.setattr(runner, "_submit_slurm", fake_submit)
+    assert runner.run() == "waiting"
+    assert submit_calls == ["bo"]
 
 
 def test_pipeline_allows_method_change_and_reuses_upstream_bo(tmp_path, monkeypatch):

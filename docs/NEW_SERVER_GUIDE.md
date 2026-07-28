@@ -169,9 +169,11 @@ optimized parameters, computed properties, and final trajectories are written be
 btah-validation/runs/btah_cluster_smoke/pipelines/install-smoke/
 ```
 
-If a time limit kills a stage, use the same `ffopt run` command. Do not delete the run directory
-or change `--run-id`. If the scientific input must change, use a new run ID or `--new`; FFOpt will
-not silently combine incompatible checkpoints.
+If a time limit kills a stage, use the same `ffopt run` command and FFOpt resubmits that stage
+from its checkpoint. Do not delete the run directory or change `--run-id`. A watched job that
+fails for another reason stops instead of retrying forever; inspect the named stage log and run
+the command again after correcting the problem. If the scientific input must change, use a new
+run ID or `--new`; FFOpt will not silently combine incompatible checkpoints.
 
 ## 8. Start a production BTAH calculation only after the smoke test
 

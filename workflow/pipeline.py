@@ -105,6 +105,7 @@ class PipelineRunner:
         self.dry_run = dry_run
         self.watch = watch
         self.poll_seconds = max(1, int(poll_seconds))
+        self._observed_job_ids: set[str] = set()
         self.root = (project.run_root / "pipelines" / run_id).resolve()
         self.state_path = self.root / "state.sqlite"
         pipeline_cfg = project.data.get("pipeline", {})
@@ -485,6 +486,7 @@ class PipelineRunner:
             state.transition(spec.name, "failed", message=completed.stdout.strip())
             raise RuntimeError(f"Could not parse SLURM job id: {completed.stdout!r}")
         job_id = match.group(1)
+        self._observed_job_ids.add(job_id)
         state.transition(
             spec.name,
             "waiting",
@@ -545,13 +547,17 @@ class PipelineRunner:
                 if refreshed == "completed":
                     continue
                 if refreshed == "waiting":
+                    if record.job_id:
+                        self._observed_job_ids.add(record.job_id)
                     return "waiting"
                 record = state.get(spec.name)
                 message = record.message if record else "unknown scheduler failure"
-                raise RuntimeError(
-                    f"SLURM stage {spec.name!r} failed: {message}. "
-                    "Inspect its log, then run the same command again to resume."
-                )
+                failed_job_id = record.job_id if record else None
+                if not self.resume or failed_job_id in self._observed_job_ids:
+                    raise RuntimeError(
+                        f"SLURM stage {spec.name!r} failed: {message}. "
+                        "Inspect its log, then run the same command again to resume."
+                    )
             if record and record.status in {"failed", "running"} and not self.resume:
                 raise RuntimeError(
                     f"Stage {spec.name!r} is {record.status}; rerun with --resume"
