@@ -28,6 +28,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from .property_evaluators import PropertyEvaluationContext, build_property_plan
+from workflow.slurm_pool import SlurmCommandPool
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +147,7 @@ class LAMMPSRunner:
         self.scheduler_launcher = parallel.get("scheduler_launcher")
         self.scheduler_node_count = max(1, int(parallel.get("scheduler_nodes", 1)))
         self.workers_per_node = max(1, int(parallel.get("workers_per_node", 1)))
+        self.scheduler_pool = SlurmCommandPool.from_config(config)
 
         # -- targets (for objective and sanity references) --
         self.targets = config["targets"]
@@ -1228,10 +1230,21 @@ class LAMMPSRunner:
             _env["I_MPI_FABRICS"] = "shm"
 
         try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True,
-                timeout=self.timeout, cwd=cwd, env=_env,
-            )
+            if self.scheduler_pool is not None:
+                result = self.scheduler_pool.run(
+                    lammps_command + var_args,
+                    cwd=cwd,
+                    env={
+                        "OMP_NUM_THREADS": str(self.omp_threads),
+                        "MKL_NUM_THREADS": str(self.omp_threads),
+                    },
+                    timeout=self.timeout,
+                )
+            else:
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True,
+                    timeout=self.timeout, cwd=cwd, env=_env,
+                )
         except subprocess.TimeoutExpired:
             self._dump_diagnostic(cwd, f"TIMEOUT after {self.timeout}s")
             return None
