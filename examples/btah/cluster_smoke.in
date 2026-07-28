@@ -38,7 +38,9 @@ property bulk
     # Short timings are for installation verification only. The protocol
     # remains the standard minimization followed by 300 K NPT.
     equilibration 500
-    production 1000
+    # in.bulk.mol reports a 5,000-step block average, so the smoke production
+    # run must be at least 5,000 steps to emit nonzero averaged properties.
+    production 5000
 
     target a         4.2422 A      weight 1.0 tolerance 0.1
     target b        17.8270 A      weight 1.0 tolerance 0.3
