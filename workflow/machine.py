@@ -119,6 +119,7 @@ def build_machine_profile(
     nodes: int = 1,
     gpus: int = 0,
     walltime: str = "24:00:00",
+    memory_per_node: str | None = None,
 ) -> dict[str, Any]:
     if backend not in {"local", "slurm"}:
         raise ValueError("backend must be 'local' or 'slurm'")
@@ -127,6 +128,9 @@ def build_machine_profile(
     omp_threads = max(1, int(omp_threads))
     nodes = max(1, int(nodes))
     gpus = max(0, int(gpus))
+    memory = str(memory_per_node or "0").strip()
+    if not memory:
+        memory = "0"
     workers = max(1, int(workers or max(1, cpu_count // (ranks * omp_threads))))
     profile: dict[str, Any] = {
         "machine": {
@@ -174,7 +178,7 @@ def build_machine_profile(
             "cpus_per_task": ranks * omp_threads,
             "distributed_steps": True,
             "time": walltime,
-            "mem": "0",
+            "mem": memory,
         }
         single_lammps = {
             **distributed,
@@ -190,7 +194,7 @@ def build_machine_profile(
             "nodes": 1,
             "cores": per_node_cpus,
             "time": walltime,
-            "mem": "0",
+            "mem": memory,
             **({"gpu": gpus} if gpus else {}),
         }
         profile["cluster"] = {

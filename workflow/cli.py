@@ -756,6 +756,7 @@ def cmd_machine(args: argparse.Namespace) -> None:
         nodes=args.nodes,
         gpus=args.gpus,
         walltime=args.walltime,
+        memory_per_node=args.memory_per_node,
     )
     path = save_machine_profile(args.name, profile, overwrite=args.force)
     print(f"Machine profile saved: {path}")
@@ -998,6 +999,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="GPUs requested by NN/AL stages (default: 0).",
     )
     machine.add_argument("--walltime", default="24:00:00")
+    machine.add_argument(
+        "--memory-per-node",
+        help=(
+            "SLURM memory requested on each node, for example 64G. "
+            "When omitted, the cluster default is used."
+        ),
+    )
     machine.add_argument("--force", action="store_true")
     machine.set_defaults(function=cmd_machine)
     for name, function in (

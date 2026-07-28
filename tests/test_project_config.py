@@ -87,11 +87,14 @@ class ProjectConfigTests(unittest.TestCase):
             nodes=2,
             cores=96,
             partition="CPU",
+            memory_per_node="64G",
         )
         self.assertEqual(profile["cluster"]["bo"]["nodes"], 2)
         self.assertEqual(profile["cluster"]["bo"]["tasks"], 24)
         self.assertEqual(profile["cluster"]["bo"]["tasks_per_node"], 12)
         self.assertEqual(profile["cluster"]["bo"]["cpus_per_task"], 4)
+        self.assertEqual(profile["cluster"]["bo"]["mem"], "64G")
+        self.assertEqual(profile["cluster"]["nn"]["mem"], "64G")
         self.assertTrue(profile["cluster"]["bo"]["distributed_steps"])
         self.assertEqual(profile["parallel"]["scheduler_launcher"], "srun")
         self.assertEqual(profile["parallel"]["workers_per_node"], 12)

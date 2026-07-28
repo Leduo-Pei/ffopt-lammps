@@ -179,6 +179,36 @@ def test_slurm_script_allocates_distributed_candidate_steps(tmp_path, monkeypatc
     assert "#SBATCH --cpus-per-task=1" in script
 
 
+def test_slurm_script_requests_explicit_memory_per_node(tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    config_path = tmp_path / "expanded.yaml"
+    config_path.write_text("manifest: {system_name: demo}\n", encoding="utf-8")
+    config = _config()
+    config["machine"]["backend"] = "slurm"
+    config["cluster"] = {
+        "bo": {
+            "partition": "CPU",
+            "nodes": 2,
+            "cores": 16,
+            "tasks": 4,
+            "tasks_per_node": 2,
+            "cpus_per_task": 4,
+            "distributed_steps": True,
+            "time": "02:00:00",
+            "mem": "64G",
+        },
+    }
+    monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: config)
+    runner = PipelineRunner(
+        project=project, machine="ccelab-smoke", config_path=config_path,
+        run_id="memory", dry_run=True,
+    )
+    script = runner._write_slurm_script(runner.build_specs()[0]).read_text(
+        encoding="utf-8"
+    )
+    assert "#SBATCH --mem=64G" in script
+
+
 def test_pipeline_allows_method_change_and_reuses_upstream_bo(tmp_path, monkeypatch):
     project = _project(tmp_path)
     project.data["pipeline"]["stages"] = ["bo", "nn"]
