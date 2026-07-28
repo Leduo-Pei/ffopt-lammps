@@ -376,9 +376,15 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         checks.append(("SLURM sbatch", sbatch is not None, sbatch or "not on this host"))
         executable = Path(config["lammps"]["executable"])
         checks.append(("LAMMPS executable", executable.exists(), str(executable)))
-        launcher_name = str(config["lammps"].get("mpiexec", "srun"))
-        launcher = shutil.which(launcher_name)
-        checks.append(("SLURM launcher", launcher is not None, launcher or launcher_name))
+        mpi_name = str(config["lammps"].get("mpiexec", "mpiexec"))
+        mpi_launcher = shutil.which(mpi_name)
+        checks.append(("MPI launcher", mpi_launcher is not None, mpi_launcher or mpi_name))
+        step_name = str(config.get("parallel", {}).get("scheduler_launcher", "srun"))
+        step_launcher = shutil.which(step_name)
+        checks.append((
+            "SLURM step launcher", step_launcher is not None,
+            step_launcher or step_name,
+        ))
 
     def visit_files(value: object, key: str = "") -> None:
         if isinstance(value, dict):

@@ -136,7 +136,7 @@ def build_machine_profile(
         },
         "lammps": {
             "executable": lammps or _detect_lammps(),
-            "mpiexec": mpi or ("srun" if backend == "slurm" else _detect_mpi()),
+            "mpiexec": mpi or _detect_mpi(),
             "timeout": int(timeout),
         },
         "parallel": {
@@ -144,6 +144,7 @@ def build_machine_profile(
             "cores_per_worker": ranks,
             "omp_threads_per_worker": omp_threads,
             "use_mpi": ranks > 1 or backend == "slurm",
+            **({"scheduler_launcher": "srun"} if backend == "slurm" else {}),
         },
         "machine_learning": {"device": "auto"},
     }
@@ -164,8 +165,8 @@ def build_machine_profile(
             "qos": qos or "",
             "nodes": nodes,
             "cores": allocated_cpus,
-            "tasks": allocated_cpus // omp_threads,
-            "cpus_per_task": omp_threads,
+            "tasks": workers,
+            "cpus_per_task": ranks * omp_threads,
             "distributed_steps": True,
             "time": walltime,
             "mem": "0",
@@ -174,7 +175,8 @@ def build_machine_profile(
             **distributed,
             "nodes": 1,
             "cores": ranks * omp_threads,
-            "tasks": ranks,
+            "tasks": 1,
+            "cpus_per_task": ranks * omp_threads,
         }
         single_python = {
             "partition": partition or "",

@@ -80,7 +80,7 @@ class ProjectConfigTests(unittest.TestCase):
             name="ccelab-2node",
             backend="slurm",
             lammps="/opt/ffopt/bin/lmp",
-            mpi="srun",
+            mpi="/opt/ffopt/bin/mpirun",
             workers=24,
             ranks=4,
             omp_threads=1,
@@ -89,12 +89,14 @@ class ProjectConfigTests(unittest.TestCase):
             partition="CPU",
         )
         self.assertEqual(profile["cluster"]["bo"]["nodes"], 2)
-        self.assertEqual(profile["cluster"]["bo"]["tasks"], 96)
+        self.assertEqual(profile["cluster"]["bo"]["tasks"], 24)
+        self.assertEqual(profile["cluster"]["bo"]["cpus_per_task"], 4)
         self.assertTrue(profile["cluster"]["bo"]["distributed_steps"])
+        self.assertEqual(profile["parallel"]["scheduler_launcher"], "srun")
         self.assertEqual(profile["cluster"]["nn"]["nodes"], 1)
         self.assertEqual(profile["cluster"]["nn"]["cores"], 48)
         self.assertNotIn("gpu", profile["cluster"]["nn"])
-        self.assertEqual(profile["cluster"]["validate"]["tasks"], 4)
+        self.assertEqual(profile["cluster"]["validate"]["tasks"], 1)
 
     def test_generated_json_config_is_reloadable(self) -> None:
         path = write_generated_config(self.project, "local")

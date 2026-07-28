@@ -18,6 +18,7 @@ EvalResult carries:
 import os
 import shutil
 import subprocess
+import sys
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -140,6 +141,7 @@ class LAMMPSRunner:
         self.omp_threads = parallel.get("omp_threads_per_worker", 1)
         self.use_mpi     = parallel["use_mpi"]
         self.max_workers = max(1, int(parallel["max_workers"]))
+        self.scheduler_launcher = parallel.get("scheduler_launcher")
 
         # -- targets (for objective and sanity references) --
         self.targets = config["targets"]
@@ -1127,11 +1129,27 @@ class LAMMPSRunner:
     # ====================================================================== #
 
     def _mpi_prefix(self, ranks: int) -> List[str]:
-        """Build a launcher prefix, reserving one exclusive SLURM job step."""
+        """Build a local or scheduler-aware MPI launcher prefix."""
+        if self.scheduler_launcher:
+            cpus = int(ranks) * int(self.omp_threads)
+            return [
+                str(self.scheduler_launcher),
+                "--exact",
+                "--exclusive",
+                "--nodes=1",
+                "--ntasks=1",
+                "--cpus-per-task", str(cpus),
+                sys.executable,
+                "-m", "workflow.mpi_local_exec",
+                "--launcher", self.mpiexec,
+                "--ranks", str(ranks),
+                "--",
+            ]
         launcher = os.path.basename(str(self.mpiexec)).lower()
         if launcher in {"srun", "srun.exe"}:
             return [
                 self.mpiexec,
+                "--exact",
                 "--exclusive",
                 "--nodes=1",
                 "--ntasks", str(ranks),

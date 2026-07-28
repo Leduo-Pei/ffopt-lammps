@@ -1,18 +1,29 @@
+import sys
+
 from engine.lammps_interface import LAMMPSRunner
 
 
-def _runner(launcher: str, omp_threads: int = 1) -> LAMMPSRunner:
+def _runner(
+    launcher: str,
+    omp_threads: int = 1,
+    scheduler_launcher: str | None = None,
+) -> LAMMPSRunner:
     runner = object.__new__(LAMMPSRunner)
     runner.mpiexec = launcher
     runner.omp_threads = omp_threads
+    runner.scheduler_launcher = scheduler_launcher
     return runner
 
 
-def test_srun_launcher_reserves_an_exclusive_single_node_step():
-    prefix = _runner("srun")._mpi_prefix(4)
-    assert prefix == [
-        "srun", "--exclusive", "--nodes=1", "--ntasks", "4",
-        "--cpus-per-task", "1",
+def test_slurm_launcher_wraps_local_mpi_in_an_exact_single_node_step():
+    prefix = _runner("/opt/mpi/mpirun", scheduler_launcher="srun")._mpi_prefix(4)
+    assert prefix[:8] == [
+        "srun", "--exact", "--exclusive", "--nodes=1", "--ntasks=1",
+        "--cpus-per-task", "4", sys.executable,
+    ]
+    assert prefix[8:] == [
+        "-m", "workflow.mpi_local_exec", "--launcher", "/opt/mpi/mpirun",
+        "--ranks", "4", "--",
     ]
 
 

@@ -80,7 +80,7 @@ ffopt machine configure \
   --name ccelab-2node \
   --backend slurm \
   --lammps /storage/home/liguoling/peizy/software/anaconda3/envs/ffopt-cpu/bin/lmp \
-  --mpi srun \
+  --mpi /storage/home/liguoling/peizy/software/anaconda3/envs/ffopt-cpu/bin/mpirun \
   --partition CPU \
   --nodes 2 \
   --cores 96 \
