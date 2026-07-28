@@ -93,6 +93,7 @@ class ProjectConfigTests(unittest.TestCase):
         self.assertEqual(profile["cluster"]["bo"]["cpus_per_task"], 4)
         self.assertTrue(profile["cluster"]["bo"]["distributed_steps"])
         self.assertEqual(profile["parallel"]["scheduler_launcher"], "srun")
+        self.assertEqual(profile["parallel"]["workers_per_node"], 12)
         self.assertEqual(profile["cluster"]["nn"]["nodes"], 1)
         self.assertEqual(profile["cluster"]["nn"]["cores"], 48)
         self.assertNotIn("gpu", profile["cluster"]["nn"])

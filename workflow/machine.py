@@ -144,7 +144,11 @@ def build_machine_profile(
             "cores_per_worker": ranks,
             "omp_threads_per_worker": omp_threads,
             "use_mpi": ranks > 1 or backend == "slurm",
-            **({"scheduler_launcher": "srun"} if backend == "slurm" else {}),
+            **({
+                "scheduler_launcher": "srun",
+                "scheduler_nodes": nodes,
+                "workers_per_node": math.ceil(workers / nodes),
+            } if backend == "slurm" else {}),
         },
         "machine_learning": {"device": "auto"},
     }
