@@ -146,7 +146,6 @@ class LAMMPSRunner:
         self.scheduler_launcher = parallel.get("scheduler_launcher")
         self.scheduler_node_count = max(1, int(parallel.get("scheduler_nodes", 1)))
         self.workers_per_node = max(1, int(parallel.get("workers_per_node", 1)))
-        self.scheduler_nodes = self._discover_scheduler_nodes()
 
         # -- targets (for objective and sanity references) --
         self.targets = config["targets"]
@@ -1133,32 +1132,13 @@ class LAMMPSRunner:
     # Private: LAMMPS execution                                              #
     # ====================================================================== #
 
-    def _discover_scheduler_nodes(self) -> List[str]:
-        if not self.scheduler_launcher:
-            return []
-        allocation = os.environ.get("SLURM_JOB_NODELIST", "").strip()
-        if not allocation:
-            return []
-        try:
-            result = subprocess.run(
-                ["scontrol", "show", "hostnames", allocation],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return []
-        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
-
-    def _scheduler_node(self, cwd: str) -> Optional[str]:
-        if not self.scheduler_nodes:
-            return None
+    def _scheduler_node_index(self, cwd: str) -> int:
         identifiers = re.findall(r"(?:eval|candidate)_(\d+)", str(cwd))
         if identifiers:
             index = int(identifiers[-1])
         else:
             index = zlib.crc32(str(cwd).encode("utf-8"))
-        return self.scheduler_nodes[index % len(self.scheduler_nodes)]
+        return index % self.scheduler_node_count
 
     def _mpi_prefix(self, ranks: int, cwd: str = "") -> List[str]:
         """Build a local or scheduler-aware MPI launcher prefix."""
@@ -1172,9 +1152,8 @@ class LAMMPSRunner:
                 "--ntasks=1",
                 "--cpus-per-task", str(cpus),
             ]
-            node = self._scheduler_node(cwd)
-            if node:
-                prefix.extend(["--nodelist", node])
+            if self.scheduler_node_count > 1:
+                prefix.append(f"--relative={self._scheduler_node_index(cwd)}")
             return prefix + [
                 sys.executable,
                 "-m", "workflow.mpi_local_exec",

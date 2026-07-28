@@ -12,7 +12,7 @@ def _runner(
     runner.mpiexec = launcher
     runner.omp_threads = omp_threads
     runner.scheduler_launcher = scheduler_launcher
-    runner.scheduler_nodes = []
+    runner.scheduler_node_count = 1
     runner.workers_per_node = 12
     return runner
 
@@ -31,9 +31,9 @@ def test_slurm_launcher_wraps_local_mpi_in_an_exact_single_node_step():
 
 def test_slurm_launcher_selects_node_from_evaluation_index():
     runner = _runner("/opt/mpi/mpirun", scheduler_launcher="srun")
-    runner.scheduler_nodes = ["node20", "node22"]
+    runner.scheduler_node_count = 2
     prefix = runner._mpi_prefix(4, "/run/round_1/eval_0003/bulk")
-    assert prefix[prefix.index("--nodelist") + 1] == "node22"
+    assert "--relative=1" in prefix
 
 
 def test_regular_mpi_launcher_keeps_n_flag():
