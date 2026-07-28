@@ -95,6 +95,7 @@ ffopt machine show --name ccelab-2node
 ```
 
 BO, sampling, audit, and AL spread independent four-rank LAMMPS evaluations across both nodes.
+Each SLURM step requests exactly four CPUs, so twelve candidates can share each 48-core node.
 ANN training is one Python process and therefore uses one 48-core node; it is not incorrectly
 split across two nodes. No GPU resource is requested.
 

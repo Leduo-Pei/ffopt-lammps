@@ -17,11 +17,11 @@ def _runner(
 
 def test_slurm_launcher_wraps_local_mpi_in_an_exact_single_node_step():
     prefix = _runner("/opt/mpi/mpirun", scheduler_launcher="srun")._mpi_prefix(4)
-    assert prefix[:8] == [
-        "srun", "--exact", "--exclusive", "--nodes=1", "--ntasks=1",
+    assert prefix[:7] == [
+        "srun", "--exact", "--nodes=1", "--ntasks=1",
         "--cpus-per-task", "4", sys.executable,
     ]
-    assert prefix[8:] == [
+    assert prefix[7:] == [
         "-m", "workflow.mpi_local_exec", "--launcher", "/opt/mpi/mpirun",
         "--ranks", "4", "--",
     ]

@@ -1135,7 +1135,6 @@ class LAMMPSRunner:
             return [
                 str(self.scheduler_launcher),
                 "--exact",
-                "--exclusive",
                 "--nodes=1",
                 "--ntasks=1",
                 "--cpus-per-task", str(cpus),
