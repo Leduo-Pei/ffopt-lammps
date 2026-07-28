@@ -73,7 +73,7 @@ for CUDA on this CPU profile; LAMMPS prints its version and help text.
 ## 4. Configure this machine once
 
 This server has two 48-core idle nodes. The profile below runs 24 independent LAMMPS candidates
-at once, with 4 MPI ranks per candidate and one OpenMP thread per rank:
+at once, with one LAMMPS process and four OpenMP threads per candidate:
 
 ```bash
 ffopt machine configure \
@@ -85,8 +85,8 @@ ffopt machine configure \
   --nodes 2 \
   --cores 96 \
   --workers 24 \
-  --ranks 4 \
-  --omp-threads 1 \
+  --ranks 1 \
+  --omp-threads 4 \
   --walltime 14-00:00:00 \
   --timeout 216000 \
   --force
@@ -94,7 +94,7 @@ ffopt machine configure \
 ffopt machine show --name ccelab-2node
 ```
 
-BO, sampling, audit, and AL spread independent four-rank LAMMPS evaluations across both nodes.
+BO, sampling, audit, and AL spread independent four-thread LAMMPS evaluations across both nodes.
 Each SLURM step requests exactly four CPUs, so twelve candidates can share each 48-core node.
 ANN training is one Python process and therefore uses one 48-core node; it is not incorrectly
 split across two nodes. No GPU resource is requested.

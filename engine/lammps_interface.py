@@ -1154,6 +1154,14 @@ class LAMMPSRunner:
             ]
             if self.scheduler_node_count > 1:
                 prefix.append(f"--relative={self._scheduler_node_index(cwd)}")
+            if int(ranks) == 1:
+                return prefix + [
+                    sys.executable,
+                    "-m", "workflow.mpi_local_exec",
+                    "--direct",
+                    "--slots", str(self.workers_per_node),
+                    "--",
+                ]
             return prefix + [
                 sys.executable,
                 "-m", "workflow.mpi_local_exec",
@@ -1202,19 +1210,16 @@ class LAMMPSRunner:
         for k, v in extra_vars.items():
             var_args.extend(["-var", str(k), str(v)])
 
-        # Build MPI command
+        lammps_command = [self.lammps_exe]
+        if self.omp_threads > 1:
+            lammps_command.extend(["-sf", "omp"])
+        lammps_command.extend(["-in", input_file])
+
+        # Build local or scheduler-aware command.
         if self.use_mpi:
-            cmd = self._mpi_prefix(self.cores, cwd) + [
-                self.lammps_exe, "-in", input_file,
-            ] + var_args
+            cmd = self._mpi_prefix(self.cores, cwd) + lammps_command + var_args
         else:
-            # use_mpi=False (--no-mpi): single-rank MPI via mpiexec -n 1.
-            # Requires Intel MPI module: module load mpi/2021.15
-            # I_MPI_FABRICS=shm forces shared-memory transport; bypasses OFI/InfiniBand
-            # which may be unavailable on login/management nodes.
-            cmd = self._mpi_prefix(1, cwd) + [
-                self.lammps_exe, "-in", input_file,
-            ] + var_args
+            cmd = self._mpi_prefix(1, cwd) + lammps_command + var_args
 
         _env = {**os.environ,
                 "OMP_NUM_THREADS": str(self.omp_threads),

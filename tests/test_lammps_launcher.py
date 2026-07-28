@@ -36,6 +36,18 @@ def test_slurm_launcher_selects_node_from_evaluation_index():
     assert "--relative=1" in prefix
 
 
+def test_slurm_openmp_worker_skips_nested_mpi():
+    runner = _runner(
+        "/opt/mpi/mpirun", omp_threads=4, scheduler_launcher="srun"
+    )
+    runner.scheduler_node_count = 2
+    prefix = runner._mpi_prefix(1, "/run/eval_0002/bulk")
+    assert "--direct" in prefix
+    assert "--launcher" not in prefix
+    assert "--cpus-per-task" in prefix
+    assert prefix[prefix.index("--cpus-per-task") + 1] == "4"
+
+
 def test_regular_mpi_launcher_keeps_n_flag():
     assert _runner("/opt/mpi/bin/mpiexec")._mpi_prefix(4) == [
         "/opt/mpi/bin/mpiexec", "-n", "4",

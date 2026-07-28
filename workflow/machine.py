@@ -143,7 +143,7 @@ def build_machine_profile(
             "max_workers": workers,
             "cores_per_worker": ranks,
             "omp_threads_per_worker": omp_threads,
-            "use_mpi": ranks > 1 or backend == "slurm",
+            "use_mpi": ranks > 1,
             **({
                 "scheduler_launcher": "srun",
                 "scheduler_nodes": nodes,

@@ -40,6 +40,12 @@ def build_command(
     ]
 
 
+def build_direct_command(command: list[str], cpu_list: str | None = None) -> list[str]:
+    if not command:
+        raise ValueError("Direct worker command is empty")
+    return ["taskset", "-c", cpu_list, *command] if cpu_list else command
+
+
 @contextlib.contextmanager
 def cpu_slot(slots: int, cpus_per_slot: int) -> Iterator[str | None]:
     """Reserve one node-local CPU slot for the lifetime of an MPI process."""
@@ -76,20 +82,27 @@ def cpu_slot(slots: int, cpus_per_slot: int) -> Iterator[str | None]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--launcher", required=True)
-    parser.add_argument("--ranks", required=True, type=int)
+    parser.add_argument("--launcher")
+    parser.add_argument("--ranks", default=1, type=int)
+    parser.add_argument("--direct", action="store_true")
     parser.add_argument("--slots", default=1, type=int)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
+    if not args.direct and not args.launcher:
+        parser.error("--launcher is required unless --direct is used")
     omp_threads = max(1, int(os.environ.get("OMP_NUM_THREADS", "1")))
     with cpu_slot(args.slots, args.ranks * omp_threads) as selected_cpus:
-        result = subprocess.run(build_command(
-            args.launcher,
-            args.ranks,
-            command,
-            cpu_list=selected_cpus,
-        ))
+        if args.direct:
+            worker_command = build_direct_command(command, selected_cpus)
+        else:
+            worker_command = build_command(
+                args.launcher,
+                args.ranks,
+                command,
+                cpu_list=selected_cpus,
+            )
+        result = subprocess.run(worker_command)
     raise SystemExit(result.returncode)
 
 
