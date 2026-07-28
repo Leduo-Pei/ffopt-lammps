@@ -91,3 +91,20 @@ def test_active_learning_exports_best_lammps_verified_parameters(tmp_path):
     assert document["objective"] == 0.08
     assert document["source_label"] == "al_round_1"
     assert _load_parameters(path) == {"q1": 0.2, "q2": -0.2}
+
+
+def test_active_learning_labels_unlabelled_sampling_rows(tmp_path):
+    learner = ActiveLearner.__new__(ActiveLearner)
+    learner.output_dir = str(tmp_path)
+    learner.param_names = ["q1"]
+    learner.config = {"targets": {}}
+    document = learner._write_final_parameters(pd.DataFrame([{
+        "round": float("nan"),
+        "label": float("nan"),
+        "candidate_id": 21,
+        "success": True,
+        "objective": 0.05,
+        "q1": 0.2,
+    }]))
+    assert document["source_label"] == "sampling"
+    assert document["source_candidate_id"] == 21

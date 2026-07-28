@@ -1214,6 +1214,10 @@ class ActiveLearner:
         )
         best = candidates.sort_values("objective").iloc[0]
         raw = {name: float(best[name]) for name in self.param_names}
+        label = best.get("label")
+        if pd.isna(label) or not str(label).strip():
+            label = "sampling" if pd.notna(best.get("candidate_id")) else "bo"
+        candidate_id = best.get("candidate_id")
         properties = {}
         for name in self.config.get("targets", {}):
             value = pd.to_numeric(best.get(f"calc_{name}"), errors="coerce")
@@ -1230,7 +1234,10 @@ class ActiveLearner:
                 if "round" in best and pd.notna(best["round"])
                 else None
             ),
-            "source_label": str(best.get("label", "")),
+            "source_label": str(label),
+            "source_candidate_id": (
+                int(candidate_id) if pd.notna(candidate_id) else None
+            ),
             "raw_free_parameters": raw,
             "properties": properties,
             "timestamp": datetime.now().isoformat(),
