@@ -8,6 +8,7 @@ import platform
 import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -287,15 +288,24 @@ def prepare_machine_test(name: str, profile: dict[str, Any]) -> dict[str, Any]:
     parallel = profile.get("parallel", {})
     ranks = max(1, int(parallel.get("cores_per_worker", 1)))
     omp_threads = max(1, int(parallel.get("omp_threads_per_worker", 1)))
+    backend = str(profile.get("machine", {}).get("backend", "local"))
     if ranks > 1:
         if Path(mpi).name.lower().startswith("srun"):
             command = [mpi, "--ntasks", str(ranks), "--cpus-per-task", str(omp_threads), lammps]
+        elif backend == "slurm":
+            command = [
+                sys.executable,
+                "-m", "workflow.mpi_local_exec",
+                "--launcher", mpi,
+                "--ranks", str(ranks),
+                "--slots", "1",
+                "--", lammps,
+            ]
         else:
             command = [mpi, "-n", str(ranks), lammps]
     else:
         command = [lammps]
     command.extend(["-in", str(input_path)])
-    backend = str(profile.get("machine", {}).get("backend", "local"))
     result: dict[str, Any] = {
         "backend": backend,
         "root": root,
@@ -371,19 +381,26 @@ def execute_machine_test(
         "job_id": job_id,
         "submission_output": completed.stdout + completed.stderr,
     }
+    output = ""
+    if wait and job_id:
+        output_path = prepared["root"] / f"slurm_{job_id}.out"
+        error_path = prepared["root"] / f"slurm_{job_id}.err"
+        output = "\n".join(
+            part for part in (
+                output_path.read_text(encoding="utf-8", errors="replace")
+                if output_path.exists() else "",
+                error_path.read_text(encoding="utf-8", errors="replace")
+                if error_path.exists() else "",
+            )
+            if part
+        )
+        result["output"] = output
     if completed.returncode != 0:
         result["status"] = "failed"
         return result
     if not wait:
         result["status"] = "submitted"
         return result
-    output_path = prepared["root"] / f"slurm_{job_id}.out" if job_id else None
-    output = (
-        output_path.read_text(encoding="utf-8", errors="replace")
-        if output_path is not None and output_path.exists()
-        else ""
-    )
-    result["output"] = output
     result["status"] = "passed" if "FFOPT_MACHINE_TEST_OK" in output else "failed"
     return result
 

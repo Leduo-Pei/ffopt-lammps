@@ -20,7 +20,7 @@ Install the current tagged alpha directly from GitHub:
 
 ```bash
 python -m pip install \
-  "ffopt-lammps[full] @ git+https://github.com/Leduo-Pei/ffopt-lammps.git@v0.2.0a2"
+  "ffopt-lammps[full] @ git+https://github.com/Leduo-Pei/ffopt-lammps.git@v0.2.0a3"
 ```
 
 For development, clone the repository and install it in editable mode:

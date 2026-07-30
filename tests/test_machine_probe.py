@@ -44,6 +44,8 @@ def test_prepare_slurm_machine_test_uses_profile_resources(tmp_path, monkeypatch
     assert "#SBATCH --mem=4G" in script
     assert "#SBATCH --cpus-per-task=4" in script
     assert "mpirun" in script
+    assert "workflow.mpi_local_exec" in script
+    assert "--slots 1" in script
     assert "FFOPT_MACHINE_TEST_OK" in result["input"].read_text(encoding="ascii")
 
 

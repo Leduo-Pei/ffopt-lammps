@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0a3 - 2026-07-30
+
+- Make the SLURM machine test use the same node-local MPI launcher as
+  production LAMMPS evaluations.
+- Include both scheduler stdout and stderr when a machine test fails.
+
 ## 0.2.0a2 - 2026-07-30
 
 - Add molecular LAMMPS data contract and cross-file compatibility checks.
