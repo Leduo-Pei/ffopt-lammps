@@ -16,31 +16,83 @@ my_project/
 
 ## Install
 
+Install the current tagged alpha directly from GitHub:
+
 ```bash
+python -m pip install \
+  "ffopt-lammps[full] @ git+https://github.com/Leduo-Pei/ffopt-lammps.git@v0.2.0a2"
+```
+
+For development, clone the repository and install it in editable mode:
+
+```bash
+git clone https://github.com/Leduo-Pei/ffopt-lammps.git
+cd ffopt-lammps
 python -m pip install -e ".[full]"
 ```
 
 LAMMPS is an external dependency. Install a CUDA build of PyTorch separately
 when GPU ANN/AL training is required.
 
+Once installed, `ffopt` can be called from any project directory. The program
+source and the user's calculation project do not need to be the same folder.
+
+## First molecular release
+
+The current alpha targets molecular force fields:
+
+- isolated molecules evaluated as part of sublimation or adsorption;
+- molecular crystals fitted to bulk and sublimation properties;
+- molecular adsorption fitted jointly with, or validated after, crystal fitting.
+
+BTAH is the regression system and exercises a difficult triclinic molecular
+crystal plus adsorption. Elemental solids, alloys, multicomponent crystals,
+polymorph searches, reactive potentials, and arbitrary LAMMPS styles are not
+yet claimed as supported. They can be added through the evaluator registry in
+later releases without changing the public workflow.
+
 ## Configure the machine once
 
 Machine settings do not belong in the scientific input:
 
 ```bash
-ffopt machine configure --name local --backend local \
-  --lammps /path/to/lmp --mpi /path/to/mpiexec
+ffopt machine probe
+ffopt machine configure --auto --name local --backend local \
+  --lammps /path/to/lmp --force
 ffopt machine show --name local
+ffopt machine test --name local
 ```
 
 Profiles are stored in `~/.config/ffopt/machines.toml`. The same `ffopt.in`
 can therefore run locally or with a named SLURM profile.
 
+For SLURM, `probe` reads `sinfo` and `--auto` writes a conservative starting
+profile. It cannot know a site's QOS, account, node-sharing, or memory policy;
+review the generated profile before production.
+
+## Check the data first
+
+FFOpt accepts ordinary text LAMMPS data files; they do not need to come from a
+particular builder. MSI2LMP output is supported when it satisfies the molecular
+data contract. Type labels must appear after `#` in `Masses` or `Pair Coeffs`,
+because labels provide stable cross-file mapping even when adsorption files use
+different numeric type IDs.
+
+```bash
+ffopt data check \
+  --bulk crystal.data --single molecule.data \
+  --complex complex.data --slab slab.data --molecule adsorbate.data
+```
+
+Structural incompatibilities are errors. Initial epsilon/sigma/charge
+differences between compatible files are warnings because `ffopt.in` overrides
+them during evaluation. Add `--strict` in CI when warnings should also fail.
+
 ## Create a project
 
 ```bash
 ffopt init my_crystal \
-  --data-file crystal.data \
+  --bulk-data crystal.data \
   --single-data molecule.data \
   --cells 2 2 2 \
   --mode full \
@@ -48,6 +100,11 @@ ffopt init my_crystal \
   --target density=1.25,1.0,g/cm3 \
   --target sublimation=80.0,0.3,kJ/mol
 ```
+
+For a combined crystal and adsorption project, add `--complex-data`,
+`--slab-data`, and `--molecule-data`. `--project-type auto` is the default and
+infers the template from the files. Omitting all targets creates a
+validation-only input instead of inventing experimental values.
 
 `ffopt init` writes every type, epsilon, sigma, charge, range, target, and
 workflow stage explicitly into `ffopt.in`. It does not create a tree of YAML
@@ -59,6 +116,8 @@ ffopt check ffopt.in
 ffopt explain ffopt.in
 ffopt run ffopt.in --dry-run
 ffopt run ffopt.in
+ffopt results ffopt.in
+ffopt logs ffopt.in --stage bo --lines 100
 ```
 
 Running the same command again automatically resumes the latest compatible
@@ -79,7 +138,8 @@ parameters
     range charge  delta  0.30
     charge_limit 1.0
     neutrality derive bhN1
-    mixing geometric
+    mixing epsilon geometric
+    mixing sigma geometric
 
     # Add this one line for charge-only optimization.
     fix epsilon sigma
@@ -93,9 +153,8 @@ end
 No `fix` command means all ranged epsilon, sigma, and charge values are free.
 Per-type ranges and fixes are also supported.
 
-`mixing geometric` maps to LAMMPS `pair_modify mix geometric` (geometric
-epsilon and sigma). `mixing arithmetic` maps to LAMMPS arithmetic mixing
-(geometric epsilon and arithmetic sigma).
+LAMMPS always mixes epsilon geometrically in this backend. Sigma may be
+geometric or arithmetic, selected independently as shown above.
 
 ## Properties and workflow
 

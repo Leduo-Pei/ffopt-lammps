@@ -9,26 +9,21 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from .lammps_data import AtomTypeSummary, LammpsDataSummary, inspect_lammps_data
+from .data_contract import check_data_files
+from .lammps_data import AtomTypeSummary
 
 BULK_TARGETS = {"a", "b", "c", "alpha", "beta", "gamma_ang", "density"}
 DEFAULT_UNITS = {
     "a": "A", "b": "A", "c": "A",
     "alpha": "degree", "beta": "degree", "gamma_ang": "degree",
-    "density": "g/cm3", "esub_proxy": "kJ/mol",
+    "density": "g/cm3", "esub_proxy": "kJ/mol", "ead": "kcal/mol",
 }
 TARGET_ALIASES = {
     "gamma": "gamma_ang",
     "sublimation": "esub_proxy",
+    "adsorption": "ead",
+    "adsorption_energy": "ead",
 }
-SUPPORTED_COEFFICIENT_STYLES = {
-    "Bond Coeffs": "harmonic",
-    "Angle Coeffs": "harmonic",
-    "Dihedral Coeffs": "harmonic",
-    "Improper Coeffs": "cvff",
-}
-
-
 @dataclass(frozen=True)
 class TargetSpec:
     name: str
@@ -93,43 +88,6 @@ def _single_charge(atom_type: AtomTypeSummary) -> float | None:
     return float(atom_type.charges[0])
 
 
-def _validate_data_contract(summary: LammpsDataSummary, label: str) -> list[str]:
-    warnings: list[str] = []
-    if summary.atom_style != "full":
-        raise ValueError(
-            f"{label} uses atom_style {summary.atom_style!r}; bundled molecular "
-            "templates require 'Atoms # full'."
-        )
-    for section, expected in SUPPORTED_COEFFICIENT_STYLES.items():
-        if section not in summary.section_styles:
-            continue
-        observed = summary.section_styles[section].split()[0]
-        if observed != expected:
-            raise ValueError(
-                f"{label} declares '{section} # {summary.section_styles[section]}'; "
-                f"the bundled template requires {expected!r}."
-            )
-    for atom_type in summary.atom_types:
-        if len(atom_type.pair_coefficients) < 2:
-            raise ValueError(
-                f"Atom type {atom_type.type_id} ({atom_type.label}) has no usable "
-                "Pair Coeffs epsilon/sigma values."
-            )
-        epsilon, sigma = atom_type.pair_coefficients[:2]
-        if epsilon <= 0.0 or sigma <= 0.0:
-            raise ValueError(
-                f"Atom type {atom_type.type_id} has non-positive epsilon/sigma: "
-                f"{epsilon}, {sigma}"
-            )
-        if len(atom_type.pair_coefficients) > 2:
-            warnings.append(
-                f"Type {atom_type.type_id} has extra Pair Coeffs columns; only "
-                "the first two are interpreted as epsilon and sigma."
-            )
-        _single_charge(atom_type)
-    return warnings
-
-
 def _copy(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     if source.resolve() != destination.resolve():
@@ -154,10 +112,15 @@ def _target_lines(targets: list[TargetSpec]) -> list[str]:
 def create_project(
     *,
     name: str,
-    data_file: str | Path,
+    data_file: str | Path | None = None,
     destination: str | Path,
     targets: Iterable[TargetSpec],
     single_data: str | Path | None = None,
+    complex_data: str | Path | None = None,
+    slab_data: str | Path | None = None,
+    molecule_data: str | Path | None = None,
+    project_type: str = "auto",
+    metal_label: str = "Au",
     mode: str = "full",
     cells: tuple[int, int, int] = (1, 1, 1),
     mixing_rule: str = "geometric",
@@ -173,6 +136,10 @@ def create_project(
         raise ValueError("Project name must start with a letter and contain no spaces")
     if mode not in {"full", "fix_sigma", "charge_only", "lj_only"}:
         raise ValueError(f"Unsupported parameter mode: {mode}")
+    if project_type not in {
+        "auto", "molecular-crystal", "adsorption", "crystal-adsorption"
+    }:
+        raise ValueError(f"Unsupported project type: {project_type}")
     if mixing_rule not in {"geometric", "arithmetic"}:
         raise ValueError("mixing_rule must be geometric or arithmetic")
     if any(int(value) < 1 for value in cells):
@@ -183,25 +150,63 @@ def create_project(
         raise ValueError("charge window and limit must be positive")
 
     target_list = list(targets)
-    if not target_list:
-        raise ValueError("At least one --target is required")
     names = [item.name for item in target_list]
     if len(names) != len(set(names)):
         raise ValueError("Targets cannot repeat")
-    unsupported = set(names) - BULK_TARGETS - {"esub_proxy"}
+    unsupported = set(names) - BULK_TARGETS - {"esub_proxy", "ead"}
     if unsupported:
         raise ValueError(f"Scaffold cannot provide targets: {sorted(unsupported)}")
     if "esub_proxy" in names and not single_data:
         raise ValueError("esub_proxy requires --single-data")
-
-    source = Path(data_file).expanduser().resolve()
-    summary = inspect_lammps_data(source)
-    warnings = _validate_data_contract(summary, "Bulk data")
-    single_source = Path(single_data).expanduser().resolve() if single_data else None
-    if single_source:
-        warnings.extend(
-            _validate_data_contract(inspect_lammps_data(single_source), "Single-molecule data")
+    adsorption_values = (complex_data, slab_data, molecule_data)
+    has_adsorption = any(value is not None for value in adsorption_values)
+    if has_adsorption and not all(value is not None for value in adsorption_values):
+        raise ValueError(
+            "Adsorption requires --complex-data, --slab-data, and --molecule-data together"
         )
+    if "ead" in names and not has_adsorption:
+        raise ValueError("ead requires all three adsorption data files")
+    if project_type == "auto":
+        project_type = (
+            "crystal-adsorption" if data_file and has_adsorption
+            else "adsorption" if has_adsorption
+            else "molecular-crystal"
+        )
+    requires_bulk = project_type in {"molecular-crystal", "crystal-adsorption"}
+    requires_adsorption = project_type in {"adsorption", "crystal-adsorption"}
+    if requires_bulk and not data_file:
+        raise ValueError(f"{project_type} requires --data-file/--bulk-data")
+    if requires_adsorption and not has_adsorption:
+        raise ValueError(f"{project_type} requires all three adsorption data files")
+    if has_adsorption and not requires_adsorption:
+        raise ValueError(
+            "Adsorption data require project type crystal-adsorption (or use --project-type auto)"
+        )
+    if not requires_bulk and data_file:
+        raise ValueError("adsorption-only projects do not use --data-file/--bulk-data")
+    if not requires_bulk and single_data:
+        raise ValueError("--single-data requires a molecular-crystal project")
+    if "esub_proxy" in names and not requires_bulk:
+        raise ValueError("sublimation requires a bulk molecular-crystal data file")
+    if set(names) & BULK_TARGETS and not requires_bulk:
+        raise ValueError("bulk targets require a molecular-crystal project")
+
+    source = Path(data_file).expanduser().resolve() if data_file else None
+    single_source = Path(single_data).expanduser().resolve() if single_data else None
+    complex_source = Path(complex_data).expanduser().resolve() if complex_data else None
+    slab_source = Path(slab_data).expanduser().resolve() if slab_data else None
+    molecule_source = Path(molecule_data).expanduser().resolve() if molecule_data else None
+    report = check_data_files(
+        bulk=source,
+        single=single_source,
+        complex=complex_source,
+        slab=slab_source,
+        molecule=molecule_source,
+    )
+    if not report.ok:
+        raise ValueError("; ".join(item.message for item in report.errors))
+    warnings = [item.message for item in report.warnings]
+    summary = report.files["bulk"] if source else report.files["molecule"]
 
     root = Path(destination).expanduser().resolve()
     if root.exists() and any(root.iterdir()) and not force:
@@ -209,12 +214,24 @@ def create_project(
             f"Destination is not empty: {root}. Pass --force to replace generated files."
         )
     root.mkdir(parents=True, exist_ok=True)
-    bulk_destination = root / "data" / "bulk" / source.name
-    _copy(source, bulk_destination)
+    bulk_destination = None
+    if source:
+        bulk_destination = root / "data" / "bulk" / source.name
+        _copy(source, bulk_destination)
     single_destination = None
     if single_source:
         single_destination = root / "data" / "molecule" / single_source.name
         _copy(single_source, single_destination)
+    adsorption_destinations: dict[str, Path] = {}
+    for role, role_source in (
+        ("complex", complex_source),
+        ("slab", slab_source),
+        ("molecule", molecule_source),
+    ):
+        if role_source:
+            destination_path = root / "data" / "adsorption" / role_source.name
+            _copy(role_source, destination_path)
+            adsorption_destinations[role] = destination_path
 
     labels: dict[int, str] = {}
     used: set[str] = set()
@@ -264,37 +281,11 @@ def create_project(
 
     bulk_targets = [item for item in target_list if item.name in BULK_TARGETS]
     sub_target = next((item for item in target_list if item.name == "esub_proxy"), None)
-    sub_block = ""
-    if sub_target and single_destination:
-        tolerance = (
-            f" tolerance {sub_target.tolerance:g}" if sub_target.tolerance is not None else ""
-        )
-        sub_block = f"""
-property sublimation
-    bulk data/bulk/{source.name}
-    single data/molecule/{single_destination.name}
-    temperature 298.15 K
-    target {sub_target.value:g} {sub_target.unit or 'kJ/mol'} weight {sub_target.weight:g}{tolerance}
-end
-"""
-
-    text = f"""# Generated by ffopt init. Review every explicit parameter and range.
-ffopt 1
-project {name}
-workflow bo sample nn al validate
-
-parameters
-    range epsilon factor {epsilon_scale[0]:g} {epsilon_scale[1]:g}
-    range sigma   factor {sigma_scale[0]:g} {sigma_scale[1]:g}
-    range charge  delta  {charge_window:g}
-    charge_limit {charge_limit:g}
-    mixing {mixing_rule}
-{neutrality}{fixed}
-    # id  label        epsilon(kcal/mol)  sigma(A)       charge(e)
-{chr(10).join(rows)}
-end
-
-property bulk
+    adsorption_target = next((item for item in target_list if item.name == "ead"), None)
+    property_blocks: list[str] = []
+    if bulk_destination and source:
+        property_blocks.append(f"""property bulk
+    # Standard protocol is fixed: energy minimization, then 300 K NPT.
     data data/bulk/{source.name}
     cells_in_data {cells[0]} {cells[1]} {cells[2]}
     temperature 300 K
@@ -302,9 +293,57 @@ property bulk
     equilibration 20000
     production 40000
 {chr(10).join(_target_lines(bulk_targets))}
+end""")
+    sub_block = ""
+    if single_destination and source:
+        target_line = ""
+        if sub_target:
+            tolerance = (
+                f" tolerance {sub_target.tolerance:g}"
+                if sub_target.tolerance is not None else ""
+            )
+            target_line = (
+                f"    target {sub_target.value:g} {sub_target.unit or 'kJ/mol'} "
+                f"weight {sub_target.weight:g}{tolerance}\n"
+            )
+        sub_block = f"""
+property sublimation
+    # Potential-energy estimate: bulk NPT mean PE - minimized isolated-molecule PE.
+    bulk data/bulk/{source.name}
+    single data/molecule/{single_destination.name}
+    temperature 298.15 K
+{target_line.rstrip()}
 end
-{sub_block}
+""".strip()
+        property_blocks.append(sub_block)
+    if adsorption_destinations:
+        target_line = ""
+        if adsorption_target:
+            tolerance = (
+                f" tolerance {adsorption_target.tolerance:g}"
+                if adsorption_target.tolerance is not None else ""
+            )
+            target_line = (
+                f"    target {adsorption_target.value:g} "
+                f"{adsorption_target.unit or 'kcal/mol'} "
+                f"weight {adsorption_target.weight:g}{tolerance}\n"
+            )
+        property_blocks.append(f"""property adsorption
+    # Without a target, adsorption is calculated only during final validation.
+    data complex data/adsorption/{adsorption_destinations['complex'].name}
+    data slab data/adsorption/{adsorption_destinations['slab'].name}
+    data molecule data/adsorption/{adsorption_destinations['molecule'].name}
+    protocol minimize
+    metal {metal_label}
+{target_line.rstrip()}
+end""")
+
+    workflow = "bo sample nn al validate" if target_list else "validate"
+    optimization_blocks = ""
+    if target_list:
+        optimization_blocks = f"""
 bo
+    # auto selects a BO method from the number of free dimensions.
     method auto
     initial_points 48
     max_rounds 200
@@ -312,6 +351,7 @@ bo
 end
 
 sample
+    # Independent local points used to train the surrogate after BO.
     points {sample_points}
     centers {min(24, max(4, estimated_dimensions))}
     center_selection diverse
@@ -329,6 +369,35 @@ al
     acquisition uncertainty
     rounds 2
     candidates 20
+end
+"""
+
+    text = f"""# Generated by ffopt init. Paths are relative to this file.
+# Review the force-field values, ranges, targets, and run lengths before production.
+ffopt 1
+project {name}
+workflow {workflow}
+
+parameters
+    # epsilon/sigma use multiplicative factors around each initial value.
+    # charge uses initial charge +/- this absolute window in elementary charge.
+    range epsilon factor {epsilon_scale[0]:g} {epsilon_scale[1]:g}
+    range sigma   factor {sigma_scale[0]:g} {sigma_scale[1]:g}
+    range charge  delta  {charge_window:g}
+    # Absolute safety bound applied after the per-type charge range.
+    charge_limit {charge_limit:g}
+    # LAMMPS always uses geometric epsilon mixing; sigma may be geometric or arithmetic.
+    mixing epsilon geometric
+    mixing sigma {mixing_rule}
+{neutrality}{fixed}
+    # id  label        epsilon(kcal/mol)  sigma(A)       charge(e)
+{chr(10).join(rows)}
+end
+
+{chr(10).join(property_blocks)}
+{optimization_blocks}
+validate
+    trajectory final
 end
 """
     input_path = root / "ffopt.in"
@@ -349,8 +418,14 @@ end
     )
     manifest = {
         "generator": "ffopt init",
-        "source_data": str(source),
+        "project_type": project_type,
+        "source_data": str(source) if source else None,
         "single_data": str(single_source) if single_source else None,
+        "adsorption_data": {
+            "complex": str(complex_source) if complex_source else None,
+            "slab": str(slab_source) if slab_source else None,
+            "molecule": str(molecule_source) if molecule_source else None,
+        },
         "parameter_mode": mode,
         "dimensions": compilation.dimensions,
         "atom_types": len(rows),

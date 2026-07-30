@@ -48,3 +48,44 @@ def test_charge_only_btah_scaffold_is_external_and_13_dimensional(tmp_path):
     assert isinstance(config["atom_types"][0]["params"]["epsilon"], float)
     assert isinstance(config["atom_types"][0]["params"]["sigma"], float)
     assert isinstance(config["atom_types"][1]["params"]["charge"], dict)
+
+
+def test_combined_scaffold_adds_targetless_adsorption_validation(tmp_path):
+    output = tmp_path / "combined"
+    result = create_project(
+        name="btah_combined",
+        data_file=ROOT / "data" / "bulk" / "BTAH_822_bulk.data",
+        single_data=ROOT / "data" / "molecule" / "BTAH_822_single.data",
+        complex_data=ROOT / "data" / "adsorption" / "ad_complex.data",
+        slab_data=ROOT / "data" / "adsorption" / "ad_slab.data",
+        molecule_data=ROOT / "data" / "adsorption" / "ad_mol.data",
+        destination=output,
+        targets=[TargetSpec("density", 1.3285, unit="g/cm3")],
+        project_type="auto",
+        mode="charge_only",
+    )
+    project = load_project(result.project_file)
+    config = compose_config(project, "local")
+    assert result.dimensions == 13
+    assert project.compilation.fitted_properties == ("bulk",)
+    assert project.compilation.validation_properties == ("sublimation", "adsorption")
+    assert config["validation"]["property_evaluators"]["adsorption"]["enabled"]
+    assert (output / "data" / "adsorption" / "ad_complex.data").exists()
+
+
+def test_targetless_adsorption_scaffold_creates_validate_only_workflow(tmp_path):
+    output = tmp_path / "adsorption"
+    result = create_project(
+        name="btah_adsorption",
+        complex_data=ROOT / "data" / "adsorption" / "ad_complex.data",
+        slab_data=ROOT / "data" / "adsorption" / "ad_slab.data",
+        molecule_data=ROOT / "data" / "adsorption" / "ad_mol.data",
+        destination=output,
+        targets=[],
+        project_type="adsorption",
+        mode="charge_only",
+    )
+    project = load_project(result.project_file)
+    assert project.data["pipeline"]["stages"] == ["validate"]
+    assert project.compilation.fitted_properties == ()
+    assert project.compilation.validation_properties == ("adsorption",)

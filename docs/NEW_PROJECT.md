@@ -8,6 +8,7 @@
 ffopt.in
 data/bulk/
 data/molecule/          # when requested
+data/adsorption/        # complex, slab, and molecule when requested
 scaffold_manifest.json
 README.md
 ```
@@ -28,19 +29,44 @@ The bundled molecular templates currently require:
   sections are present.
 - A single geometric or arithmetic LJ mixing rule.
 
-The initializer rejects incompatible files instead of guessing.
+The initializer rejects incompatible files instead of guessing. Numeric type
+IDs must match between bulk and isolated-single files. Adsorption files may
+reorder type IDs; their molecular types are matched by the unique labels after
+`#` in `Masses` or `Pair Coeffs`.
+
+Check files before creating a project:
+
+```bash
+ffopt data check --bulk crystal.data --single molecule.data
+```
 
 ## Initialization
 
 ```bash
 ffopt init my_crystal \
-  --data-file crystal.data \
+  --bulk-data crystal.data \
   --single-data molecule.data \
   --cells 2 2 2 \
   --mode charge_only \
   --target density=1.25,1.0,g/cm3 \
   --target sublimation=80.0,0.3,kJ/mol
 ```
+
+Combined crystal and adsorption fitting or validation:
+
+```bash
+ffopt init my_combined \
+  --bulk-data crystal.data --single-data molecule.data \
+  --complex-data complex.data --slab-data slab.data \
+  --molecule-data adsorbate.data \
+  --mode full \
+  --target density=1.25,1.0,g/cm3 \
+  --target sublimation=80.0,0.3,kJ/mol
+```
+
+No adsorption target was supplied here, so adsorption is evaluated only in
+the final validation. An adsorption-only validation project can omit every
+target; `ffopt init` then writes `workflow validate` automatically.
 
 Modes only determine the generated `fix` command:
 
@@ -63,7 +89,21 @@ unit-cell lengths.
 ffopt check ffopt.in
 ffopt explain ffopt.in
 ffopt run ffopt.in --dry-run
+ffopt machine test --name PROFILE
 ```
 
 Only after all three agree with the intended parameter space and properties
 should the expensive workflow begin.
+
+## Results and continuation
+
+The calculation is restartable by run ID. Repeating the same command resumes a
+compatible run; a changed scientific input requires `--new` or a different
+run ID.
+
+```bash
+ffopt run ffopt.in --machine PROFILE --run-id production
+ffopt status --project ffopt.in --machine PROFILE --run-id production
+ffopt results ffopt.in --run-id production
+ffopt logs ffopt.in --run-id production --stage sample --lines 100
+```

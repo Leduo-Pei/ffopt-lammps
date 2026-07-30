@@ -26,7 +26,8 @@ parameters
     range charge delta SIZE
     charge_limit VALUE
     neutrality derive LABEL
-    mixing geometric
+    mixing epsilon geometric
+    mixing sigma geometric
     fix epsilon sigma
     type ID LABEL EPSILON SIGMA CHARGE
 end
@@ -42,8 +43,9 @@ end
   provide per-type overrides.
 - The charge named by `neutrality derive` is removed from the independent
   search space and recovered from total charge neutrality.
-- `mixing geometric` selects geometric epsilon and sigma mixing.
-- `mixing arithmetic` selects geometric epsilon and arithmetic sigma mixing.
+- `mixing epsilon geometric` is required by the current LAMMPS backend.
+- `mixing sigma geometric|arithmetic` independently selects the sigma rule.
+- The short forms `mixing geometric` and `mixing arithmetic` remain accepted.
 
 ## Properties
 
@@ -128,6 +130,8 @@ ffopt run ffopt.in --dry-run
 ffopt run ffopt.in
 ffopt run ffopt.in --new
 ffopt validate --project ffopt.in --initial
+ffopt results ffopt.in --run-id default
+ffopt logs ffopt.in --run-id default --stage bo
 ```
 
 The expanded engine configuration is recorded as generated JSON under the run

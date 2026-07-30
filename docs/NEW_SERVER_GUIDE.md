@@ -72,6 +72,19 @@ for CUDA on this CPU profile; LAMMPS prints its version and help text.
 
 ## 4. Configure this machine once
 
+Start with a read-only probe and a ten-minute LAMMPS machine test:
+
+```bash
+ffopt machine probe --partition CPU
+ffopt machine configure --auto --name ccelab-start --partition CPU --nodes 1 --force
+ffopt machine show --name ccelab-start
+ffopt machine test --name ccelab-start
+```
+
+`--auto` is a conservative starting point, not a scheduler-policy oracle. The
+explicit production profile below remains recommended after checking the site
+limits with the administrator.
+
 This server has 48-core CPU nodes. The profile below runs 24 independent LAMMPS candidates
 at once across two nodes, with four MPI ranks per candidate:
 
@@ -181,6 +194,8 @@ Monitor without changing the calculation:
 ```bash
 squeue -u peizy
 ffopt status --project ffopt.in --machine ccelab-smoke4 --run-id install-smoke
+ffopt results ffopt.in --run-id install-smoke
+ffopt logs ffopt.in --run-id install-smoke --stage bo --lines 100
 ```
 
 The full stage order is `BO -> sample -> ANN -> AL -> validate`. Logs, checkpoints, trained ANN,

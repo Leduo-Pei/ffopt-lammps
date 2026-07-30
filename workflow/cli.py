@@ -311,13 +311,54 @@ def cmd_status(args: argparse.Namespace) -> None:
         print(f"Pipeline: {args.run_id}")
         for stage in pipeline["stages"]:
             detail = stage.get("job_id") or stage.get("message") or ""
+            artifact_paths = [Path(path) for path in stage.get("artifacts", [])]
+            artifact_count = sum(path.exists() for path in artifact_paths)
+            artifact_detail = (
+                f" artifacts={artifact_count}/{len(artifact_paths)}"
+                if artifact_paths else ""
+            )
             print(
                 f"  {stage['name']:10s} {stage['status']:10s} "
-                f"attempt={stage['attempt']:<2d} {detail}"
+                f"attempt={stage['attempt']:<2d}{artifact_detail} {detail}"
             )
-        print()
+        print(f"\nUse 'ffopt results {project.path} --run-id {args.run_id}' for exact paths.")
+        return
     for label, path in artifacts:
         print(f"{label:15s}: {path if path else '-'}")
+
+
+def cmd_results(args: argparse.Namespace) -> None:
+    from .artifacts import collect_pipeline_results, format_pipeline_results
+
+    project = load_project(args.input)
+    try:
+        report = collect_pipeline_results(project, args.run_id)
+    except FileNotFoundError as exc:
+        raise SystemExit(str(exc)) from exc
+    print(
+        json.dumps(report, indent=2, ensure_ascii=False)
+        if args.json else format_pipeline_results(report)
+    )
+
+
+def cmd_logs(args: argparse.Namespace) -> None:
+    from .artifacts import find_pipeline_logs, pipeline_root, tail_file
+
+    project = load_project(args.input)
+    files = find_pipeline_logs(project, args.run_id, args.stage)
+    if not files:
+        root = pipeline_root(project, args.run_id)
+        qualifier = f" for stage {args.stage!r}" if args.stage else ""
+        raise SystemExit(f"No SLURM logs found{qualifier} under {root / 'logs'}")
+    if args.stage is None:
+        latest_stage = files[-1].name.rsplit("_", 1)[0]
+        files = find_pipeline_logs(project, args.run_id, latest_stage)
+    for path in files:
+        print(f"==> {path} <==")
+        if not args.paths:
+            content = tail_file(path, args.lines)
+            if content:
+                print(content)
 
 
 def cmd_run(args: argparse.Namespace) -> None:
@@ -728,9 +769,36 @@ def _add_context(parser: argparse.ArgumentParser) -> None:
 
 
 def cmd_machine(args: argparse.Namespace) -> None:
+    if args.action == "probe":
+        from .machine import format_machine_probe, probe_machine_environment
+        report = probe_machine_environment(args.partition)
+        print(json.dumps(report, indent=2) if args.json else format_machine_probe(report))
+        return
     if args.action == "list":
         names = available_machine_profiles()
         print("\n".join(names) if names else "No user machine profiles configured.")
+        return
+    if args.action == "test":
+        from .machine import execute_machine_test
+        profile = load_machine_profile(args.name)
+        if profile is None:
+            raise SystemExit(f"Machine profile not found: {machine_path(args.name)}")
+        result = execute_machine_test(
+            args.name, profile, dry_run=args.dry_run, wait=not args.no_wait
+        )
+        command = " ".join(str(item) for item in result["command"])
+        print(f"Machine test : {args.name}")
+        print(f"Backend      : {result['backend']}")
+        print(f"Command      : {command}")
+        if result.get("script"):
+            print(f"SLURM script : {result['script']}")
+        if result.get("job_id"):
+            print(f"Job ID       : {result['job_id']}")
+        print(f"Status       : {result['status']}")
+        if result.get("output") and result["status"] == "failed":
+            print(result["output"][-4000:])
+        if result["status"] == "failed":
+            raise SystemExit(2)
         return
     if args.action == "show":
         profile = load_machine_profile(args.name)
@@ -741,22 +809,62 @@ def cmd_machine(args: argparse.Namespace) -> None:
             indent=2,
         ))
         return
+    backend = args.backend or "local"
+    lammps = args.lammps
+    mpi = args.mpi
+    workers = args.workers
+    ranks = args.ranks or 1
+    omp_threads = args.omp_threads or 1
+    partition = args.partition
+    cores = args.cores
+    memory_per_node = args.memory_per_node
+    if args.auto:
+        from .machine import probe_machine_environment
+
+        probe = probe_machine_environment(args.partition)
+        backend = args.backend or probe["backend"]
+        if not args.lammps and not probe["lammps"].get("available", False):
+            raise SystemExit(
+                "LAMMPS was not found on PATH. Pass --lammps /absolute/path/to/lmp."
+            )
+        lammps = lammps or probe["lammps"]["path"]
+        recommendation = probe.get("recommendation")
+        if backend == "slurm":
+            if recommendation is None:
+                raise SystemExit(
+                    "Automatic SLURM configuration needs a readable sinfo result. "
+                    "Pass --partition or configure the profile explicitly."
+                )
+            partition = partition or recommendation["partition"]
+            ranks = args.ranks or recommendation["ranks"]
+            omp_threads = args.omp_threads or recommendation["omp_threads"]
+            workers = workers or recommendation["workers"] * args.nodes
+            cores = cores or recommendation["cores"] * args.nodes
+            memory_per_node = memory_per_node or recommendation["memory_per_node"]
+        else:
+            workers = workers or max(1, probe["logical_cpus"] // (ranks * omp_threads))
+        if ranks > 1 and not args.mpi and not probe["mpi"].get("available", False):
+            raise SystemExit(
+                "MPI was not found on PATH. Pass --mpi /absolute/path/to/mpirun."
+            )
+        mpi = mpi or probe["mpi"]["path"]
+        print("Using conservative values from 'ffopt machine probe'.")
     profile = build_machine_profile(
         name=args.name,
-        backend=args.backend,
-        lammps=args.lammps,
-        mpi=args.mpi,
-        workers=args.workers,
-        ranks=args.ranks,
-        omp_threads=args.omp_threads,
+        backend=backend,
+        lammps=lammps,
+        mpi=mpi,
+        workers=workers,
+        ranks=ranks,
+        omp_threads=omp_threads,
         timeout=args.timeout,
-        partition=args.partition,
+        partition=partition,
         qos=args.qos,
-        cores=args.cores,
+        cores=cores,
         nodes=args.nodes,
         gpus=args.gpus,
         walltime=args.walltime,
-        memory_per_node=args.memory_per_node,
+        memory_per_node=memory_per_node,
     )
     path = save_machine_profile(args.name, profile, overwrite=args.force)
     print(f"Machine profile saved: {path}")
@@ -789,6 +897,27 @@ def cmd_inspect(args: argparse.Namespace) -> None:
             f"{item.type_id:4d}  {item.label:16.16s}  {item.atom_count:5d}  "
             f"{mass:12s}  {pair:23.23s}  {charge_range}"
         )
+
+
+def cmd_data(args: argparse.Namespace) -> None:
+    from .data_contract import check_data_files, format_data_report
+
+    try:
+        report = check_data_files(
+            bulk=args.bulk,
+            single=args.single,
+            complex=args.complex,
+            slab=args.slab,
+            molecule=args.molecule,
+        )
+    except (FileNotFoundError, TypeError, ValueError) as exc:
+        raise SystemExit(f"Data check failed: {exc}") from exc
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
+    else:
+        print(format_data_report(report))
+    if not report.ok or (args.strict and report.warnings):
+        raise SystemExit(2)
 
 
 def cmd_check(args: argparse.Namespace) -> None:
@@ -892,6 +1021,11 @@ def cmd_init(args: argparse.Namespace) -> None:
             name=args.name,
             data_file=args.data_file,
             single_data=args.single_data,
+            complex_data=args.complex_data,
+            slab_data=args.slab_data,
+            molecule_data=args.molecule_data,
+            project_type=args.project_type,
+            metal_label=args.metal_label,
             destination=args.destination or args.name,
             targets=targets,
             mode=args.mode,
@@ -931,16 +1065,29 @@ def build_parser() -> argparse.ArgumentParser:
         "init", help="Create a portable molecular project from a LAMMPS data file."
     )
     init.add_argument("name", help="Project and system name.")
-    init.add_argument("--data-file", required=True, help="Bulk molecular-crystal data file.")
+    init.add_argument(
+        "--data-file", "--bulk-data", dest="data_file",
+        help="Bulk molecular-crystal data file.",
+    )
+    init.add_argument(
+        "--project-type",
+        choices=["auto", "molecular-crystal", "adsorption", "crystal-adsorption"],
+        default="auto",
+        help="Project template; auto infers it from the supplied data files.",
+    )
     init.add_argument(
         "--single-data",
         help="Isolated molecule data file for the sublimation-enthalpy estimate.",
     )
     init.add_argument("--destination", help="Output directory; defaults to NAME.")
     init.add_argument(
-        "--target", action="append", required=True,
+        "--target", action="append", default=[],
         help="Repeat NAME=VALUE[,WEIGHT[,UNIT]], e.g. a=4.24,1.0,A.",
     )
+    init.add_argument("--complex-data", help="Adsorbate+slab LAMMPS data file.")
+    init.add_argument("--slab-data", help="Clean slab LAMMPS data file.")
+    init.add_argument("--molecule-data", help="Isolated adsorbate LAMMPS data file.")
+    init.add_argument("--metal-label", default="Au", help="Metal type label in adsorption data.")
     init.add_argument(
         "--mode", choices=["full", "fix_sigma", "charge_only", "lj_only"],
         default="full",
@@ -968,6 +1115,18 @@ def build_parser() -> argparse.ArgumentParser:
     inspect.add_argument("data_file")
     inspect.add_argument("--json", action="store_true", help="Emit a machine-readable summary.")
     inspect.set_defaults(function=cmd_inspect)
+    data = sub.add_parser(
+        "data", help="Validate LAMMPS data files and cross-file compatibility."
+    )
+    data.add_argument("action", choices=["check"])
+    data.add_argument("--bulk")
+    data.add_argument("--single")
+    data.add_argument("--complex")
+    data.add_argument("--slab")
+    data.add_argument("--molecule")
+    data.add_argument("--strict", action="store_true", help="Treat warnings as failures.")
+    data.add_argument("--json", action="store_true")
+    data.set_defaults(function=cmd_data)
     check = sub.add_parser("check", help="Validate one ffopt.in file without running LAMMPS.")
     check.add_argument("input")
     check.set_defaults(function=cmd_check)
@@ -978,14 +1137,14 @@ def build_parser() -> argparse.ArgumentParser:
     plugins.add_argument("--json", action="store_true")
     plugins.set_defaults(function=cmd_plugins)
     machine = sub.add_parser("machine", help="Configure reusable local or SLURM execution profiles.")
-    machine.add_argument("action", choices=["configure", "show", "list"])
+    machine.add_argument("action", choices=["configure", "show", "list", "probe", "test"])
     machine.add_argument("--name", default="local")
-    machine.add_argument("--backend", choices=["local", "slurm"], default="local")
+    machine.add_argument("--backend", choices=["local", "slurm"])
     machine.add_argument("--lammps", help="LAMMPS executable; auto-detected when omitted.")
     machine.add_argument("--mpi", help="MPI launcher; auto-detected when omitted.")
     machine.add_argument("--workers", type=int)
-    machine.add_argument("--ranks", type=int, default=1)
-    machine.add_argument("--omp-threads", type=int, default=1)
+    machine.add_argument("--ranks", type=int)
+    machine.add_argument("--omp-threads", type=int)
     machine.add_argument("--timeout", type=int, default=21600)
     machine.add_argument("--partition")
     machine.add_argument("--qos")
@@ -1007,6 +1166,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     machine.add_argument("--force", action="store_true")
+    machine.add_argument(
+        "--auto", action="store_true",
+        help="Configure conservative defaults from the current host and sinfo.",
+    )
+    machine.add_argument("--json", action="store_true")
+    machine.add_argument("--dry-run", action="store_true")
+    machine.add_argument("--no-wait", action="store_true")
     machine.set_defaults(function=cmd_machine)
     for name, function in (
         ("show", cmd_show),
@@ -1022,6 +1188,26 @@ def build_parser() -> argparse.ArgumentParser:
                 help="Named pipeline run to display (default: default).",
             )
         child.set_defaults(function=function)
+
+    results = sub.add_parser(
+        "results", help="Show exact outputs and expected artifacts for one pipeline run."
+    )
+    results.add_argument("input", nargs="?", default=DEFAULT_PROJECT)
+    results.add_argument("--run-id", default="default")
+    results.add_argument("--json", action="store_true")
+    results.set_defaults(function=cmd_results)
+
+    logs = sub.add_parser(
+        "logs", help="Show the latest SLURM stdout/stderr for a pipeline stage."
+    )
+    logs.add_argument("input", nargs="?", default=DEFAULT_PROJECT)
+    logs.add_argument("--run-id", default="default")
+    logs.add_argument(
+        "--stage", choices=["bo", "sample", "nn", "al", "audit", "finalize", "validate"]
+    )
+    logs.add_argument("--lines", type=int, default=80)
+    logs.add_argument("--paths", action="store_true", help="List log paths without file content.")
+    logs.set_defaults(function=cmd_logs)
 
     run = sub.add_parser(
         "run", help="Run the restartable BO -> sampling -> NN -> AL pipeline."
