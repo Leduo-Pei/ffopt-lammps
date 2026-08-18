@@ -68,7 +68,7 @@ class WorkflowState:
     def __enter__(self):
         return self
 
-    def __exit__(self, exc_type, exc, traceback):
+    def __exit__(self, _exc_type, _exc, _traceback):
         self.close()
 
     def _create_schema(self) -> None:
@@ -171,7 +171,10 @@ class WorkflowState:
                     signature=excluded.signature,
                     status=excluded.status,
                     attempt=excluded.attempt,
-                    command_json=excluded.command_json,
+                    command_json=CASE
+                        WHEN stages.signature=excluded.signature
+                         AND stages.status IN ('waiting', 'running')
+                        THEN stages.command_json ELSE excluded.command_json END,
                     output_dir=excluded.output_dir,
                     artifacts_json=excluded.artifacts_json,
                     job_id=CASE WHEN stages.signature=excluded.signature
@@ -263,4 +266,3 @@ class WorkflowState:
             "metadata": self.metadata(),
             "stages": [asdict(record) for record in self.list()],
         }
-

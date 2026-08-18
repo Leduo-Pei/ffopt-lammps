@@ -22,7 +22,7 @@ from scipy.stats import qmc
 
 from .config_loader import load_config
 from .lammps_interface import LAMMPSRunner
-from .optimizer import ForceFieldOptimizer
+from .parameter_space import build_parameter_space
 from utils.objective_rescoring import objective_provenance
 
 
@@ -289,7 +289,7 @@ def main() -> None:
     config = load_config(args.config)
     config.setdefault("adsorption", {})["enabled"] = False
     runner = LAMMPSRunner(config)
-    param_space = ForceFieldOptimizer._build_param_space(config)
+    param_space = build_parameter_space(config)
     param_names = [item[0] for item in param_space]
     target_names = [
         name for name, info in config["targets"].items()

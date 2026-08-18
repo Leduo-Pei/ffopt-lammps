@@ -5,6 +5,11 @@
 [![Python](https://img.shields.io/badge/Python-3.10--3.12-3776AB)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
 
+[中文完整手册](docs/zh_CN/USER_GUIDE.md) |
+[First-run guide](docs/tutorials/quickstart.md) |
+[`ffopt.in` reference](docs/reference/input-file.md) |
+[Releases](https://github.com/Leduo-Pei/ffopt-lammps/releases)
+
 FFOpt-LAMMPS is a restartable workflow for fitting molecular force-field
 parameters to experimental properties with LAMMPS, Bayesian optimization,
 focused sampling, ANN surrogate models, active learning, and final physical
@@ -14,6 +19,9 @@ validation.
 > isolated molecules, and molecular adsorption models. BTAH is the packaged
 > regression and machine-acceptance system. Elemental, alloy, reactive, and
 > polymorph workflows are not yet claimed as supported.
+> The current adsorption backend treats one configured, uncharged metal type
+> as fixed and optimizes the molecular atom types; arbitrary multicomponent or
+> charged substrates are outside the schema 1 contract.
 
 ## One input, one run
 
@@ -24,7 +32,9 @@ flowchart LR
     B --> S["focused sampling"]
     S --> N["ANN surrogate"]
     N --> A["active learning"]
-    A --> V["LAMMPS validation"]
+    A --> U["multi-seed audit"]
+    U --> F["robust final selection"]
+    F --> V["LAMMPS validation"]
     V --> R["parameters + properties + trajectories"]
 ```
 
@@ -41,14 +51,28 @@ Machine paths, MPI, CPUs, GPUs, SLURM partitions, memory, and wall time are
 stored once in `~/.config/ffopt/machines.toml`. They never need to be copied
 into a scientific project.
 
+| User owns | FFOpt owns |
+|---|---|
+| data files, initial parameters, ranges, targets, protocol lengths | generated runtime JSON, checkpoints, scheduler scripts, models, result tables |
+| `ffopt.in` | everything below `runs/` |
+
+Do not edit generated JSON, CSV, checkpoints, or files below `runs/` to steer
+a calculation. Change `ffopt.in` and start a new campaign when the scientific
+input changes.
+
+When `lmp` is already on `PATH`, `--machine local` works without a profile and
+uses one serial worker. A named profile is only needed for explicit paths or
+parallel resources.
+
 ## Install
 
 Create an isolated Python 3.11 environment, install a LAMMPS executable, then
-install the current prerelease:
+install the current prerelease. Alpha builds are distributed as GitHub Release
+wheels and are not yet published on PyPI:
 
 ```bash
 python -m pip install \
-  "ffopt-lammps[full] @ git+https://github.com/Leduo-Pei/ffopt-lammps.git@v0.3.0a2"
+  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a3/ffopt_lammps-0.3.0a3-py3-none-any.whl"
 ```
 
 For development:
@@ -78,8 +102,9 @@ Before fitting a new material, run the packaged scientific acceptance test:
 ffopt self-test --machine cluster-1node --watch
 ```
 
-The test executes the complete BTAH workflow and fails unless final LAMMPS
-validation satisfies the packaged objective and property-error thresholds.
+The test executes the complete BTAH workflow, including validation-only
+adsorption, and fails unless final LAMMPS validation satisfies the packaged
+objective and property-error thresholds.
 Use the same input with one- and two-node profiles to compare performance; BO
 candidate batch size is independent of worker count, so the scientific budget
 does not change with the machine.
@@ -117,7 +142,7 @@ ffopt check ffopt.in
 ffopt explain ffopt.in
 ffopt doctor ffopt.in --machine cluster-1node
 ffopt run ffopt.in --machine cluster-1node --dry-run
-ffopt run ffopt.in --machine cluster-1node
+ffopt run ffopt.in --machine cluster-1node --watch
 ```
 
 Repeat the last command after logout, timeout, or node failure. FFOpt verifies
@@ -131,16 +156,18 @@ ffopt logs ffopt.in --stage bo --lines 100
 ffopt results ffopt.in
 ```
 
+Final validation writes a complete per-type epsilon/sigma/charge table,
+calculated-versus-target properties, pass/fail gates, structures, and
+trajectories under `runs/<project>/pipelines/<run-id>/validate/`.
+
 ## Input at a glance
 
 ```text
 ffopt 1
 project example
-workflow bo sample nn al validate
+workflow bo sample nn al audit finalize validate
 
 parameters
-    range epsilon factor 0.50 2.00
-    range sigma   factor 0.85 1.15
     range charge  delta  0.30
     charge_limit 1.0
     neutrality derive N1
@@ -152,17 +179,19 @@ parameters
 end
 ```
 
-No `fix` line optimizes epsilon, sigma, and charge. `fix epsilon sigma`
-produces charge-only optimization. The derived charge is removed from the
-independent search space and recovered from exact total neutrality.
+This compact example is charge-only, so only charge needs a range. No `fix`
+line plus epsilon/sigma/charge ranges produces full optimization. The derived
+charge is removed from the independent search space and recovered from exact
+total neutrality.
 
 ## Documentation
 
 - [Complete Chinese user manual](docs/zh_CN/USER_GUIDE.md)
-- [Five-minute tutorial](docs/tutorials/quickstart.md)
+- [First-run setup and acceptance](docs/tutorials/quickstart.md)
 - [FFOpt input reference](docs/reference/input-file.md)
 - [Machine profile reference](docs/reference/machine-profiles.md)
 - [Output and naming reference](docs/reference/outputs-and-naming.md)
+- [0.3.0a3 single/two-node acceptance record](docs/reference/acceptance-v0.3.0a3.md)
 - [Workflow and accuracy model](docs/explanation/workflow-and-accuracy.md)
 - [BTAH examples and acceptance benchmark](examples/btah/README.md)
 - [Developer architecture](docs/explanation/architecture.md)
@@ -183,6 +212,6 @@ corrections and is reported with that provenance in validation outputs.
 
 ## Development status
 
-FFOpt-LAMMPS follows semantic prerelease versions while its public input and
-supported-material contract are still evolving. See [CHANGELOG.md](CHANGELOG.md),
+FFOpt-LAMMPS uses PEP 440 prerelease identifiers with SemVer-style compatibility
+expectations while its public input and supported-material contract are still evolving. See [CHANGELOG.md](CHANGELOG.md),
 [CONTRIBUTING.md](CONTRIBUTING.md), and [LICENSE](LICENSE).

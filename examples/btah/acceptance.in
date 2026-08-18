@@ -4,11 +4,9 @@
 # force field.  This is a software acceptance test, not an independent fit.
 ffopt 1
 project btah_acceptance
-workflow bo sample nn al validate
+workflow bo sample nn al audit finalize validate
 
 parameters
-    range epsilon factor 0.50 2.00
-    range sigma   factor 0.85 1.15
     range charge  delta  0.03
     charge_limit 1.0
     neutrality derive bhN1
@@ -56,6 +54,15 @@ property sublimation
     target 98.5 kJ/mol weight 0.3 tolerance 5.0
 end
 
+# No experimental target: exercise adsorption only during final validation.
+property adsorption
+    data complex ../../data/adsorption/ad_complex.data
+    data slab ../../data/adsorption/ad_slab.data
+    data molecule ../../data/adsorption/ad_mol.data
+    protocol minimize
+    metal Au
+end
+
 bo
     method turbo
     initial_points 24
@@ -75,9 +82,12 @@ sample
 end
 
 nn
+    # Deliberately small for machine acceptance; production inputs use the
+    # larger documented ANN defaults.
     method ann
     ensemble 2
-    epochs 80
+    hidden_layers 64 32
+    epochs 40
     batch_size 32
 end
 
@@ -88,8 +98,15 @@ al
     candidate_pool 512
 end
 
+# Exercise robust post-AL selection without turning acceptance into a
+# production-scale audit.
+audit
+    top_k 4
+    seeds 101 202
+end
+
 validate
-    trajectory final
+    # Final validation always saves structures and trajectories.
     require_tolerances yes
     objective_max 0.03
     max_error_percent 3.0

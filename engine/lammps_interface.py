@@ -1,5 +1,5 @@
 ﻿"""
-lammps_interface.py  |  LAMMPS runner for force field BO  |  v8
+lammps_interface.py  |  LAMMPS runner for force-field optimization
 
 Workflow per evaluation:
   1. Bulk tri NPT 300 K -> a_0K, a, b, c, alpha, beta, gamma_ang, density, pe, enthalpy
@@ -73,10 +73,10 @@ class LAMMPSRunner:
     Parameters
     ----------
     config : dict
-        Parsed config.yaml (v8 schema).
+        Generated expanded engine configuration.
     """
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, *, start_scheduler_pool: bool = True):
         # ------------------------------------------------------------------ #
         # Unpack config sections (all required; no hidden defaults)
         # ------------------------------------------------------------------ #
@@ -134,7 +134,7 @@ class LAMMPSRunner:
         self.cutoff        = lmp_cfg["cutoff"]
         self.timeout       = lmp_cfg["timeout"]
 
-        # Surf seed must equal bulk seed for thermodynamic consistency (v7 requirement).
+        # Surface and bulk use the same seed for thermodynamic consistency.
         self.surf_npt_seed = surf_md["npt_seed"]
         self.surf_equil    = surf_md["equil_steps"]   # NVT equilibration steps (discarded)
         self.surf_prod     = surf_md["prod_steps"]    # NVT production steps (time-averaged)
@@ -147,7 +147,9 @@ class LAMMPSRunner:
         self.scheduler_launcher = parallel.get("scheduler_launcher")
         self.scheduler_node_count = max(1, int(parallel.get("scheduler_nodes", 1)))
         self.workers_per_node = max(1, int(parallel.get("workers_per_node", 1)))
-        self.scheduler_pool = SlurmCommandPool.from_config(config)
+        self.scheduler_pool = (
+            SlurmCommandPool.from_config(config) if start_scheduler_pool else None
+        )
 
         # -- targets (for objective and sanity references) --
         self.targets = config["targets"]
@@ -175,8 +177,9 @@ class LAMMPSRunner:
         self.kspace_accuracy = chg_cfg.get("kspace_accuracy", 1.0e-5)
 
         # -- adsorption energy (3-box) target: E_ad = E_complex - E_slab - E_mol --
-        # Au is the fixed (uncharged) metal; BTAH carries the optimised params.
-        # E_slab is independent of the BTAH params -> computed once and cached.
+        # The configured metal is fixed and uncharged; the molecular adsorbate
+        # carries the optimized parameters.  Its clean-slab energy is therefore
+        # parameter-independent and can be cached during fitting.
         ads_cfg = config.get("adsorption", {})
         self.ads_enabled = ads_cfg.get("enabled", False)
         self._slab_pe = None
@@ -192,25 +195,15 @@ class LAMMPSRunner:
             self.ads_mol_input     = os.path.abspath(adi["mol"])
             self.metal_label = ads_cfg["metal"]["label"]
             self.ads_cutoff   = adm["cutoff"]
-            self.ads_timestep = adm["timestep"]
-            self.ads_temp     = adm["temp"]
-            self.ads_seed     = adm["seed"]
-            self.ads_equil    = adm["equil_steps"]
-            self.ads_prod     = adm["prod_steps"]
             self.ads_kspace   = adm.get("kspace_accuracy", self.kspace_accuracy)
 
-        # -- sublimation proxy target: E_single - E_bulk_per_molecule --
-        # Main evaluations use the finite-temperature NPT mean bulk PE already
-        # produced by in.bulk.mol; the standalone public helper below still
-        # supports a deterministic 0 K bulk audit.
+        # -- sublimation estimate: E_single,min - <PE_bulk,NPT>/N_molecules --
         sub_cfg = config.get("sublimation", {})
         self.sub_enabled = sub_cfg.get("enabled", False)
         if self.sub_enabled:
             sdf = sub_cfg["data_files"]
             sui = sub_cfg["inputs"]
-            self.sub_bulk_data    = os.path.abspath(sdf.get("bulk", self.bulk_data))
             self.sub_single_data  = os.path.abspath(sdf["single"])
-            self.sub_bulk_input   = os.path.abspath(sui["bulk"])
             self.sub_single_input = os.path.abspath(sui["single"])
             self.sub_molecule_atoms = int(sub_cfg.get("molecule_atoms", 14))
             self.sub_target_kj = float(sub_cfg.get("target_kj_mol", float("nan")))
@@ -256,9 +249,7 @@ class LAMMPSRunner:
             ]
         if self.sub_enabled:
             required_paths += [
-                (self.sub_bulk_input,   "sublimation bulk input script"),
                 (self.sub_single_input, "sublimation single input script"),
-                (self.sub_bulk_data,    "sublimation bulk data file"),
                 (self.sub_single_data,  "sublimation single data file"),
             ]
         if self.compute_surface:
@@ -326,10 +317,16 @@ class LAMMPSRunner:
             f"({executor_name})"
         )
 
-        def execute_indices(indices, executor_class):
+        def execute_indices(indices, executor_class, **executor_options):
+            index_list = list(indices)
+            report_every = max(1, (len(index_list) + 9) // 10)
+            completed = 0
             futures = {}
-            with executor_class(max_workers=min(worker_count, len(indices))) as executor:
-                for i in indices:
+            with executor_class(
+                max_workers=min(worker_count, len(index_list)),
+                **executor_options,
+            ) as executor:
+                for i in index_list:
                     eval_dir = os.path.join(work_dir, f"eval_{i:04d}")
                     os.makedirs(eval_dir, exist_ok=True)
                     fut = executor.submit(
@@ -347,15 +344,38 @@ class LAMMPSRunner:
                             objective=LARGE_PENALTY, success=False,
                             error_msg=f"executor exception: {e}",
                         )
+                    completed += 1
+                    if completed == 1 or completed % report_every == 0 or completed == len(index_list):
+                        result = results[i]
+                        detail = (
+                            f"objective={result.objective:.6f}"
+                            if result.success
+                            else f"failed={result.error_msg or 'non-physical result'}"
+                        )
+                        print(
+                            f"  LAMMPS progress: {completed}/{len(index_list)} "
+                            f"finished (eval_{i:04d}, {detail})",
+                            flush=True,
+                        )
 
         if os.name == "nt":
             # Threads only coordinate external mpiexec/LAMMPS subprocesses, so
             # the GIL is not a bottleneck. Launching from the main process also
             # avoids Windows ProcessPool worker reuse breaking later MPI jobs.
             execute_indices(range(len(param_batch)), executor_cls)
+        elif sys.version_info >= (3, 11):
+            # Recycle after every candidate to retain MPI process isolation,
+            # while submitting the whole batch lets a free slot immediately
+            # take the next candidate instead of waiting for a slow wave mate.
+            print("  LAMMPS scheduling: dynamic (fresh process per candidate)")
+            execute_indices(
+                range(len(param_batch)),
+                executor_cls,
+                max_tasks_per_child=1,
+            )
         else:
-            # Fresh Linux process waves keep each MPI evaluation isolated while
-            # honoring the configured worker limit on a cluster node.
+            # Python 3.10 has no ProcessPoolExecutor process-recycling option.
+            # Fresh waves retain the established MPI isolation behavior.
             for wave_start in range(0, len(param_batch), worker_count):
                 wave_stop = min(wave_start + worker_count, len(param_batch))
                 print(
@@ -472,71 +492,6 @@ class LAMMPSRunner:
             obj_structural=obj_s,
             obj_surface=float("nan"),
         )
-
-    def evaluate_sublimation_proxy(self,
-                                   params: Dict[str, float],
-                                   work_dir: str,
-                                   save_traj: bool = False) -> Optional[Dict[str, float]]:
-        """
-        Compute a 0 K sublimation/cohesive-energy proxy:
-
-            E_sub_proxy = E_single_molecule - E_bulk / N_molecules
-
-        Energies are LAMMPS potential energies after deterministic minimisation.
-        The result is useful as a thermodynamic audit, but it is not yet a full
-        finite-temperature experimental sublimation enthalpy.
-        """
-        if not self.sub_enabled:
-            raise RuntimeError("sublimation.enabled is false in config")
-
-        os.makedirs(work_dir, exist_ok=True)
-        try:
-            resolved = self._resolve_params(params)
-        except Exception:
-            return None
-        if self._charge_feasible(resolved):
-            return None
-
-        return self._compute_sublimation_proxy_resolved(
-            resolved, work_dir, save_traj)
-
-    def _compute_sublimation_proxy_resolved(self,
-                                            resolved: Dict[str, float],
-                                            work_dir: str,
-                                            save_traj: bool = False
-                                            ) -> Optional[Dict[str, float]]:
-        e_bulk = self._run_sublimation_box(
-            resolved, work_dir, "sub_bulk", self.sub_bulk_data,
-            self.sub_bulk_input, "DATA_SUB_BULK:", save_traj)
-        if e_bulk is None:
-            return None
-        e_single = self._run_sublimation_box(
-            resolved, work_dir, "sub_single", self.sub_single_data,
-            self.sub_single_input, "DATA_SUB_SINGLE:", save_traj)
-        if e_single is None:
-            return None
-
-        n_atoms = self._read_atom_count(self.sub_bulk_data)
-        if n_atoms is None or n_atoms <= 0:
-            return None
-        n_molecules = float(n_atoms) / float(self.sub_molecule_atoms)
-        e_bulk_per_mol = e_bulk / n_molecules
-        esub_kcal_mol = e_single - e_bulk_per_mol
-        esub_kj_mol = esub_kcal_mol * 4.184
-        target_proxy = self.sub_target_kj - self.sub_thermal_correction_kj
-
-        return {
-            "E_bulk_kcal": e_bulk,
-            "E_single_kcal": e_single,
-            "n_molecules": n_molecules,
-            "E_bulk_per_molecule_kcal": e_bulk_per_mol,
-            "esub_proxy_kcal_mol": esub_kcal_mol,
-            "esub_proxy_kj_mol": esub_kj_mol,
-            "target_kj_mol": self.sub_target_kj,
-            "thermal_correction_kj_mol": self.sub_thermal_correction_kj,
-            "target_proxy_kj_mol": target_proxy,
-            "error_vs_proxy_target_kj_mol": esub_kj_mol - target_proxy,
-        }
 
     def _compute_sublimation_proxy_from_bulk_pe(
             self,
@@ -799,7 +754,7 @@ class LAMMPSRunner:
             q_derived * n_derived = -(sum_i q_i * n_i) for all other types i
 
         The type to derive is specified by charge.neutrality_constraint.derive_from_type
-        in config.yaml.
+        in the generated engine configuration.
 
         Parameters
         ----------
@@ -843,7 +798,8 @@ class LAMMPSRunner:
                 raise KeyError(
                     f"charge neutrality: expected free parameter '{q_key}' in params "
                     f"but it was not found. Ensure atom_type '{label}' has charge "
-                    f"bounds defined in config.yaml and is not the derived type."
+                    "bounds defined in the generated engine configuration and "
+                    "is not the derived type."
                 )
             n_i = self.bulk_type_counts.get(t_idx, 0)
             charge_sum += result[q_key] * n_i
@@ -915,7 +871,7 @@ class LAMMPSRunner:
         str : absolute path to the written file.
         """
         lines = [
-            "# pair_coeffs.lmp -- auto-generated by lammps_interface.py v8",
+            "# pair_coeffs.lmp -- generated by FFOpt-LAMMPS",
             "# DO NOT EDIT: overwritten before each LAMMPS call",
             "",
         ]
@@ -991,7 +947,7 @@ class LAMMPSRunner:
         """
         Parse the Masses section of a data file -> {type_index: label}, taking
         the label from the trailing "# label" comment (msi2lmp / CGCMM format).
-        Used to map BTAH labels onto each adsorption system's own type order.
+        Used to map adsorbate labels onto each adsorption system's type order.
         """
         labels: Dict[int, str] = {}
         in_masses = False
@@ -1022,9 +978,9 @@ class LAMMPSRunner:
                                   type_labels: Dict[int, str],
                                   has_charge: bool) -> str:
         """
-        Write pair_coeffs.lmp for one adsorption system, mapping BTAH labels onto
-        that system's type indices. The metal type (self.metal_label) keeps its
-        data-file LJ (no pair_coeff) and is set to charge 0.
+        Write pair_coeffs.lmp for one adsorption system, mapping adsorbate
+        labels onto that system's type indices. The configured metal type keeps
+        its data-file LJ (no pair_coeff) and is set to charge 0.
         """
         lines = ["# pair_coeffs.lmp (adsorption system) -- auto-generated", ""]
         if self.mixing_rule != "none":
@@ -1059,7 +1015,7 @@ class LAMMPSRunner:
 
     def _run_ads_box(self, resolved, parent_dir, name, data_path, input_path,
                      has_charge: bool, save_traj: bool) -> Optional[float]:
-        """Run one adsorption box (NVT), return time-averaged PE [kcal/mol] or None."""
+        """Minimize one adsorption box and return its PE [kcal/mol]."""
         d = os.path.join(parent_dir, name)
         os.makedirs(d, exist_ok=True)
         shutil.copy2(input_path, d)
@@ -1069,11 +1025,6 @@ class LAMMPSRunner:
         extra_vars = {
             "data":           os.path.basename(data_path),
             "cutoff":         self.ads_cutoff,
-            "timestep_value": self.ads_timestep,
-            "temp":           self.ads_temp,
-            "seed":           self.ads_seed,
-            "equil_steps":    self.ads_equil,
-            "prod_steps":     self.ads_prod,
             "save_traj":      1 if save_traj else 0,
         }
         if has_charge:

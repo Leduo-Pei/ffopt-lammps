@@ -13,10 +13,20 @@ Node CPU   48 cores
 Conda      /storage/home/liguoling/peizy/software/anaconda3
 ```
 
-## Clean reinstall
+## Choose first install or replacement
 
-Back up only the small user machine configuration, then remove the old FFOpt
-environment and source checkout:
+For a first installation, do not delete anything. Confirm that the intended
+environment name is unused, then continue with **Install the release**:
+
+```bash
+source /storage/home/liguoling/peizy/software/anaconda3/etc/profile.d/conda.sh
+conda env list
+```
+
+Use the replacement procedure below only when deliberately replacing an old
+environment named exactly `ffopt` or `ffopt-cpu`. First confirm that no FFOpt
+job from those environments is running, then back up the small machine-profile
+directory before removing only those named Conda environments:
 
 ```bash
 cd /storage/home/liguoling/peizy/BTAH-workflow
@@ -26,28 +36,45 @@ cp -a "$HOME/.config/ffopt" \
 
 source /storage/home/liguoling/peizy/software/anaconda3/etc/profile.d/conda.sh
 conda deactivate 2>/dev/null || true
-conda env remove -n ffopt-cpu -y
-rm -rf /storage/home/liguoling/peizy/BTAH-workflow/ffopt-lammps
-rm -rf "$HOME/.config/ffopt"
+conda env list
+squeue -u "$USER"
+conda env remove -n ffopt -y 2>/dev/null || true
+conda env remove -n ffopt-cpu -y 2>/dev/null || true
+conda env list
 ```
 
-The paths above must be checked with `pwd` and `realpath` before deletion.
-Do not remove unrelated Conda environments or scheduler jobs.
-
-Install the tagged release:
+Do not remove unrelated Conda environments, project results, machine profiles,
+or scheduler jobs. A release installation does not need a source checkout. If
+an old checkout named exactly `ffopt-lammps` is confirmed and must be cleared,
+archive it instead of deleting it:
 
 ```bash
 cd /storage/home/liguoling/peizy/BTAH-workflow
-git clone --branch v0.3.0a2 --depth 1 \
-  https://github.com/Leduo-Pei/ffopt-lammps.git
+realpath ffopt-lammps
+mv ffopt-lammps \
+  "_preflight_backup/ffopt-lammps-source-$(date +%Y%m%d-%H%M%S)"
+```
 
+## Install the release
+
+Install the tagged release. A normal user does not need to clone the source
+repository; the `ffopt` command can be called from any project directory:
+
+```bash
+cd /storage/home/liguoling/peizy/BTAH-workflow
 conda create -y -n ffopt -c conda-forge --solver libmamba \
   python=3.11 "lammps=*=*openmpi*" openmpi pip
 conda activate ffopt
+conda env config vars set PYTHONNOUSERSITE=1
+conda deactivate
+conda activate ffopt
 python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 python -m pip install \
-  "ffopt-lammps[full] @ git+https://github.com/Leduo-Pei/ffopt-lammps.git@v0.3.0a2"
+  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a3/ffopt_lammps-0.3.0a3-py3-none-any.whl"
 ```
+
+FFOpt also exports `PYTHONNOUSERSITE=1` in generated SLURM scripts so packages
+under `~/.local/lib/python*` cannot leak into compute-node Python processes.
 
 Verify paths and versions:
 
@@ -56,12 +83,16 @@ which python
 which ffopt
 which lmp
 which mpirun
+ffopt --version
+python -c "import site; print(site.ENABLE_USER_SITE)"
 python -c "import ffopt, torch; print(ffopt.__version__); print(torch.__version__, torch.cuda.is_available())"
+python -m pip check
 lmp -help | head
 ```
 
-Expected: executable paths contain `/envs/ffopt/`, FFOpt reports `0.3.0a2`,
-and CPU PyTorch reports CUDA `False`.
+Expected: executable paths contain `/envs/ffopt/`, FFOpt reports `0.3.0a3`,
+user-site reports `False`, `pip check` reports no broken requirements, and CPU
+PyTorch reports CUDA `False`.
 
 ## Configure one- and two-node profiles
 
@@ -72,23 +103,41 @@ MPI=/storage/home/liguoling/peizy/software/anaconda3/envs/ffopt/bin/mpirun
 ffopt machine configure \
   --name mag1-1node --backend slurm \
   --lammps "$LMP" --mpi "$MPI" --partition CPU \
-  --nodes 1 --total-cores 48 --workers 12 \
+  --nodes 1 --total-cores 40 --workers 10 \
   --mpi-ranks 4 --omp-threads 1 \
-  --memory-per-node 64G --walltime 14-00:00:00 \
-  --timeout 216000 --force
+  --memory-per-node 64G --walltime 06:00:00 \
+  --timeout 7200 --force
 
 ffopt machine configure \
   --name mag1-2node --backend slurm \
   --lammps "$LMP" --mpi "$MPI" --partition CPU \
-  --nodes 2 --total-cores 96 --workers 24 \
+  --nodes 2 --total-cores 80 --workers 20 \
   --mpi-ranks 4 --omp-threads 1 \
-  --memory-per-node 64G --walltime 14-00:00:00 \
-  --timeout 216000 --force
+  --memory-per-node 64G --walltime 06:00:00 \
+  --timeout 7200 --force
 ```
 
-Twelve four-rank evaluations fill one 48-core node. Twenty-four fill two
-nodes. Both profiles use the same 24-candidate packaged acceptance input, so
-the two-node run changes concurrency only.
+The full two-node profile needs 40 free cores on each node. When that request
+cannot backfill promptly, create an optional acceptance profile with four
+independent LAMMPS workers on each node:
+
+```bash
+ffopt machine configure \
+  --name mag1-2node-backfill --backend slurm \
+  --lammps "$LMP" --mpi "$MPI" --partition CPU \
+  --nodes 2 --total-cores 32 --workers 8 \
+  --mpi-ranks 4 --omp-threads 1 \
+  --memory-per-node 16G --walltime 06:00:00 \
+  --timeout 7200 --force
+```
+
+The acceptance profiles leave eight cores per node available on this shared
+partition, which also makes short jobs easier to backfill. On exclusive idle
+nodes, production profiles may instead use 48/96 total cores and 12/24
+workers. Both profiles use the same packaged design: 24 LHS candidates plus
+one warm-start centre, followed by one 24-candidate BO round. Thus the
+two-node run changes concurrency only, not the 49-evaluation scientific
+budget.
 
 ## Preflight
 
@@ -99,6 +148,11 @@ ffopt machine show --name mag1-2node
 ffopt machine test --name mag1-1node
 ffopt machine test --name mag1-2node
 ```
+
+The two-node test must report both allocated hostnames. It uses the full
+20-worker/4-rank topology with a zero-step LAMMPS input, so it checks the
+cross-node command queue in minutes before the scientific acceptance begins.
+Use `mag1-2node-backfill` in both commands when testing that profile.
 
 ## Scientific acceptance
 
@@ -118,6 +172,9 @@ ffopt self-test --machine mag1-2node \
 
 If the terminal disconnects or a wall-time expires, repeat the identical
 command. Do not add `--new`; the self-test resumes its `acceptance` run ID.
+The manifest fingerprints `ffopt.in` and all packaged bulk, molecule, and
+adsorption data files, so an edited or stale acceptance directory is rejected
+rather than silently mixed with the installed release.
 
 Monitor from another shell:
 
@@ -142,6 +199,10 @@ every configured absolute tolerance passes
 The one- and two-node outputs should agree within normal stochastic and
 floating-point variation. Compare the validation tables and elapsed stage
 times, not just SLURM completion state.
+
+The completed `0.3.0a3` installation, job IDs, timings, exact artifact hashes,
+and final property table are recorded in the
+[versioned acceptance report](../reference/acceptance-v0.3.0a3.md).
 
 ## Start a real project
 

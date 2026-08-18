@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import json
+import platform
 from pathlib import Path
 from typing import Any
 
 from engine.config_loader import deep_merge
+from ffopt import __version__
 
 from .machine import load_machine_profile
 
@@ -80,43 +81,31 @@ def compose_config(project: Project, machine: str) -> dict[str, Any]:
         raise ValueError("Project has no compiled ffopt.in runtime configuration")
     from .defaults import machine_defaults
 
-    try:
-        config = machine_defaults(machine)
-    except ValueError:
-        profile = load_machine_profile(machine)
-        if profile is None:
+    profile = load_machine_profile(machine)
+    if profile is None:
+        if machine != "local":
             raise ValueError(
                 f"Unknown machine profile {machine!r}. Configure it with "
-                "'ffopt machine configure'."
+                "'ffopt machine configure'. Only 'local' has a built-in profile."
             )
+        config = machine_defaults("local")
+    else:
         backend = str(profile.get("machine", {}).get("backend", "local"))
         config = machine_defaults("cluster" if backend == "slurm" else "local")
-    profile = load_machine_profile(machine)
-    if profile is not None:
         config = deep_merge(
             config,
             {key: value for key, value in profile.items() if not key.startswith("_")},
         )
     config = deep_merge(config, project.runtime_config)
-    config.setdefault("manifest", {})["project_name"] = project.name
+    manifest = config.setdefault("manifest", {})
+    manifest["project_name"] = project.name
+    manifest["software"] = {
+        "ffopt_lammps": __version__,
+        "python": platform.python_version(),
+    }
     config.setdefault("workflow", {})["run_root"] = str(project.run_root)
     config["workflow"]["project_file"] = str(project.path)
     config["workflow"]["project_root"] = str(project.root)
     config["_project_path"] = str(project.path)
     config["_project_machine"] = machine
     return config
-
-
-def write_generated_config(project: Project, machine: str) -> Path:
-    """Write the expanded internal engine config for provenance and execution."""
-    output_dir = project.run_root / "_configs"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"{project.name}_{machine}.json"
-    config = compose_config(project, machine)
-    serializable = {key: value for key, value in config.items() if not key.startswith("_")}
-    output_path.write_text(
-        json.dumps(serializable, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-        newline="\n",
-    )
-    return output_path

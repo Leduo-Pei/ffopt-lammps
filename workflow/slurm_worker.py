@@ -8,17 +8,11 @@ import os
 import socket
 import subprocess
 import time
-import uuid
 from pathlib import Path
 from typing import Any
 
 from .mpi_local_exec import build_command
-
-
-def _atomic_json(path: Path, data: dict[str, Any]) -> None:
-    temporary = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
-    temporary.write_text(json.dumps(data), encoding="utf-8")
-    os.replace(temporary, path)
+from .slurm_pool import _write_shared_json
 
 
 def request_command(data: dict[str, Any]) -> list[str]:
@@ -74,7 +68,7 @@ def main() -> None:
     rank = int(os.environ.get("SLURM_PROCID", "0"))
     request_dir = args.root / "requests" / f"worker_{rank:04d}"
     request_dir.mkdir(parents=True, exist_ok=True)
-    _atomic_json(args.root / "ready" / f"worker_{rank:04d}.json", {
+    _write_shared_json(args.root / "ready" / f"worker_{rank:04d}.json", {
         "rank": rank,
         "hostname": os.uname().nodename,
         "cpus": sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else [],
@@ -88,12 +82,19 @@ def main() -> None:
         request_path = requests[0]
         running_path = request_path.with_suffix(".running")
         try:
+            data = json.loads(request_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            time.sleep(0.05)
+            continue
+        try:
             os.replace(request_path, running_path)
         except FileNotFoundError:
             continue
-        data = json.loads(running_path.read_text(encoding="utf-8"))
         response = execute_request(data)
-        _atomic_json(args.root / "responses" / f"{data['id']}.json", response)
+        _write_shared_json(
+            args.root / "responses" / f"{data['id']}.json",
+            response,
+        )
         running_path.unlink(missing_ok=True)
 
 

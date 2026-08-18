@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
 from pathlib import Path
 
@@ -12,7 +13,7 @@ import pandas as pd
 
 from .config_loader import deep_merge, load_config
 from .lammps_interface import LAMMPSRunner
-from .optimizer import ForceFieldOptimizer
+from .parameter_space import build_parameter_space
 
 
 def _load_parameters(path: Path) -> dict[str, float]:
@@ -45,12 +46,7 @@ def _load_parameters(path: Path) -> dict[str, float]:
 
 def _parameter_space(config: dict) -> list[tuple[str, float, float]]:
     """Return the free space, allowing a fully fixed validation-only input."""
-    try:
-        return ForceFieldOptimizer._build_param_space(config)
-    except ValueError as exc:
-        if "No free BO parameters found" not in str(exc):
-            raise
-        return []
+    return build_parameter_space(config, require_nonempty=False)
 
 
 def _initial_parameters(config: dict) -> dict[str, float]:
@@ -92,10 +88,37 @@ def _assess_acceptance(
     percent_errors: dict[str, float],
 ) -> dict:
     """Evaluate optional final-validation thresholds without running LAMMPS."""
+    def finite(value: object) -> bool:
+        try:
+            return math.isfinite(float(value))
+        except (TypeError, ValueError):
+            return False
+
     validation = config.get("validation", {})
+    active_targets = {
+        name: target
+        for name, target in config.get("targets", {}).items()
+        if float(target.get("weight", 1.0)) > 0.0
+    }
+    reasons: list[str] = []
+    missing_properties = [
+        name
+        for name in active_targets
+        if name not in properties or not finite(properties[name])
+    ]
+    if missing_properties:
+        reasons.append(
+            "missing or non-finite fitted properties: "
+            + ", ".join(missing_properties)
+        )
+
     tolerance_checks: dict[str, dict[str, float | bool]] = {}
-    for name, target in config.get("targets", {}).items():
-        if name not in properties or target.get("tolerance") is None:
+    missing_tolerances: list[str] = []
+    for name, target in active_targets.items():
+        if target.get("tolerance") is None:
+            missing_tolerances.append(name)
+            continue
+        if name in missing_properties:
             continue
         absolute_error = abs(float(properties[name]) - float(target["value"]))
         tolerance = float(target["tolerance"])
@@ -105,24 +128,43 @@ def _assess_acceptance(
             "passed": absolute_error <= tolerance,
         }
 
-    reasons: list[str] = []
     require_tolerances = bool(validation.get("require_tolerances", False))
     if require_tolerances:
+        if missing_tolerances:
+            reasons.append(
+                "required target tolerance is not defined: "
+                + ", ".join(missing_tolerances)
+            )
         failed = [name for name, item in tolerance_checks.items() if not item["passed"]]
         if failed:
             reasons.append("target tolerance exceeded: " + ", ".join(failed))
 
     objective_max = validation.get("objective_max")
     if objective_max is not None and (
-        objective is None or objective > float(objective_max)
+        objective is None
+        or not finite(objective)
+        or objective > float(objective_max)
     ):
         reasons.append(f"objective {objective} exceeds {float(objective_max):g}")
 
     max_error_percent = validation.get("max_error_percent")
+    missing_percent_errors = [
+        name
+        for name in active_targets
+        if name not in percent_errors
+        or not finite(percent_errors[name])
+    ]
     finite_percent_errors = [
-        float(value) for value in percent_errors.values() if value is not None
+        float(percent_errors[name])
+        for name in active_targets
+        if name not in missing_percent_errors
     ]
     observed_max_error = max(finite_percent_errors, default=None)
+    if max_error_percent is not None and missing_percent_errors:
+        reasons.append(
+            "missing or non-finite percent errors: "
+            + ", ".join(missing_percent_errors)
+        )
     if (
         max_error_percent is not None
         and observed_max_error is not None
@@ -191,6 +233,44 @@ def main() -> None:
     if not result.success:
         raise RuntimeError(result.error_msg)
 
+    resolved = runner._resolve_params(params)
+    atom_rows = []
+    for atom_type in config["atom_types"]:
+        label = atom_type["label"]
+        atom_rows.append({
+            "type": int(atom_type["type"]),
+            "label": label,
+            "epsilon_kcal_mol": float(resolved[f"{label}_epsilon"]),
+            "sigma_angstrom": float(resolved[f"{label}_sigma"]),
+            "charge_e": float(resolved[f"{label}_charge"]),
+        })
+    pd.DataFrame(atom_rows).to_csv(
+        args.output_dir / "final_atom_parameters.csv", index=False
+    )
+    generated_pair_file = Path(
+        runner._build_pair_coeffs(resolved, str(args.output_dir))
+    )
+    pair_text = generated_pair_file.read_text(encoding="ascii").replace(
+        "# pair_coeffs.lmp -- generated by FFOpt-LAMMPS\n"
+        "# DO NOT EDIT: overwritten before each LAMMPS call\n",
+        "# Complete FFOpt final parameters; include after read_data.\n",
+        1,
+    )
+    (args.output_dir / "final_parameters.lammps").write_text(
+        pair_text, encoding="ascii", newline="\n"
+    )
+    generated_pair_file.unlink()
+    parameter_document = {
+        "source": parameter_source,
+        "raw_free_parameters": params,
+        "resolved_parameters": resolved,
+        "atom_types": atom_rows,
+    }
+    with (args.output_dir / "final_parameters.json").open(
+        "w", encoding="utf-8"
+    ) as handle:
+        json.dump(parameter_document, handle, indent=2)
+
     rows = []
     for name, value in result.properties.items():
         target = config.get("targets", {}).get(name, {})
@@ -232,6 +312,9 @@ def main() -> None:
         "objective": objective,
         "config": str(Path(args.config).resolve()),
         "parameters": parameter_source,
+        "parameter_artifact": str(
+            (args.output_dir / "final_parameters.json").resolve()
+        ),
         "properties": result.properties,
         "per_property_error": result.per_property_error,
         "acceptance": acceptance,

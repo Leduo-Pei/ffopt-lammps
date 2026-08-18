@@ -62,6 +62,15 @@ If AL stalls, repeating the same acquisition is rarely sufficient. Diagnose:
 4. Whether seed variability is larger than the desired improvement.
 5. Whether the fixed parameter subset can physically reach the targets.
 
+## Robust selection after AL
+
+The lowest single-seed objective is not automatically the final force field.
+The audit stage selects the best distinct candidates accumulated through AL,
+repeats their LAMMPS evaluations with configured independent seeds, and ranks
+them by `mean objective + standard deviation`. Finalization then exports the
+best robust candidate with every fixed and neutrality-derived parameter
+resolved. This separates surrogate-guided proposal from physical acceptance.
+
 ## Final acceptance
 
 The final parameter set is re-evaluated by LAMMPS with production protocols

@@ -26,10 +26,12 @@ class CommandResult:
     stderr: str
 
 
-def _atomic_json(path: Path, data: dict[str, Any]) -> None:
-    temporary = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
-    temporary.write_text(json.dumps(data), encoding="utf-8")
-    os.replace(temporary, path)
+def _write_shared_json(path: Path, data: dict[str, Any]) -> None:
+    """Publish JSON directly so remote NFS clients cannot miss a rename."""
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(data, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 class SlurmCommandPool:
@@ -127,7 +129,13 @@ class SlurmCommandPool:
         deadline = time.monotonic() + self.startup_timeout
         while time.monotonic() < deadline:
             ready = list((self.root / "ready").glob("worker_*.json"))
-            if len(ready) >= self.workers:
+            complete = []
+            for path in ready:
+                try:
+                    complete.append(json.loads(path.read_text(encoding="utf-8")))
+                except (json.JSONDecodeError, OSError):
+                    continue
+            if len(complete) >= self.workers:
                 atexit.register(self.close)
                 return
             if self._process.poll() is not None:
@@ -172,7 +180,7 @@ class SlurmCommandPool:
         )
         response_path = self.root / "responses" / f"{request_id}.json"
         try:
-            _atomic_json(request_path, {
+            _write_shared_json(request_path, {
                 "id": request_id,
                 "command": [str(item) for item in command],
                 "cwd": str(cwd),
@@ -183,7 +191,13 @@ class SlurmCommandPool:
             })
             while time.monotonic() < deadline:
                 if response_path.exists():
-                    data = json.loads(response_path.read_text(encoding="utf-8"))
+                    try:
+                        data = json.loads(response_path.read_text(encoding="utf-8"))
+                    except (json.JSONDecodeError, OSError):
+                        # A remote writer may have created the directory entry
+                        # before its complete payload is visible on this node.
+                        time.sleep(0.05)
+                        continue
                     response_path.unlink()
                     return CommandResult(
                         int(data.get("returncode", 1)),

@@ -36,6 +36,11 @@ ffopt run ffopt.in --machine cluster-1node --from-stage sample --watch
 
 The upstream artifacts and scientific signature must still match.
 
+Use the same FFOpt version for the life of one run. The version and exact
+input/environment snapshots are stored under `provenance/`; FFOpt refuses to
+mix completed stages from one software version with another. Reinstall the
+recorded version to resume, or use `--new` for an intentional fresh campaign.
+
 ## Start an independent campaign
 
 ```bash
@@ -54,7 +59,9 @@ ffopt results ffopt.in --json
 squeue -u "$USER"
 ```
 
-If `ffopt.in` changes, FFOpt hashes the scientific settings and invalidates
-the affected stage and downstream stages. Machine concurrency is excluded
-from the scientific hash so the same run can move between compatible one- and
-two-node profiles.
+Method settings such as BO budgets or ANN architecture invalidate the affected
+stage and downstream stages. Changes to data, targets, parameter bounds, or
+property protocols are rejected once a run has stages because they define a
+different scientific campaign; use `--new`. Machine concurrency is excluded
+from the scientific hash, so a run may move between compatible one- and
+two-node profiles while retaining the same scientific budget.

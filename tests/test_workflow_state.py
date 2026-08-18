@@ -41,3 +41,25 @@ def test_changed_signature_resets_stage_attempt(tmp_path):
         assert record.attempt == 0
         assert record.job_id is None
 
+
+def test_active_stage_preserves_submitted_command(tmp_path):
+    database = tmp_path / "state.sqlite"
+    with WorkflowState(database) as state:
+        state.prepare(
+            "bo", "same", ["python", "old_config.json"],
+            tmp_path / "bo", [tmp_path / "result.csv"],
+        )
+        state.transition("bo", "waiting", job_id="123", increment_attempt=True)
+        record = state.prepare(
+            "bo", "same", ["python", "new_config.json"],
+            tmp_path / "bo", [tmp_path / "result.csv"],
+        )
+        assert record.status == "waiting"
+        assert record.command == ["python", "old_config.json"]
+
+        state.transition("bo", "failed", message="timeout")
+        record = state.prepare(
+            "bo", "same", ["python", "new_config.json"],
+            tmp_path / "bo", [tmp_path / "result.csv"],
+        )
+        assert record.command == ["python", "new_config.json"]

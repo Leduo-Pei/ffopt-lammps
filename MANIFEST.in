@@ -1,0 +1,14 @@
+include CHANGELOG.md
+include CITATION.cff
+include CONTRIBUTING.md
+include SECURITY.md
+include engine/README.md
+include examples/btah/README.md
+include docs/README.md
+recursive-include docs/tutorials *.md
+recursive-include docs/how-to *.md
+recursive-include docs/reference *.md
+recursive-include docs/explanation *.md
+recursive-include docs/zh_CN *.md
+recursive-include docs/development *.md
+global-exclude __pycache__ *.py[cod]

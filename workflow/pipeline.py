@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import platform
 import re
 import shlex
 import subprocess
@@ -12,6 +15,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+import uuid
+
+from ffopt import __version__
 
 from .project import Project, compose_config
 from .state import StageRecord, WorkflowState, canonical_hash
@@ -70,6 +76,35 @@ def _command_text(command: Iterable[str]) -> str:
     return subprocess.list2cmdline(values) if os.name == "nt" else shlex.join(values)
 
 
+def _write_immutable(path: Path, text: str) -> None:
+    """Create a content-addressed provenance file without partial writes."""
+    if path.exists():
+        if path.read_text(encoding="utf-8") != text:
+            raise RuntimeError(f"Provenance hash collision or corruption: {path}")
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
+    temporary.write_text(text, encoding="utf-8", newline="\n")
+    try:
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _write_immutable_bytes(path: Path, payload: bytes) -> None:
+    if path.exists():
+        if path.read_bytes() != payload:
+            raise RuntimeError(f"Provenance hash collision or corruption: {path}")
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
+    temporary.write_bytes(payload)
+    try:
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 class PipelineRunner:
     """Build and execute a deterministic, persisted workflow stage graph."""
 
@@ -78,7 +113,6 @@ class PipelineRunner:
         *,
         project: Project,
         machine: str,
-        config_path: str | Path,
         run_id: str = "default",
         resume: bool = False,
         dry_run: bool = False,
@@ -91,7 +125,6 @@ class PipelineRunner:
             raise ValueError("run_id may contain only letters, numbers, '.', '_' and '-'")
         self.project = project
         self.machine = machine
-        self.config_path = Path(config_path).resolve()
         self.config = compose_config(project, machine)
         self.backend = str(
             self.config.get("machine", {}).get(
@@ -107,6 +140,34 @@ class PipelineRunner:
         self.poll_seconds = max(1, int(poll_seconds))
         self._observed_job_ids: set[str] = set()
         self.root = (project.run_root / "pipelines" / run_id).resolve()
+        serialized = _serializable_config(self.config)
+        self.config_hash = canonical_hash(serialized)
+        self.scientific_hash = canonical_hash(_scientific_config(self.config))
+        provenance = self.root / "provenance"
+        self.config_path = provenance / f"runtime_{self.config_hash[:16]}.json"
+        input_bytes = project.path.read_bytes()
+        input_hash = hashlib.sha256(input_bytes).hexdigest()
+        self.input_snapshot_path = provenance / f"input_{input_hash[:16]}.in"
+        self._config_snapshot = (
+            json.dumps(serialized, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
+        )
+        self._input_snapshot = input_bytes
+        environment = {
+            "ffopt_lammps": __version__,
+            "python": platform.python_version(),
+            "python_executable": sys.executable,
+            "platform": platform.platform(),
+            "machine_profile": machine,
+            "backend": self.backend,
+            "lammps_executable": self.config.get("lammps", {}).get("executable"),
+            "mpi_launcher": self.config.get("lammps", {}).get("mpiexec"),
+        }
+        environment_text = json.dumps(
+            environment, indent=2, ensure_ascii=False, sort_keys=True
+        ) + "\n"
+        environment_hash = hashlib.sha256(environment_text.encode("utf-8")).hexdigest()
+        self.environment_path = provenance / f"environment_{environment_hash[:16]}.json"
+        self._environment_snapshot = environment_text
         self.state_path = self.root / "state.sqlite"
         pipeline_cfg = project.data.get("pipeline", {})
         configured_stages = pipeline_cfg.get("stages", PIPELINE_STAGES)
@@ -118,6 +179,11 @@ class PipelineRunner:
         self.from_stage = from_stage
         self.until = until
         self._validate_bounds()
+
+    def _write_provenance(self) -> None:
+        _write_immutable(self.config_path, self._config_snapshot)
+        _write_immutable_bytes(self.input_snapshot_path, self._input_snapshot)
+        _write_immutable(self.environment_path, self._environment_snapshot)
 
     def _active_stages(self, stages: list[str]) -> list[str]:
         if not self.config.get("nn", {}).get("enabled", True):
@@ -329,7 +395,13 @@ class PipelineRunner:
             "al": ["active_learning_history.json", "final_parameters.json"],
             "audit": ["stable_results.csv", "stability_replicates.csv"],
             "finalize": ["final_summary.json", "final_parameters.lammps"],
-            "validate": ["validation_summary.json", "computed_properties.csv"],
+            "validate": [
+                "validation_summary.json",
+                "computed_properties.csv",
+                "final_atom_parameters.csv",
+                "final_parameters.lammps",
+                "final_parameters.json",
+            ],
         }[name]
         return [output / item for item in names]
 
@@ -416,6 +488,8 @@ class PipelineRunner:
             *directives,
             "",
             "set -euo pipefail",
+            "export PYTHONNOUSERSITE=1",
+            "export PYTHONUNBUFFERED=1",
             *env_lines,
             f"cd {shlex.quote(str(self.project.root))}",
             _command_text(spec.command),
@@ -473,6 +547,15 @@ class PipelineRunner:
         return "failed"
 
     def _submit_slurm(self, state: WorkflowState, spec: StageSpec) -> None:
+        # A retry may use a new machine-profile snapshot. Refresh the persisted
+        # command only after the previous scheduler attempt is terminal.
+        state.prepare(
+            spec.name,
+            spec.signature,
+            spec.command,
+            spec.output_dir,
+            spec.artifacts,
+        )
         script = self._write_slurm_script(spec)
         completed = subprocess.run(
             ["sbatch", str(script)], capture_output=True, text=True, check=False
@@ -535,6 +618,17 @@ class PipelineRunner:
                 spec.artifacts,
             )
             if spec.name not in selected:
+                if (
+                    self.from_stage
+                    and self.stage_names.index(spec.name)
+                    < self.stage_names.index(self.from_stage)
+                    and not state.is_complete(spec.name, spec.signature)
+                ):
+                    raise RuntimeError(
+                        f"Cannot start from {self.from_stage!r}: upstream stage "
+                        f"{spec.name!r} is not complete. Run without --from-stage "
+                        "or choose an earlier stage."
+                    )
                 continue
             if state.is_complete(spec.name, spec.signature):
                 print(f"[{spec.name}] complete; reusing verified artifacts")
@@ -560,7 +654,7 @@ class PipelineRunner:
                     )
             if record and record.status in {"failed", "running"} and not self.resume:
                 raise RuntimeError(
-                    f"Stage {spec.name!r} is {record.status}; rerun with --resume"
+                    f"Stage {spec.name!r} is {record.status}; rerun the same FFOpt command"
                 )
             if self.backend == "slurm":
                 self._submit_slurm(state, spec)
@@ -576,16 +670,30 @@ class PipelineRunner:
         self.root.mkdir(parents=True, exist_ok=True)
         with WorkflowState(self.state_path) as state:
             previous = state.metadata()
-            current_hash = canonical_hash(_serializable_config(self.config))
-            scientific_hash = canonical_hash(_scientific_config(self.config))
+            previous_version = previous.get("ffopt_version")
+            if previous_version is None and previous.get("environment"):
+                try:
+                    previous_environment = json.loads(
+                        Path(previous["environment"]).read_text(encoding="utf-8")
+                    )
+                    previous_version = previous_environment.get("ffopt_lammps")
+                except (OSError, ValueError, TypeError):
+                    previous_version = None
+            if previous_version not in {None, __version__} and state.list():
+                raise RuntimeError(
+                    f"This pipeline started with FFOpt {previous_version}, but the "
+                    f"current version is {__version__}. Resume with the original "
+                    "version or use --new to start an independent run."
+                )
             if (
-                previous.get("scientific_hash") not in {None, scientific_hash}
+                previous.get("scientific_hash") not in {None, self.scientific_hash}
                 and state.list()
             ):
                 raise RuntimeError(
                     "The scientific input changed after this pipeline started. "
                     "Use --new to create an independent run instead of mixing checkpoints."
                 )
+            self._write_provenance()
             state.initialize({
                 "project": self.project.name,
                 "project_file": str(self.project.path),
@@ -593,8 +701,11 @@ class PipelineRunner:
                 "backend": self.backend,
                 "run_id": self.run_id,
                 "config": str(self.config_path),
-                "config_hash": current_hash,
-                "scientific_hash": scientific_hash,
+                "input_snapshot": str(self.input_snapshot_path),
+                "environment": str(self.environment_path),
+                "ffopt_version": __version__,
+                "config_hash": self.config_hash,
+                "scientific_hash": self.scientific_hash,
             })
             while True:
                 outcome = self._run_once(state, self.build_specs())

@@ -48,8 +48,8 @@ ffopt init my_crystal \
   --single-data molecule.data \
   --cells 2 2 2 \
   --mode charge_only \
-  --target density=1.25,1.0,g/cm3 \
-  --target sublimation=80.0,0.3,kJ/mol
+  --target density=1.25,1.0,g/cm3,0.04 \
+  --target sublimation=80.0,0.3,kJ/mol,8.0
 ```
 
 Combined crystal and adsorption fitting or validation:
@@ -77,7 +77,13 @@ Modes only determine the generated `fix` command:
 
 Default ranges are epsilon `0.5x to 2.0x`, sigma `0.85x to 1.15x`, and charge
 `q0 +/- 0.30 e`. These are draft bounds, not chemical truth. Review every type
-line and range before running.
+line and range before running. `ffopt init` also writes an independent absolute
+charge safety gate of `2.0 e`; reduce it when the chemistry justifies a tighter
+limit, for example `1.0 e` for many neutral organic force fields.
+
+The optional fourth target field is the absolute final-validation tolerance:
+`NAME=VALUE,WEIGHT,UNIT,TOLERANCE`. When it is omitted, the initializer writes
+the effective default explicitly so it cannot remain a hidden assumption.
 
 `--cells NX NY NZ` describes repeats already present in the bulk data file. It
 does not replicate the box. Incorrect values systematically distort reported
@@ -88,11 +94,12 @@ unit-cell lengths.
 ```bash
 ffopt check ffopt.in
 ffopt explain ffopt.in
-ffopt run ffopt.in --dry-run
 ffopt machine test --name PROFILE
+ffopt doctor ffopt.in --machine PROFILE
+ffopt run ffopt.in --machine PROFILE --dry-run
 ```
 
-Only after all three agree with the intended parameter space and properties
+Only after all checks agree with the intended parameter space and properties
 should the expensive workflow begin.
 
 ## Results and continuation
@@ -102,7 +109,7 @@ compatible run; a changed scientific input requires `--new` or a different
 run ID.
 
 ```bash
-ffopt run ffopt.in --machine PROFILE --run-id production
+ffopt run ffopt.in --machine PROFILE --run-id production --watch
 ffopt status ffopt.in --machine PROFILE --run-id production
 ffopt results ffopt.in --run-id production
 ffopt logs ffopt.in --run-id production --stage sample --lines 100

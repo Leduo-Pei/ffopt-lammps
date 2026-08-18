@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -106,9 +107,11 @@ def _param_value(
     label: str,
     name: str,
     initial: float,
+    *,
+    optimize: bool,
 ) -> float | dict[str, float]:
     params = document.parameters
-    if name in params.fixed or (label, name) in params.fixed_by_type:
+    if not optimize or name in params.fixed or (label, name) in params.fixed_by_type:
         return float(initial)
     range_spec = params.type_ranges.get((label, name)) or params.default_ranges.get(name)
     if range_spec is None:  # Parser validation normally catches this.
@@ -122,7 +125,12 @@ def _param_value(
     return {"min": low, "max": high, "init": float(initial)}
 
 
-def _compile_atom_types(document: FFOptInput, primary_data: Path) -> tuple[list[dict[str, Any]], int, dict[str, int]]:
+def _compile_atom_types(
+    document: FFOptInput,
+    primary_data: Path,
+    *,
+    optimize: bool,
+) -> tuple[list[dict[str, Any]], int, dict[str, int]]:
     if not primary_data.exists():
         raise InputFileError(document.path, 1, f"data file not found: {primary_data}")
     summary = inspect_lammps_data(primary_data)
@@ -137,9 +145,15 @@ def _compile_atom_types(document: FFOptInput, primary_data: Path) -> tuple[list[
                 f"type {item.type_id} ({item.label}) is absent from {primary_data.name}",
             )
         params = {
-            "epsilon": _param_value(document, item.label, "epsilon", item.epsilon),
-            "sigma": _param_value(document, item.label, "sigma", item.sigma),
-            "charge": _param_value(document, item.label, "charge", item.charge),
+            "epsilon": _param_value(
+                document, item.label, "epsilon", item.epsilon, optimize=optimize
+            ),
+            "sigma": _param_value(
+                document, item.label, "sigma", item.sigma, optimize=optimize
+            ),
+            "charge": _param_value(
+                document, item.label, "charge", item.charge, optimize=optimize
+            ),
         }
         dimensions += sum(isinstance(value, dict) for value in params.values())
         documents.append({
@@ -204,26 +218,62 @@ def _compile_bulk(document: FFOptInput, prop: PropertySpec, config: dict[str, An
     value = prop.data_files.get("bulk")
     if not value:
         raise InputFileError(document.path, prop.line, "bulk property requires 'data PATH'")
-    protocol = str(prop.settings.get("protocol", "standard")).lower()
-    if protocol not in {"standard", "crystal_npt", "minimize+npt"}:
-        raise InputFileError(
-            document.path, prop.line,
-            "bulk uses the fixed standard minimize + NPT protocol; remove protocol or use 'protocol standard'",
-        )
     cells = prop.settings.get("cells", (1, 1, 1))
     if any(int(value) < 1 for value in cells):
         raise InputFileError(document.path, prop.line, "bulk cells must be positive")
+    temperature = float(prop.settings.get("temperature", 300.0))
+    timestep = float(prop.settings.get("timestep", 1.0))
+    cutoff = float(prop.settings.get("cutoff", 8.0))
+    equilibration = int(prop.settings.get("equilibration", 20000))
+    production = int(prop.settings.get("production", 40000))
+    seed = int(prop.settings.get("seed", 101))
+    if temperature <= 0.0:
+        raise InputFileError(
+            document.path,
+            prop.setting_lines.get("temperature", prop.line),
+            "bulk temperature must be positive",
+        )
+    if timestep <= 0.0:
+        raise InputFileError(
+            document.path,
+            prop.setting_lines.get("timestep", prop.line),
+            "bulk timestep must be positive",
+        )
+    if cutoff <= 0.0:
+        raise InputFileError(
+            document.path,
+            prop.setting_lines.get("cutoff", prop.line),
+            "bulk cutoff must be positive",
+        )
+    if equilibration < 0:
+        raise InputFileError(
+            document.path,
+            prop.setting_lines.get("equilibration", prop.line),
+            "bulk equilibration cannot be negative",
+        )
+    if production < 5000:
+        raise InputFileError(
+            document.path,
+            prop.setting_lines.get("production", prop.line),
+            "bulk production must be at least 5000 timesteps for averaging",
+        )
+    if seed < 1:
+        raise InputFileError(
+            document.path,
+            prop.setting_lines.get("seed", prop.line),
+            "bulk seed must be positive",
+        )
     config["manifest"]["data_files"]["bulk"] = _path(document, value)
     config["lammps"].update({
         "bulk_input": _resource("lammps/inputs/bulk/in.bulk.mol"),
-        "cutoff": float(prop.settings.get("cutoff", 8.0)),
-        "timestep": float(prop.settings.get("timestep", 1.0)),
+        "cutoff": cutoff,
+        "timestep": timestep,
         "bulk": {
             "nx": int(cells[0]), "ny": int(cells[1]), "nz": int(cells[2]),
-            "npt_seed": int(prop.settings.get("seed", 101)),
-            "equil_steps": int(prop.settings.get("equilibration", 20000)),
-            "prod_steps": int(prop.settings.get("production", 40000)),
-            "temperature": float(prop.settings.get("temperature", 300.0)),
+            "npt_seed": seed,
+            "equil_steps": equilibration,
+            "prod_steps": production,
+            "temperature": temperature,
             "pressure": float(prop.settings.get("pressure", 1.0)),
             "protocol": "minimize+npt",
         },
@@ -237,12 +287,6 @@ def _compile_sublimation(
     config: dict[str, Any],
     bulk_prop: PropertySpec | None,
 ) -> dict[str, Any]:
-    protocol = str(prop.settings.get("protocol", "standard")).lower()
-    if protocol not in {"standard", "potential_energy"}:
-        raise InputFileError(
-            document.path, prop.line,
-            "sublimation currently uses bulk NPT mean PE + minimized single-molecule PE",
-        )
     single = prop.data_files.get("single")
     bulk = prop.data_files.get("bulk") or (bulk_prop.data_files.get("bulk") if bulk_prop else None)
     if not single or not bulk:
@@ -251,25 +295,39 @@ def _compile_sublimation(
     if not single_path.exists():
         raise InputFileError(document.path, prop.line, f"single-molecule data not found: {single_path}")
     single_summary = inspect_lammps_data(single_path)
-    molecule_atoms = int(prop.settings.get(
-        "molecule_atoms",
-        single_summary.declared_counts.get("atoms", sum(item.atom_count for item in single_summary.atom_types)),
-    ))
+    molecule_atoms = int(
+        single_summary.declared_counts.get(
+            "atoms", sum(item.atom_count for item in single_summary.atom_types)
+        )
+    )
+    target_temperature = float(prop.settings.get("temperature", 298.15))
+    single_cutoff = float(prop.settings.get("cutoff", config["lammps"]["cutoff"]))
+    if target_temperature <= 0.0:
+        raise InputFileError(
+            document.path,
+            prop.setting_lines.get("temperature", prop.line),
+            "sublimation temperature must be positive",
+        )
+    if single_cutoff <= 0.0:
+        raise InputFileError(
+            document.path,
+            prop.setting_lines.get("cutoff", prop.line),
+            "sublimation cutoff must be positive",
+        )
     targets = _target_document(document, prop)
     target_value = targets.get("esub_proxy", {}).get("value", float("nan"))
     config["sublimation"] = {
         "enabled": prop.fitted,
         "data_files": {"bulk": _path(document, bulk), "single": str(single_path)},
         "inputs": {
-            "bulk": _resource("lammps/inputs/molecule/in.sublimation.bulk"),
             "single": _resource("lammps/inputs/molecule/in.sublimation.single"),
         },
         "molecule_atoms": molecule_atoms,
-        "target_temperature": float(prop.settings.get("temperature", 298.15)),
+        "target_temperature": target_temperature,
         "target_kj_mol": target_value,
         "thermal_correction_kj_mol": 0.0,
         "tolerance_kj_mol": targets.get("esub_proxy", {}).get("tolerance", 10.0),
-        "cutoff": float(prop.settings.get("cutoff", config["lammps"]["cutoff"])),
+        "cutoff": single_cutoff,
         "kspace_accuracy": config["charge"]["kspace_accuracy"],
         "protocol": "bulk_npt_plus_single_minimize",
     }
@@ -288,31 +346,118 @@ def _compile_adsorption(document: FFOptInput, prop: PropertySpec, config: dict[s
     missing = [name for name in ("complex", "slab", "molecule") if name not in prop.data_files]
     if missing:
         raise InputFileError(document.path, prop.line, f"adsorption data missing: {missing}")
+    cutoff = float(prop.settings.get("cutoff", 7.0))
+    if cutoff <= 0.0:
+        raise InputFileError(
+            document.path,
+            prop.setting_lines.get("cutoff", prop.line),
+            "adsorption cutoff must be positive",
+        )
+    data_paths = {
+        role: Path(_path(document, prop.data_files[role]))
+        for role in ("complex", "slab", "molecule")
+    }
+    summaries = {}
+    for role, data_path in data_paths.items():
+        try:
+            summaries[role] = inspect_lammps_data(data_path)
+        except (OSError, ValueError) as exc:
+            raise InputFileError(
+                document.path,
+                prop.line,
+                f"cannot inspect adsorption {role} data {data_path}: {exc}",
+            ) from exc
+
+    metal_label = str(prop.settings.get("metal", "Au"))
+    metal_line = prop.setting_lines.get("metal", prop.line)
+    labels_by_role = {
+        role: {item.label: item for item in summary.atom_types}
+        for role, summary in summaries.items()
+    }
+    for role in ("complex", "slab"):
+        metal_type = labels_by_role[role].get(metal_label)
+        if metal_type is None:
+            raise InputFileError(
+                document.path,
+                metal_line,
+                f"adsorption metal label {metal_label!r} is absent from {role} data",
+            )
+        if not metal_type.charges or any(abs(charge) > 1.0e-8 for charge in metal_type.charges):
+            raise InputFileError(
+                document.path,
+                metal_line,
+                f"adsorption metal label {metal_label!r} must be uncharged in {role} data",
+            )
+    slab_labels = set(labels_by_role["slab"])
+    if slab_labels != {metal_label}:
+        extras = sorted(slab_labels - {metal_label})
+        raise InputFileError(
+            document.path,
+            metal_line,
+            "schema 1 adsorption requires a single fixed substrate type; "
+            f"slab contains additional label(s): {extras}",
+        )
+    molecule_labels = set(labels_by_role["molecule"])
+    if metal_label in molecule_labels:
+        raise InputFileError(
+            document.path,
+            metal_line,
+            f"adsorption molecule data must not contain metal label {metal_label!r}",
+        )
+    complex_molecule_labels = set(labels_by_role["complex"]) - {metal_label}
+    if complex_molecule_labels != molecule_labels:
+        missing = sorted(molecule_labels - complex_molecule_labels)
+        extra = sorted(complex_molecule_labels - molecule_labels)
+        raise InputFileError(
+            document.path,
+            prop.line,
+            "adsorption complex molecular labels must match molecule data; "
+            f"missing={missing}, extra={extra}",
+        )
+    parameter_labels = {item.label for item in document.parameters.atom_types}
+    if molecule_labels != parameter_labels:
+        missing = sorted(parameter_labels - molecule_labels)
+        extra = sorted(molecule_labels - parameter_labels)
+        raise InputFileError(
+            document.path,
+            prop.line,
+            "adsorption molecule labels must match the parameter table; "
+            f"missing={missing}, extra={extra}",
+        )
     config["adsorption"] = {
         "enabled": prop.fitted,
         "data_files": {
-            "complex": _path(document, prop.data_files["complex"]),
-            "slab": _path(document, prop.data_files["slab"]),
-            "mol": _path(document, prop.data_files["molecule"]),
+            "complex": str(data_paths["complex"]),
+            "slab": str(data_paths["slab"]),
+            "mol": str(data_paths["molecule"]),
         },
         "inputs": {
             "complex": _resource("lammps/inputs/adsorption/in.complex"),
             "slab": _resource("lammps/inputs/adsorption/in.slab"),
             "mol": _resource("lammps/inputs/adsorption/in.mol"),
         },
-        "metal": {"label": prop.settings.get("metal", "Au")},
+        "metal": {"label": metal_label},
         "md": {
-            "cutoff": float(prop.settings.get("cutoff", 7.0)),
-            "timestep": float(prop.settings.get("timestep", 1.0)),
-            "temp": float(prop.settings.get("temperature", 300.0)),
-            "seed": int(prop.settings.get("seed", 101)),
-            "equil_steps": int(prop.settings.get("equilibration", 20000)),
-            "prod_steps": int(prop.settings.get("production", 20000)),
+            # Retain inert prerelease defaults in runtime snapshots so a
+            # minimize-only adsorption checkpoint keeps its scientific hash.
+            # They are not accepted as public ffopt.in settings or consumed by
+            # the current evaluator.
+            "temp": 300.0,
+            "timestep": 1.0,
+            "equil_steps": 20000,
+            "prod_steps": 20000,
+            "seed": 101,
+            "cutoff": cutoff,
             "kspace_accuracy": config["charge"]["kspace_accuracy"],
             "protocol": "minimize",
         },
     }
     return _target_document(document, prop)
+
+
+def _stage_line(document: FFOptInput, stage: str, *keys: str) -> int:
+    lines = document.stage_setting_lines.get(stage, {})
+    return next((lines[key] for key in keys if key in lines), 1)
 
 
 def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: dict[str, Any]) -> None:
@@ -338,12 +483,30 @@ def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: 
         "candidate_pool": "n_candidate_pool", "uncertainty_threshold": "uncertainty_threshold",
         "sampling_domain": "sampling_domain", "local_radii": "local_radii",
     }
-    maps = {"bo": bo_map, "sample": sample_map, "nn": nn_map, "al": al_map}
+    audit_map = {"top_k": "top_k", "seeds": "seeds"}
+    maps = {
+        "bo": bo_map,
+        "sample": sample_map,
+        "nn": nn_map,
+        "al": al_map,
+        "audit": audit_map,
+    }
     destinations = {
         "bo": config["optimization"], "sample": stages.setdefault("sample", {}),
         "nn": config["nn"], "al": config["active_learning"],
+        "audit": stages.setdefault(
+            "audit", {"top_k": 8, "seeds": [101, 202, 303]}
+        ),
     }
     for stage, settings in document.stage_settings.items():
+        if stage == "finalize":
+            if settings:
+                raise InputFileError(
+                    document.path,
+                    _stage_line(document, stage, next(iter(settings))),
+                    "finalize does not accept settings",
+                )
+            continue
         if stage == "validate":
             allowed = {
                 "trajectory", "require_tolerances", "objective_max",
@@ -351,20 +514,39 @@ def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: 
             }
             unknown = set(settings) - allowed
             if unknown:
-                raise InputFileError(document.path, 1, f"unknown validate setting(s): {sorted(unknown)}")
+                raise InputFileError(
+                    document.path,
+                    _stage_line(document, stage, *sorted(unknown)),
+                    f"unknown validate setting(s): {sorted(unknown)}",
+                )
             if "trajectory" in settings and str(settings["trajectory"]).lower() != "final":
-                raise InputFileError(document.path, 1, "validate trajectory currently supports final")
+                raise InputFileError(
+                    document.path,
+                    _stage_line(document, stage, "trajectory"),
+                    "validate trajectory is a legacy compatibility setting and "
+                    "only accepts 'final'",
+                )
             if "require_tolerances" in settings and not isinstance(
                 settings["require_tolerances"], bool
             ):
                 raise InputFileError(
-                    document.path, 1,
+                    document.path,
+                    _stage_line(document, stage, "require_tolerances"),
                     "validate require_tolerances must be yes or no",
                 )
             for key in ("objective_max", "max_error_percent"):
-                if key in settings and float(settings[key]) <= 0.0:
-                    raise InputFileError(document.path, 1, f"validate {key} must be positive")
-            config["validation"].update(settings)
+                if key in settings:
+                    value = float(settings[key])
+                    if not math.isfinite(value) or value <= 0.0:
+                        raise InputFileError(
+                            document.path,
+                            _stage_line(document, stage, key),
+                            f"validate {key} must be positive",
+                        )
+            config["validation"].update({
+                key: value for key, value in settings.items()
+                if key != "trajectory"
+            })
             continue
         mapping = maps[stage]
         destination = destinations[stage]
@@ -375,21 +557,54 @@ def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: 
             if key == "stability_audit" and stage == "bo":
                 if not isinstance(value, bool):
                     raise InputFileError(
-                        document.path, 1, "BO stability_audit must be on or off"
+                        document.path,
+                        _stage_line(document, stage, key),
+                        "BO stability_audit must be on or off",
                     )
                 destination.setdefault("stability_audit", {})["enabled"] = value
                 continue
+            if stage == "bo" and key.startswith("stability_"):
+                audit_key = key.removeprefix("stability_")
+                audit_mapping = {
+                    "top_k": "top_k",
+                    "seeds": "seeds",
+                    "max_objective_std": "max_objective_std",
+                    "max_property_rel_std": "max_property_rel_std",
+                    "noise_penalty": "noise_penalty",
+                    "failure_penalty": "failure_penalty",
+                }
+                if audit_key not in audit_mapping:
+                    raise InputFileError(
+                        document.path,
+                        _stage_line(document, stage, key),
+                        f"unknown BO setting {key!r}",
+                    )
+                if audit_key == "seeds" and not isinstance(value, list):
+                    value = [value]
+                destination.setdefault("stability_audit", {})[
+                    audit_mapping[audit_key]
+                ] = value
+                continue
             if key == "acquisition" and stage == "al":
                 if str(value).lower() != "uncertainty":
-                    raise InputFileError(document.path, 1, "AL acquisition currently supports uncertainty")
+                    raise InputFileError(
+                        document.path,
+                        _stage_line(document, stage, key),
+                        "AL acquisition currently supports uncertainty",
+                    )
                 continue
             if key not in mapping:
-                raise InputFileError(document.path, 1, f"unknown {stage} setting {key!r}")
+                raise InputFileError(
+                    document.path,
+                    _stage_line(document, stage, key),
+                    f"unknown {stage} setting {key!r}",
+                )
             mapped = mapping[key]
             list_settings = {
                 "sample": {"seeds", "radii"},
                 "nn": {"hidden_layers"},
                 "al": {"local_radii"},
+                "audit": {"seeds"},
             }
             if mapped in list_settings.get(stage, set()) and not isinstance(value, list):
                 value = [value]
@@ -401,68 +616,293 @@ def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: 
     method = str(optimization.get("method", "auto")).lower()
     if method not in {"auto", "gp", "turbo", "saasbo"}:
         raise InputFileError(
-            document.path, 1,
+            document.path,
+            _stage_line(document, "bo", "method"),
             "BO method must be auto, gp, turbo, or saasbo",
         )
-    for key in ("n_initial", "n_bo_iterations", "batch_size"):
+    bo_public_keys = {
+        "n_initial": ("initial_points",),
+        "n_bo_iterations": ("max_rounds", "rounds"),
+        "batch_size": ("batch_size",),
+    }
+    for key, public_keys in bo_public_keys.items():
         value = optimization.get(key)
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-            raise InputFileError(document.path, 1, f"BO {key} must be a positive integer")
+            raise InputFileError(
+                document.path,
+                _stage_line(document, "bo", *public_keys),
+                f"BO {key} must be a positive integer",
+            )
+    random_seed = optimization.get("random_seed")
+    if isinstance(random_seed, bool) or not isinstance(random_seed, int):
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "bo", "random_seed"),
+            "BO random_seed must be an integer",
+        )
     early_stop = optimization.get("early_stop", {})
     unknown_early = set(early_stop) - {"enabled", "patience", "min_improvement"}
     if unknown_early:
         raise InputFileError(
-            document.path, 1,
+            document.path,
+            _stage_line(
+                document,
+                "bo",
+                *(f"early_stop.{key}" for key in sorted(unknown_early)),
+            ),
             f"unknown BO early_stop setting(s): {sorted(unknown_early)}",
         )
     if not isinstance(early_stop.get("enabled", True), bool):
-        raise InputFileError(document.path, 1, "BO early_stop enabled must be on or off")
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "bo", "early_stop.enabled"),
+            "BO early_stop enabled must be on or off",
+        )
     if int(early_stop.get("patience", 1)) < 1:
-        raise InputFileError(document.path, 1, "BO early_stop patience must be positive")
-    if float(early_stop.get("min_improvement", 0.0)) < 0.0:
-        raise InputFileError(document.path, 1, "BO early_stop min_improvement cannot be negative")
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "bo", "early_stop.patience"),
+            "BO early_stop patience must be positive",
+        )
+    min_improvement = float(early_stop.get("min_improvement", 0.0))
+    if not math.isfinite(min_improvement) or min_improvement < 0.0:
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "bo", "early_stop.min_improvement"),
+            "BO early_stop min_improvement must be finite and non-negative",
+        )
+    stability = optimization.get("stability_audit", {})
+    if not isinstance(stability.get("enabled", True), bool):
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "bo", "stability_audit"),
+            "BO stability_audit must be on or off",
+        )
+    if int(stability.get("top_k", 0)) < 1:
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "bo", "stability_top_k"),
+            "BO stability_top_k must be positive",
+        )
+    stability_seeds = stability.get("seeds", [])
+    if not stability_seeds or any(
+        isinstance(seed, bool) or not isinstance(seed, int) or seed < 1
+        for seed in stability_seeds
+    ):
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "bo", "stability_seeds"),
+            "BO stability_seeds must be positive integers",
+        )
+    for key in (
+        "max_objective_std",
+        "max_property_rel_std",
+        "noise_penalty",
+        "failure_penalty",
+    ):
+        value = float(stability.get(key, 0.0))
+        if not math.isfinite(value) or value < 0.0:
+            raise InputFileError(
+                document.path,
+                _stage_line(document, "bo", f"stability_{key}"),
+                f"BO stability_{key} must be finite and non-negative",
+            )
 
     sample = stages.setdefault("sample", {})
-    for key in ("n_points", "elite_centers"):
+    sample_public_keys = {
+        "n_points": ("points",),
+        "elite_centers": ("centers", "elite_centers"),
+    }
+    for key, public_keys in sample_public_keys.items():
         if int(sample.get(key, 0)) < 1:
-            raise InputFileError(document.path, 1, f"sample {key} must be positive")
+            raise InputFileError(
+                document.path,
+                _stage_line(document, "sample", *public_keys),
+                f"sample {key} must be positive",
+            )
     if int(sample["elite_centers"]) > int(sample["n_points"]):
-        raise InputFileError(document.path, 1, "sample centers cannot exceed points")
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "sample", "centers", "elite_centers"),
+            "sample centers cannot exceed points",
+        )
     if not sample.get("seeds"):
-        raise InputFileError(document.path, 1, "sample seeds cannot be empty")
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "sample", "seeds"),
+            "sample seeds cannot be empty",
+        )
+    if any(
+        isinstance(seed, bool) or not isinstance(seed, int) or seed < 1
+        for seed in sample["seeds"]
+    ):
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "sample", "seeds"),
+            "sample seeds must be positive integers",
+        )
+    design_seed = sample.get("design_seed")
+    if isinstance(design_seed, bool) or not isinstance(design_seed, int):
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "sample", "design_seed"),
+            "sample design_seed must be an integer",
+        )
     radii = [float(value) for value in sample.get("radii", [])]
-    if not radii or any(value <= 0.0 or value > 1.0 for value in radii):
-        raise InputFileError(document.path, 1, "sample radii must be in (0, 1]")
+    if not radii or any(
+        not math.isfinite(value) or value <= 0.0 or value > 1.0
+        for value in radii
+    ):
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "sample", "radii"),
+            "sample radii must be in (0, 1]",
+        )
     global_fraction = float(sample.get("global_fraction", 0.0))
     if not 0.0 <= global_fraction <= 1.0:
-        raise InputFileError(document.path, 1, "sample global_fraction must be in [0, 1]")
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "sample", "global_fraction"),
+            "sample global_fraction must be in [0, 1]",
+        )
     if str(sample.get("center_selection", "diverse")) not in {"top", "diverse"}:
-        raise InputFileError(document.path, 1, "sample center_selection must be top or diverse")
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "sample", "center_selection"),
+            "sample center_selection must be top or diverse",
+        )
 
     nn = config["nn"]
-    for key in ("ensemble_size", "max_epochs", "batch_size"):
+    supported_models = {
+        "mlp_ensemble", "gp", "random_forest", "xgboost", "extra_trees",
+        "pair_product_extra_trees", "svr_rbf", "polynomial_ridge",
+    }
+    if str(nn.get("model", "")).lower() not in supported_models:
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "nn", "method", "model"),
+            "NN method must be ann, gp, random_forest, xgboost, extra_trees, "
+            "pair_product_extra_trees, svr_rbf, or polynomial_ridge",
+        )
+    nn_public_keys = {
+        "ensemble_size": ("ensemble",),
+        "max_epochs": ("epochs", "max_epochs"),
+        "batch_size": ("batch_size",),
+    }
+    for key, public_keys in nn_public_keys.items():
         if int(nn.get(key, 0)) < 1:
-            raise InputFileError(document.path, 1, f"NN {key} must be positive")
+            raise InputFileError(
+                document.path,
+                _stage_line(document, "nn", *public_keys),
+                f"NN {key} must be positive",
+            )
+    hidden_layers = nn.get("hidden_layers", [])
+    if not hidden_layers or any(
+        isinstance(width, bool) or not isinstance(width, int) or width < 1
+        for width in hidden_layers
+    ):
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "nn", "hidden_layers"),
+            "NN hidden_layers must be positive integers",
+        )
+    learning_rate = float(nn.get("learning_rate", 0.0))
+    if not math.isfinite(learning_rate) or learning_rate <= 0.0:
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "nn", "learning_rate"),
+            "NN learning_rate must be positive",
+        )
     val_fraction = float(nn.get("val_fraction", 0.0))
     test_fraction = float(nn.get("test_fraction", 0.0))
-    if val_fraction < 0.0 or test_fraction < 0.0 or val_fraction + test_fraction >= 1.0:
+    if (
+        not math.isfinite(val_fraction)
+        or not math.isfinite(test_fraction)
+        or val_fraction < 0.0
+        or test_fraction < 0.0
+        or val_fraction + test_fraction >= 1.0
+    ):
         raise InputFileError(
-            document.path, 1,
+            document.path,
+            _stage_line(
+                document,
+                "nn",
+                "validation_fraction",
+                "test_fraction",
+            ),
             "NN validation_fraction and test_fraction must be non-negative and sum to < 1",
         )
 
     active_learning = config["active_learning"]
-    for key in ("n_rounds", "n_candidates_per_round", "n_candidate_pool"):
+    al_public_keys = {
+        "n_rounds": ("rounds",),
+        "n_candidates_per_round": ("candidates",),
+        "n_candidate_pool": ("candidate_pool",),
+    }
+    for key, public_keys in al_public_keys.items():
         if int(active_learning.get(key, 0)) < 1:
-            raise InputFileError(document.path, 1, f"AL {key} must be positive")
+            raise InputFileError(
+                document.path,
+                _stage_line(document, "al", *public_keys),
+                f"AL {key} must be positive",
+            )
     if int(active_learning["n_candidate_pool"]) < int(active_learning["n_candidates_per_round"]):
-        raise InputFileError(document.path, 1, "AL candidate_pool cannot be smaller than candidates")
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "al", "candidate_pool"),
+            "AL candidate_pool cannot be smaller than candidates",
+        )
+    uncertainty_threshold = float(
+        active_learning.get("uncertainty_threshold", -1.0)
+    )
+    if not math.isfinite(uncertainty_threshold) or uncertainty_threshold < 0.0:
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "al", "uncertainty_threshold"),
+            "AL uncertainty_threshold must be finite and non-negative",
+        )
+    if str(active_learning.get("sampling_domain", "")) not in {"global", "core_envelope"}:
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "al", "sampling_domain"),
+            "AL sampling_domain must be global or core_envelope",
+        )
+    al_radii = [float(value) for value in active_learning.get("local_radii", [])]
+    if not al_radii or any(
+        not math.isfinite(value) or value <= 0.0 or value > 1.0
+        for value in al_radii
+    ):
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "al", "local_radii"),
+            "AL local_radii must be in (0, 1]",
+        )
+
+    audit = stages.setdefault("audit", {"top_k": 8, "seeds": [101, 202, 303]})
+    if int(audit.get("top_k", 0)) < 1:
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "audit", "top_k"),
+            "audit top_k must be positive",
+        )
+    if not audit.get("seeds") or any(
+        isinstance(seed, bool) or not isinstance(seed, int) or seed < 1
+        for seed in audit["seeds"]
+    ):
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "audit", "seeds"),
+            "audit seeds must be positive integers",
+        )
 
 
 def compile_input(document: FFOptInput) -> CompiledInput:
     """Compile a parsed input file without reading any legacy project YAML."""
     primary = _primary_data(document)
-    atom_types, dimensions, type_counts = _compile_atom_types(document, primary)
+    optimize = "bo" in document.workflow
+    atom_types, dimensions, type_counts = _compile_atom_types(
+        document, primary, optimize=optimize
+    )
     if dimensions < 1 and any(stage in {"bo", "sample", "nn", "al"} for stage in document.workflow):
         raise InputFileError(document.path, 1, "parameter constraints leave no free dimensions")
     params = document.parameters
@@ -583,7 +1023,7 @@ def compile_input(document: FFOptInput) -> CompiledInput:
 
     stages: dict[str, Any] = {
         "sample": {
-            "n_points": min(2500, max(800, 50 * max(dimensions, 1))),
+            "n_points": min(2500, max(1500, 75 * max(dimensions, 1))),
             "seeds": [101, 202, 303],
             "elite_centers": min(24, max(4, dimensions)),
             "center_selection": "diverse",
@@ -591,7 +1031,8 @@ def compile_input(document: FFOptInput) -> CompiledInput:
             "radii": [0.01, 0.025, 0.05],
             "global_fraction": 0.10,
             "design_seed": 20260727,
-        }
+        },
+        "audit": {"top_k": 8, "seeds": [101, 202, 303]},
     }
     _apply_stage_settings(document, config, stages)
     config.setdefault("workflow", {})["active_properties"] = list(config["targets"])
@@ -606,7 +1047,7 @@ def compile_input(document: FFOptInput) -> CompiledInput:
         "stages": stages,
         "pipeline": {
             "stages": list(document.workflow),
-            "audit": {"top_k": 8, "seeds": [101, 202, 303]},
+            "audit": dict(stages["audit"]),
         },
     }
     return CompiledInput(

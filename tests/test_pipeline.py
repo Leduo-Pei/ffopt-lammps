@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -40,32 +41,49 @@ def _config():
 
 def test_pipeline_paths_and_commands_are_deterministic(tmp_path, monkeypatch):
     project = _project(tmp_path)
-    config_path = tmp_path / "expanded.yaml"
-    config_path.write_text("manifest: {system_name: demo}\n", encoding="utf-8")
     monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: _config())
 
     runner = PipelineRunner(
-        project=project, machine="local", config_path=config_path,
-        run_id="trial", dry_run=True,
+        project=project, machine="local", run_id="trial", dry_run=True,
     )
     specs = runner.build_specs()
     assert [spec.name for spec in specs] == ["bo", "sample"]
     assert specs[0].output_dir == project.run_root / "pipelines" / "trial" / "bo"
     assert "--n-points" in specs[1].command
     assert specs[1].command[specs[1].command.index("--n-points") + 1] == "12"
+    assert runner.config_path.parent == runner.root / "provenance"
+    assert runner.run() == "dry-run"
+    assert not runner.root.exists()
+
+
+def test_real_run_writes_immutable_provenance(tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: _config())
+
+    def fake_run_local(self, state, spec):
+        state.transition(spec.name, "running", increment_attempt=True)
+        for artifact in spec.artifacts:
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text("test\n", encoding="utf-8")
+        state.transition(spec.name, "completed")
+
+    monkeypatch.setattr(PipelineRunner, "_run_local", fake_run_local)
+    runner = PipelineRunner(project=project, machine="local", run_id="provenance")
+    assert runner.run() == "completed"
+    assert runner.config_path.exists()
+    assert runner.input_snapshot_path.read_bytes() == project.path.read_bytes()
+    environment = json.loads(runner.environment_path.read_text(encoding="utf-8"))
+    assert environment["machine_profile"] == "local"
 
 
 def test_validate_only_uses_initial_input_parameters(tmp_path, monkeypatch):
     project = _project(tmp_path)
     project.data["pipeline"]["stages"] = ["validate"]
-    config_path = tmp_path / "expanded.json"
-    config_path.write_text("{}\n", encoding="utf-8")
     monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: _config())
 
     runner = PipelineRunner(
         project=project,
         machine="local",
-        config_path=config_path,
         run_id="initial_validation",
         dry_run=True,
     )
@@ -78,8 +96,6 @@ def test_pipeline_reuses_complete_stage_and_invalidates_downstream_only(
     tmp_path, monkeypatch
 ):
     project = _project(tmp_path)
-    config_path = tmp_path / "expanded.yaml"
-    config_path.write_text("manifest: {system_name: demo}\n", encoding="utf-8")
     monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: _config())
     calls = []
 
@@ -93,32 +109,97 @@ def test_pipeline_reuses_complete_stage_and_invalidates_downstream_only(
 
     monkeypatch.setattr(PipelineRunner, "_run_local", fake_run_local)
     first = PipelineRunner(
-        project=project, machine="local", config_path=config_path, run_id="trial"
+        project=project, machine="local", run_id="trial"
     )
     assert first.run() == "completed"
     assert calls == ["bo", "sample"]
 
     calls.clear()
     second = PipelineRunner(
-        project=project, machine="local", config_path=config_path,
-        run_id="trial", resume=True,
+        project=project, machine="local", run_id="trial", resume=True,
     )
     assert second.run() == "completed"
     assert calls == []
 
     project.data["stages"]["sample"]["n_points"] = 24
     third = PipelineRunner(
-        project=project, machine="local", config_path=config_path,
-        run_id="trial", resume=True,
+        project=project, machine="local", run_id="trial", resume=True,
     )
     assert third.run() == "completed"
     assert calls == ["sample"]
 
 
+def test_pipeline_refuses_cross_version_resume_and_snapshots_each_environment(
+    tmp_path, monkeypatch
+):
+    project = _project(tmp_path)
+    monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: _config())
+
+    def fake_run_local(self, state, spec):
+        state.transition(spec.name, "running", increment_attempt=True)
+        for artifact in spec.artifacts:
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text("test\n", encoding="utf-8")
+        state.transition(spec.name, "completed")
+
+    monkeypatch.setattr(PipelineRunner, "_run_local", fake_run_local)
+    first = PipelineRunner(project=project, machine="local", run_id="versioned")
+    assert first.run() == "completed"
+
+    monkeypatch.setattr("workflow.pipeline.__version__", "99.0.0")
+    upgraded = PipelineRunner(
+        project=project, machine="local", run_id="versioned", resume=True
+    )
+    assert upgraded.environment_path != first.environment_path
+    with pytest.raises(RuntimeError, match="started with FFOpt.*use --new"):
+        upgraded.run()
+    assert not upgraded.environment_path.exists()
+
+
+def test_from_stage_requires_completed_upstream_artifacts(tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: _config())
+    runner = PipelineRunner(
+        project=project,
+        machine="local",
+        run_id="jump",
+        from_stage="sample",
+    )
+    with pytest.raises(RuntimeError, match="upstream stage 'bo' is not complete"):
+        runner.run()
+
+
+def test_from_stage_continues_after_operational_pause(tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: _config())
+    calls = []
+
+    def fake_run_local(self, state, spec):
+        calls.append(spec.name)
+        state.transition(spec.name, "running", increment_attempt=True)
+        for artifact in spec.artifacts:
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text("test\n", encoding="utf-8")
+        state.transition(spec.name, "completed")
+
+    monkeypatch.setattr(PipelineRunner, "_run_local", fake_run_local)
+    assert PipelineRunner(
+        project=project, machine="local", run_id="pause", until="bo"
+    ).run() == "completed"
+    assert calls == ["bo"]
+
+    assert PipelineRunner(
+        project=project,
+        machine="local",
+        run_id="pause",
+        from_stage="sample",
+        resume=True,
+    ).run() == "completed"
+    assert calls == ["bo", "sample"]
+
+
 def test_slurm_script_omits_empty_optional_directives(tmp_path, monkeypatch):
     project = _project(tmp_path)
-    config_path = tmp_path / "expanded.yaml"
-    config_path.write_text("manifest: {system_name: demo}\n", encoding="utf-8")
     config = _config()
     config["machine"]["backend"] = "slurm"
     config["cluster"] = {
@@ -134,8 +215,7 @@ def test_slurm_script_omits_empty_optional_directives(tmp_path, monkeypatch):
     }
     monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: config)
     runner = PipelineRunner(
-        project=project, machine="cluster", config_path=config_path,
-        run_id="trial", dry_run=True,
+        project=project, machine="cluster", run_id="trial", dry_run=True,
     )
     script = runner._write_slurm_script(runner.build_specs()[0]).read_text(
         encoding="utf-8"
@@ -144,13 +224,13 @@ def test_slurm_script_omits_empty_optional_directives(tmp_path, monkeypatch):
     assert "#SBATCH --qos=" not in script
     assert "#SBATCH --mem=0" not in script
     assert "#SBATCH --cpus-per-task=4" in script
+    assert "export PYTHONNOUSERSITE=1" in script
+    assert "export PYTHONUNBUFFERED=1" in script
     assert "source ~/.bashrc" in script
 
 
 def test_slurm_script_allocates_distributed_candidate_steps(tmp_path, monkeypatch):
     project = _project(tmp_path)
-    config_path = tmp_path / "expanded.yaml"
-    config_path.write_text("manifest: {system_name: demo}\n", encoding="utf-8")
     config = _config()
     config["machine"]["backend"] = "slurm"
     config["cluster"] = {
@@ -168,8 +248,7 @@ def test_slurm_script_allocates_distributed_candidate_steps(tmp_path, monkeypatc
     }
     monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: config)
     runner = PipelineRunner(
-        project=project, machine="ccelab-2node", config_path=config_path,
-        run_id="distributed", dry_run=True,
+        project=project, machine="ccelab-2node", run_id="distributed", dry_run=True,
     )
     script = runner._write_slurm_script(runner.build_specs()[0]).read_text(
         encoding="utf-8"
@@ -182,8 +261,6 @@ def test_slurm_script_allocates_distributed_candidate_steps(tmp_path, monkeypatc
 
 def test_slurm_script_requests_explicit_memory_per_node(tmp_path, monkeypatch):
     project = _project(tmp_path)
-    config_path = tmp_path / "expanded.yaml"
-    config_path.write_text("manifest: {system_name: demo}\n", encoding="utf-8")
     config = _config()
     config["machine"]["backend"] = "slurm"
     config["cluster"] = {
@@ -201,8 +278,7 @@ def test_slurm_script_requests_explicit_memory_per_node(tmp_path, monkeypatch):
     }
     monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: config)
     runner = PipelineRunner(
-        project=project, machine="ccelab-smoke", config_path=config_path,
-        run_id="memory", dry_run=True,
+        project=project, machine="ccelab-smoke", run_id="memory", dry_run=True,
     )
     script = runner._write_slurm_script(runner.build_specs()[0]).read_text(
         encoding="utf-8"
@@ -214,15 +290,12 @@ def test_running_slurm_stage_is_not_completed_by_partial_artifacts(
     tmp_path, monkeypatch
 ):
     project = _project(tmp_path)
-    config_path = tmp_path / "expanded.yaml"
-    config_path.write_text("manifest: {system_name: demo}\n", encoding="utf-8")
     config = _config()
     config["machine"]["backend"] = "slurm"
     config["cluster"] = {"bo": {}}
     monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: config)
     runner = PipelineRunner(
-        project=project, machine="cluster", config_path=config_path,
-        run_id="partial", resume=True,
+        project=project, machine="cluster", run_id="partial", resume=True,
     )
     spec = runner.build_specs()[0]
     for artifact in spec.artifacts:
@@ -241,15 +314,13 @@ def test_running_slurm_stage_is_not_completed_by_partial_artifacts(
 
 def test_watch_stops_after_terminal_slurm_failure(tmp_path, monkeypatch):
     project = _project(tmp_path)
-    config_path = tmp_path / "expanded.yaml"
-    config_path.write_text("manifest: {system_name: demo}\n", encoding="utf-8")
     config = _config()
     config["machine"]["backend"] = "slurm"
     config["cluster"] = {"bo": {}}
     monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: config)
     runner = PipelineRunner(
-        project=project, machine="cluster", config_path=config_path,
-        run_id="failed", resume=True, watch=True, poll_seconds=1,
+        project=project, machine="cluster", run_id="failed", resume=True,
+        watch=True, poll_seconds=1,
     )
     spec = runner.build_specs()[0]
     runner.root.mkdir(parents=True, exist_ok=True)
@@ -277,15 +348,12 @@ def test_new_invocation_resubmits_already_failed_slurm_stage(
 ):
     project = _project(tmp_path)
     project.data["pipeline"]["stages"] = ["bo"]
-    config_path = tmp_path / "expanded.yaml"
-    config_path.write_text("manifest: {system_name: demo}\n", encoding="utf-8")
     config = _config()
     config["machine"]["backend"] = "slurm"
     config["cluster"] = {"bo": {}}
     monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: config)
     runner = PipelineRunner(
-        project=project, machine="cluster", config_path=config_path,
-        run_id="resume", resume=True,
+        project=project, machine="cluster", run_id="resume", resume=True,
     )
     spec = runner.build_specs()[0]
     runner.root.mkdir(parents=True, exist_ok=True)
@@ -310,8 +378,6 @@ def test_new_invocation_resubmits_already_failed_slurm_stage(
 def test_pipeline_allows_method_change_and_reuses_upstream_bo(tmp_path, monkeypatch):
     project = _project(tmp_path)
     project.data["pipeline"]["stages"] = ["bo", "nn"]
-    config_path = tmp_path / "expanded.json"
-    config_path.write_text("{}\n", encoding="utf-8")
     config = _config()
     config["nn"] = {"enabled": True, "model": "mlp_ensemble"}
     monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: config)
@@ -327,7 +393,7 @@ def test_pipeline_allows_method_change_and_reuses_upstream_bo(tmp_path, monkeypa
 
     monkeypatch.setattr(PipelineRunner, "_run_local", fake_run_local)
     first = PipelineRunner(
-        project=project, machine="local", config_path=config_path, run_id="trial"
+        project=project, machine="local", run_id="trial"
     )
     assert first.run() == "completed"
     assert calls == ["bo", "nn"]
@@ -337,7 +403,6 @@ def test_pipeline_allows_method_change_and_reuses_upstream_bo(tmp_path, monkeypa
     second = PipelineRunner(
         project=project,
         machine="local",
-        config_path=config_path,
         run_id="trial",
         resume=True,
     )
@@ -348,8 +413,6 @@ def test_pipeline_allows_method_change_and_reuses_upstream_bo(tmp_path, monkeypa
 def test_pipeline_rejects_scientific_change_in_same_run(tmp_path, monkeypatch):
     project = _project(tmp_path)
     project.data["pipeline"]["stages"] = ["bo"]
-    config_path = tmp_path / "expanded.json"
-    config_path.write_text("{}\n", encoding="utf-8")
     config = _config()
     config["targets"] = {"density": {"value": 1.0, "weight": 1.0}}
     monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: config)
@@ -363,7 +426,7 @@ def test_pipeline_rejects_scientific_change_in_same_run(tmp_path, monkeypatch):
 
     monkeypatch.setattr(PipelineRunner, "_run_local", fake_run_local)
     first = PipelineRunner(
-        project=project, machine="local", config_path=config_path, run_id="trial"
+        project=project, machine="local", run_id="trial"
     )
     assert first.run() == "completed"
 
@@ -371,7 +434,6 @@ def test_pipeline_rejects_scientific_change_in_same_run(tmp_path, monkeypatch):
     second = PipelineRunner(
         project=project,
         machine="local",
-        config_path=config_path,
         run_id="trial",
         resume=True,
     )

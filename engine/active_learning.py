@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-active_learning.py  |  Active Learning Refinement Loop  |  v8
+active_learning.py  |  Active Learning Refinement Loop
 
 Workflow per round:
   1. Sample candidate pool (Sobol/LHS/random, size=n_candidate_pool)
@@ -11,10 +11,10 @@ Workflow per round:
   5. Early-stop when max aggregated uncertainty < uncertainty_threshold
 
 Usage:
-  python -m engine.active_learning --config runs/.../_configs/project_local.json \\
+  python -m engine.active_learning --config runs/.../provenance/runtime_*.json \\
       --bo-dir runs/.../bo --nn-dir runs/.../nn
 
-Outputs (active_learning_output/):
+Outputs (pipelines/<run-id>/al/):
   data_round_{N}/all_results.csv   - accumulated data after round N
   nn_round_{N}/                    - NNSurrogate outputs after round N
   nn_round_final/                  - copy of last nn_round_* (run.py target)
@@ -42,9 +42,9 @@ from .config_loader import load_config as load_expanded_config, save_config_snap
 
 from .lammps_interface import LAMMPSRunner
 from .nn_surrogate import (NNSurrogate, load_ensemble_from_file)
+from .parameter_space import build_parameter_space
 
 # Type alias for per-property ensemble dict returned by load_ensemble_from_file
-from .optimizer import ForceFieldOptimizer
 from utils.objective_rescoring import (
     active_targets,
     objective_provenance,
@@ -62,7 +62,7 @@ class ActiveLearner:
 
     Reads
     -----
-    config            : parsed v8 config.yaml
+    config            : generated expanded engine configuration
     bo_dir            : path to BO output directory (stable_results.csv preferred,
                         all_results.csv fallback)
     nn_dir            : path to initial NNSurrogate output (contains forward_nn.pt)
@@ -168,7 +168,7 @@ class ActiveLearner:
         self.seed = config["optimization"].get("random_seed", 42)
 
         # -- Free parameter space ---------------------------------------------
-        self.param_space = ForceFieldOptimizer._build_param_space(config)
+        self.param_space = build_parameter_space(config)
         self.param_names = [p[0] for p in self.param_space]
         self.param_lo    = np.array([p[1] for p in self.param_space])
         self.param_hi    = np.array([p[2] for p in self.param_space])
@@ -245,7 +245,7 @@ class ActiveLearner:
 
         print()
         print("=" * 70)
-        print("Active Learning Refinement v8")
+        print("Active Learning Refinement")
         print(f"  System       : {mf['system_name']}")
         print(f"  Output dir   : {self.output_dir}")
         print(f"  BO data dir  : {self.bo_dir}")
@@ -1309,7 +1309,7 @@ class ActiveLearner:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Active Learning Refinement v8",
+        description="Active Learning Refinement",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )

@@ -7,8 +7,9 @@ import zipfile
 
 wheel = Path(sys.argv[1])
 required_suffixes = (
+    "engine/parameter_space.py",
+    "workflow/machine_test_runner.py",
     "share/ffopt/lammps/inputs/bulk/in.bulk.mol",
-    "share/ffopt/lammps/inputs/molecule/in.sublimation.bulk",
     "share/ffopt/lammps/inputs/molecule/in.sublimation.single",
     "share/ffopt/lammps/inputs/adsorption/in.complex",
     "share/ffopt/lammps/inputs/adsorption/in.slab",
@@ -16,6 +17,9 @@ required_suffixes = (
     "share/ffopt/examples/btah/acceptance.in",
     "share/ffopt/data/bulk/BTAH_822_bulk.data",
     "share/ffopt/data/molecule/BTAH_822_single.data",
+    "share/ffopt/data/adsorption/ad_complex.data",
+    "share/ffopt/data/adsorption/ad_slab.data",
+    "share/ffopt/data/adsorption/ad_mol.data",
 )
 forbidden_members = {
     "slurm/__init__.py",

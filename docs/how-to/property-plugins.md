@@ -1,4 +1,11 @@
-# Property evaluator plugins
+# Property evaluator plugins (advanced)
+
+The schema-1 `ffopt.in` compiler currently exposes `bulk`, `sublimation`, and
+`adsorption`. Run `ffopt plugins` and check the `ffopt.in=yes` marker before
+using a property in the one-file interface. The surface evaluator and external
+entry points are engine APIs retained for development and legacy generated
+configurations; installing an evaluator alone does not add new `ffopt.in`
+syntax.
 
 FFOpt discovers external property evaluators from the Python entry-point group
 `ffopt.property_evaluators`.
@@ -32,7 +39,11 @@ dipole = "my_ffopt_plugin:DipoleEvaluator"
 The entry point may expose an evaluator instance, a `PropertyEvaluator`
 subclass, or a zero-argument factory. Names use lower-case snake_case.
 
-## Project configuration
+## Engine configuration
+
+The following generated/legacy engine configuration is shown for plugin
+developers. Ordinary users do not edit YAML, and it is not accepted as a new
+schema-1 `property dipole` block:
 
 ```yaml
 property_evaluators:
@@ -57,4 +68,5 @@ ffopt plugins --json
 Plugins may call validated `LAMMPSRunner` primitives or implement an independent
 calculator. They must write only inside `context.eval_dir` and return numerical
 properties through `PropertyStageResult`; objective aggregation remains owned
-by FFOpt.
+by FFOpt. A future input-schema extension will let plugins declare their data,
+settings, target names, and units to the public compiler.

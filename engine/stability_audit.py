@@ -13,7 +13,7 @@ import pandas as pd
 from .config_loader import load_config
 from .lammps_interface import LAMMPSRunner
 from .local_sampling import atomic_csv, evaluate_candidate, valid_source_rows
-from .optimizer import ForceFieldOptimizer
+from .parameter_space import build_parameter_space
 
 
 def unique_top(frame: pd.DataFrame, names: list[str], top_k: int) -> pd.DataFrame:
@@ -54,7 +54,7 @@ def main() -> None:
     config = load_config(args.config)
     config.setdefault("adsorption", {})["enabled"] = False
     runner = LAMMPSRunner(config)
-    space = ForceFieldOptimizer._build_param_space(config)
+    space = build_parameter_space(config)
     names = [item[0] for item in space]
     targets = [
         name for name, info in config["targets"].items()

@@ -3,7 +3,8 @@
 `ffopt.in` is the only user-edited scientific control file. It is a
 line-oriented format: commands are case-insensitive, values are separated by
 spaces, `#` starts a comment, and each block ends with `end`. Paths are
-resolved relative to the input file.
+resolved relative to the input file. Files are UTF-8; quote paths containing
+spaces or `#`. `ffopt init` adds those quotes automatically.
 
 Run `ffopt check ffopt.in` after every edit. Unknown commands, duplicate
 settings, unsupported units, missing files, incompatible types, impossible
@@ -14,7 +15,7 @@ ranges, and invalid workflow dependencies are rejected before LAMMPS starts.
 ```text
 ffopt 1
 project my_crystal
-workflow bo sample nn al validate
+workflow bo sample nn al audit finalize validate
 
 parameters
     ...
@@ -29,7 +30,7 @@ end
 |---|---|
 | `ffopt 1` | Input schema version. It is not an on/off switch. |
 | `project NAME` | Portable result identifier; letters first, then letters, numbers, `.`, `_`, or `-`. |
-| `workflow ...` | Ordered stages to execute. Common values are `bo` or `bo sample nn al validate`. |
+| `workflow ...` | Ordered stages to execute. Common values are `bo` or `bo sample nn al audit finalize validate`. |
 
 Results are written below `runs/<project>/`. The project name has no
 molecule-specific meaning.
@@ -38,8 +39,6 @@ molecule-specific meaning.
 
 ```text
 parameters
-    range epsilon factor 0.50 2.00
-    range sigma   factor 0.85 1.15
     range charge  delta  0.30
     charge_limit 1.0
     neutrality derive N1
@@ -61,8 +60,9 @@ type ID LABEL EPSILON SIGMA CHARGE
 
 There must be exactly one row for every atom type in the primary LAMMPS data
 file. IDs are positive and unique. Labels are portable FFOpt names and must be
-unique. Epsilon is in kcal/mol, sigma in angstrom, and charge in elementary
-charge. Epsilon and sigma must be positive.
+unique: start with a letter and use only ASCII letters, numbers, and
+underscores. Epsilon is in kcal/mol, sigma in angstrom, and charge in
+elementary charge. Epsilon and sigma must be positive.
 
 One parameter value applies to every atom of that LAMMPS type. If a data file
 uses multiple charges within one atom type, split the atom type before using
@@ -92,8 +92,9 @@ Bounds are inclusive and reordered if written high-to-low. Epsilon and sigma
 bounds must remain positive. The optional trailing unit on a delta is accepted
 for readability but is not required.
 
-Every free parameter needs either a global or per-type range. A per-type range
-overrides the global range for that label and parameter.
+Every free parameter needs either a global or per-type range. Fixed parameters
+still need an initial value in each `type` row but do not need a range. A
+per-type range overrides the global range for that label and parameter.
 
 ### `fix`
 
@@ -181,6 +182,21 @@ states how many crystallographic unit cells are already present in the data
 file; it does not replicate the file. Reported `a`, `b`, and `c` are divided by
 these values.
 
+| Setting | Meaning | Default |
+|---|---|---|
+| `cells_in_data` | Unit-cell repeats already contained in the data file | `1 1 1` |
+| `temperature` | NPT temperature | `300 K` |
+| `pressure` | NPT pressure | `1 atm` |
+| `timestep` | LAMMPS timestep | `1 fs` |
+| `cutoff` | LJ and real-space Coulomb cutoff | `8 A` |
+| `equilibration` | Discarded NPT timesteps | `20000` |
+| `production` | Averaged NPT timesteps | `40000` |
+| `seed` | Velocity-initialization seed | `101` |
+
+There is no bulk `protocol` switch in schema 1: minimization followed by NPT
+is the fixed, tested workflow. `production` must be at least 5000 timesteps,
+the fixed averaging-output interval.
+
 Supported targets and units are:
 
 | Target | Unit |
@@ -212,6 +228,13 @@ a finite-temperature sublimation enthalpy, while this estimator does not add
 ideal-gas translation, rotation, vibration, `pV`, or standard-state thermal
 corrections. The validation manifest records this definition.
 
+`temperature` records the experimental target temperature (default
+`298.15 K`); the bulk simulation temperature is controlled by the bulk block
+and defaults to `300 K`. `cutoff` optionally overrides only the isolated-
+molecule minimization cutoff and otherwise inherits the bulk cutoff. The
+number of atoms per molecule is read from the required single-molecule data
+file and is not a user parameter.
+
 ## Adsorption property
 
 ```text
@@ -237,6 +260,17 @@ in kcal/mol. Omit `target` when no experimental reference exists; FFOpt then
 computes adsorption only during final validation and does not train or
 optimize against it.
 
+The only optional adsorption settings are `metal LABEL` (default `Au`) and
+`cutoff VALUE A` (default `7 A`). Because schema 1 adsorption is deterministic
+minimization, temperature, timestep, random seed, equilibration, and production
+settings are rejected instead of being accepted and ignored.
+
+Schema 1 assumes that `metal LABEL` identifies one fixed, uncharged substrate
+type whose LJ parameters remain in each data file. FFOpt updates the molecular
+types shared by the complex and isolated-molecule files. A charged,
+multicomponent, or independently optimized substrate requires a future property
+contract and must not be represented by relabeling it as this fixed metal.
+
 ## Targets, weights, and tolerances
 
 General form:
@@ -258,6 +292,8 @@ J   = sqrt(sum(weight_i * r_i^2) / sum(weight_i))
 `tolerance` is an absolute property-unit threshold used by final validation;
 it does not change the optimization objective. If omitted, the compiler uses
 3% of the absolute target for bulk properties and 10 kJ/mol for sublimation.
+An optimization workflow needs at least one positive-weight, nonzero target;
+the relative objective is not defined for a zero reference value.
 
 ## BO block
 
@@ -269,6 +305,8 @@ bo
     max_rounds 200
     random_seed 42
     stability_audit on
+    stability_top_k 20
+    stability_seeds 101 202 303
     early_stop enabled yes
     early_stop patience 30
     early_stop min_improvement 0.001
@@ -278,22 +316,44 @@ end
 | Setting | Meaning | Default |
 |---|---|---|
 | `method` | `auto`, `gp`, `turbo`, or `saasbo` | `auto` |
-| `initial_points` | Initial design size | 48 |
+| `initial_points` | Latin-hypercube points in the initial design | 48 |
 | `batch_size` | Scientific candidates per BO round | 48 |
 | `max_rounds` | Maximum BO rounds | 200 |
 | `random_seed` | Deterministic design/model seed | 42 |
 | `stability_audit` | Audit top BO candidates with independent seeds | on |
+| `stability_top_k` | Distinct BO candidates sent to the stability audit | 20 |
+| `stability_seeds` | Independent LAMMPS seeds used for each audited candidate | `101 202 303` |
 | `early_stop patience` | Stop after this many non-improving rounds | 30 |
 | `early_stop min_improvement` | Minimum objective decrease counted as improvement | 0.001 |
+
+The explicit initial parameter vector from the `type` rows is evaluated once
+as a warm-start centre in addition to the Latin-hypercube points. Therefore,
+with `initial_points 48` the initial stage contains 49 LAMMPS evaluations.
+`ffopt explain` reports the LHS count, warm-start count, initial total, and
+complete BO evaluation budget separately.
+
+The stability audit adds at most `stability_top_k * number_of_seeds` LAMMPS
+evaluations after the search. `ffopt explain` reports this separately and also
+prints the maximum complete BO-stage workload. Advanced optional controls are
+`stability_max_objective_std`, `stability_max_property_rel_std`,
+`stability_noise_penalty`, and `stability_failure_penalty`; their defaults are
+`0.05`, `0.05`, `1.0`, and `10.0`, respectively. Keep the defaults unless the
+noise model and failure policy have been justified for the material.
 
 `batch_size` is independent of machine `workers`. One and two nodes therefore
 perform the same scientific search and differ only in how many candidates run
 concurrently.
 
+The BO stability audit and the post-AL `audit` stage have different jobs. The
+first supplies repeatable BO centers to focused sampling. The second
+re-evaluates the best candidates after all learning rounds and determines the
+parameter set eligible for final selection.
+
 With `method auto`, FFOpt uses GP below 7 dimensions, TuRBO from 7 to 15
 dimensions, and SAASBO from 16 dimensions upward under the default accuracy
 policy. If the optional SAASBO runtime is unavailable, it reports a fallback
-to TuRBO.
+to TuRBO. An explicit `method saasbo` never changes method silently; install
+`ffopt-lammps[saasbo]` or `ffopt-lammps[all-models]` first.
 
 ## Sampling block
 
@@ -338,8 +398,9 @@ The test set is held out from fitting and early stopping. Metrics are reported
 per property; a single high aggregate score must not hide a poorly learned
 property.
 
-The backend also accepts `gp`, `random_forest`, and `xgboost` for controlled
-method comparisons. XGBoost is intentionally optional; install it with
+The backend also accepts `gp`, `random_forest`, `extra_trees`,
+`pair_product_extra_trees`, `svr_rbf`, `polynomial_ridge`, and `xgboost` for
+controlled method comparisons. XGBoost is intentionally optional; install it with
 `python -m pip install "ffopt-lammps[xgboost]"` before selecting that method.
 ANN remains the generated default and packaged acceptance path.
 
@@ -362,22 +423,44 @@ ranks candidates using predicted objective and ensemble uncertainty, evaluates
 the selected candidates with LAMMPS, and adds those labels to the training
 data. `candidates` is the number of expensive LAMMPS points per round.
 
+## Robust audit and finalization
+
+```text
+audit
+    top_k 8
+    seeds 101 202 303
+end
+```
+
+`top_k` is the number of distinct, lowest-objective accumulated candidates
+sent back to LAMMPS. Each is evaluated with every listed seed, so this example
+runs 24 evaluations. The robust score is `mean objective + objective standard
+deviation`; failed replicates remain visible in the audit tables.
+
+`finalize` is a workflow stage, not a settings block. It selects the minimum
+robust score from `audit`, resolves fixed and neutrality-derived parameters,
+and writes a complete per-type parameter table plus an include-ready LAMMPS
+file. Production workflows should keep `audit finalize` immediately before
+`validate`.
+
 ## Final validation block
 
 ```text
 validate
-    trajectory final
     require_tolerances yes
     objective_max 0.03
     max_error_percent 3.0
 end
 ```
 
-`trajectory final` saves final bulk and adsorption trajectories when their
-properties are present. `require_tolerances yes` fails the stage if any fitted
-property exceeds its absolute target tolerance. `objective_max` and
-`max_error_percent` add independent acceptance gates. Omit a gate when it is
-not scientifically justified for the material.
+Final validation always saves final structures and bulk/adsorption trajectories
+when those properties are present; no trajectory setting is required. The old
+`trajectory final` spelling is read only so prerelease checkpoints can resume;
+new inputs should omit it.
+`require_tolerances yes` fails the stage if any fitted property exceeds its
+absolute target tolerance. `objective_max` and `max_error_percent` add
+independent acceptance gates. Omit a gate when it is not scientifically
+justified for the material.
 
 ## Common workflow forms
 
@@ -385,8 +468,12 @@ not scientifically justified for the material.
 workflow validate                 # evaluate initial type values
 workflow bo                       # Bayesian optimization only
 workflow bo validate              # BO then physical validation
-workflow bo sample nn al validate # complete workflow
+workflow bo sample nn al audit finalize validate # production workflow
 ```
 
 Use the workflow line for persistent stage selection. Use `ffopt run ...
 --until bo` only as a temporary operational pause.
+
+A validate-only input does not need parameter `range` lines: no search space
+is constructed, and every `type` value is passed directly to LAMMPS. Ranges
+become mandatory as soon as `bo` is present in the workflow.

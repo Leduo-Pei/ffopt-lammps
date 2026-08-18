@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-nn_surrogate.py  |  Independent per-property Ensemble MLP surrogate  |  v8
+nn_surrogate.py  |  Independent per-property Ensemble MLP surrogate
 
 Architecture:
   raw BO params -> PhysicsFeatureBuilder -> {prop: EnsembleMLP_prop}
@@ -12,10 +12,10 @@ Architecture:
   Uncertainty: aggregated normalized std across all property NNs.
 
 Usage:
-  python -m engine.nn_surrogate --config runs/.../_configs/project_local.json \\
+  python -m engine.nn_surrogate --config runs/.../provenance/runtime_*.json \\
       --bo-dir runs/.../bo
 
-Outputs (nn_output_SYSTEM_TIMESTAMP/):
+Outputs (pipelines/<run-id>/nn/):
   forward_nn.pt           - all per-property ensemble weights + metadata
   nn_optimize_result.json - best params + LAMMPS validation
   train_history.json      - per-property per-epoch loss curves
@@ -44,7 +44,7 @@ from scipy.stats import qmc
 
 from .config_loader import load_config as load_expanded_config, save_config_snapshot
 from .lammps_interface import LAMMPSRunner
-from .optimizer import ForceFieldOptimizer
+from .parameter_space import build_parameter_space
 from utils.objective_rescoring import (
     active_targets,
     validate_objective_provenance,
@@ -627,7 +627,8 @@ class _BootstrapScaledTargetModel(_ScaledModel):
     def predict_mean(self, X):
         # Member zero is fitted to every stable-core row. Bootstrap members are
         # retained for epistemic spread; averaging them degraded local holdout
-        # accuracy in the sparse 27-D BTAH benchmark.
+        # accuracy in the sparse high-dimensional benchmark used to select this
+        # estimator behavior.
         return self._predict_all(X)[0]
 
     def predict_std(self, X):
@@ -783,7 +784,7 @@ class NNSurrogate:
         self.target_names = list(self.targets.keys())
 
         # Free BO parameter space
-        self.param_space = ForceFieldOptimizer._build_param_space(config)
+        self.param_space = build_parameter_space(config)
         self.param_names = [p[0] for p in self.param_space]
         self.param_lo    = np.array([p[1] for p in self.param_space])
         self.param_hi    = np.array([p[2] for p in self.param_space])
@@ -821,7 +822,7 @@ class NNSurrogate:
         t0 = time.time()
         mf = self.config["manifest"]
         print(f"\n{'='*65}")
-        print("NN Surrogate v8 - Independent per-property surrogate")
+        print("NN Surrogate - Independent per-property surrogate")
         print(f"  System     : {mf['system_name']}")
         print(f"  Properties : {self.target_names}")
         print(f"  Model      : {self.model_kind}"
@@ -1749,7 +1750,7 @@ def load_ensemble_from_file(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="NN Surrogate v8 - Independent per-property Ensemble MLP")
+        description="NN Surrogate - Independent per-property Ensemble MLP")
     parser.add_argument("--config", required=True)
     parser.add_argument("--bo-dir",      default=None,
                         help="BO output dir; stable_results.csv preferred, "

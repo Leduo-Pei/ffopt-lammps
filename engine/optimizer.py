@@ -1,5 +1,5 @@
 """
-optimizer.py  |  Bayesian Optimizer for Force Field Parameters  |  v8
+optimizer.py  |  Bayesian Optimizer for Force Field Parameters
 
 BO method selection:
   - If optimization.method is "gp", "turbo", or "saasbo", that user choice is used.
@@ -71,6 +71,7 @@ except ImportError:
     _PARETO_AVAILABLE = False
 
 from .lammps_interface import LAMMPSRunner, LARGE_PENALTY
+from .parameter_space import build_parameter_space
 
 # Suppress repetitive BoTorch / GPyTorch warnings
 warnings.filterwarnings("ignore", message=".*qNoisyExpectedImprovement.*")
@@ -157,7 +158,7 @@ def _update_turbo_state(state: TurboState, new_objectives: List[float]) -> Turbo
 
 class ForceFieldOptimizer:
     """
-    Bayesian Optimiser for multi-type LJ (卤 Coulomb) force field parameters.
+    Bayesian Optimiser for multi-type LJ (+ Coulomb) force field parameters.
 
     Usage
     -----
@@ -167,7 +168,7 @@ class ForceFieldOptimizer:
     Parameters
     ----------
     config : dict
-        Parsed config.yaml (v8 schema).
+        Generated expanded engine configuration.
     """
 
     def __init__(self, config: dict):
@@ -445,76 +446,8 @@ class ForceFieldOptimizer:
 
     @staticmethod
     def _build_param_space(config: dict) -> List[Tuple[str, float, float]]:
-        """
-        Build the ordered list of free BO parameters from config.
-
-        Rules (must mirror lammps_interface._resolve_params exclusion logic):
-        - Include epsilon, sigma for every atom type.
-        - Include charge for every atom type ONLY when charge.enabled: true
-          AND the type is NOT the neutrality-derived type.
-        - Exclude any param whose "{label}_{param}" name appears in
-          pair_params.derived_params[*].target.
-        - When pair_params.mixing_rule == "none", add explicit cross-pair
-          epsilon and sigma as additional free parameters.
-
-        Returns
-        -------
-        list of (param_name, lo, hi)
-            param_name : "{label}_{param}", e.g. "Fe_corner_epsilon"
-                         or "cross_1_2_epsilon" for explicit pairs
-        """
-        charge_enabled  = config["charge"]["enabled"]
-        neutrality_cfg  = config["charge"]["neutrality_constraint"]
-        derive_type_idx = neutrality_cfg.get("derive_from_type", None)
-        neutrality_on   = neutrality_cfg.get("enabled", True)
-
-        # Collect names of derived (constrained) parameters to exclude
-        derived_targets = {
-            d["target"]
-            for d in config["pair_params"].get("derived_params", [])
-        }
-
-        space: List[Tuple[str, float, float]] = []
-
-        for at in config["atom_types"]:
-            t_idx = at["type"]
-            label = at["label"]
-            for pname, bounds in at["params"].items():
-                # Skip charge when electrostatics are off
-                if pname == "charge" and not charge_enabled:
-                    continue
-                # Skip the neutrality-derived type's charge
-                if (pname == "charge" and charge_enabled and neutrality_on
-                        and t_idx == derive_type_idx):
-                    continue
-                key = f"{label}_{pname}"
-                # Skip params that are algebraically derived
-                if key in derived_targets:
-                    continue
-                # Inline spec dispatch:
-                #   {min,max[,init]} -> free search dimension
-                #   scalar number    -> fixed constant (NOT searched)
-                #   string           -> formula / derived (NOT searched)
-                if isinstance(bounds, dict) and "min" in bounds and "max" in bounds:
-                    space.append((key, float(bounds["min"]), float(bounds["max"])))
-                # else (scalar or string): resolved later, not a free dimension
-
-        # Explicit cross-pair parameters (only when mixing_rule: none)
-        if config["pair_params"]["mixing_rule"] == "none":
-            for ep_cfg in config["pair_params"].get("explicit_pairs", []):
-                t1, t2 = ep_cfg["types"]
-                for pname in ("epsilon", "sigma"):
-                    key = f"cross_{t1}_{t2}_{pname}"
-                    lo  = float(ep_cfg[pname]["min"])
-                    hi  = float(ep_cfg[pname]["max"])
-                    space.append((key, lo, hi))
-
-        if not space:
-            raise ValueError(
-                "No free BO parameters found. Check atom_types.params and "
-                "pair_params in config.yaml."
-            )
-        return space
+        """Compatibility wrapper around the lightweight shared builder."""
+        return build_parameter_space(config)
 
     @staticmethod
     def _select_bo_method(n_params: int, opt_cfg: dict) -> str:
@@ -535,9 +468,10 @@ class ForceFieldOptimizer:
         method = opt_cfg.get("method", "auto")
         if method != "auto":
             if method == "saasbo" and not _SAASBO_AVAILABLE:
-                print("  WARNING: SAASBO requested but pyro not installed. "
-                      "Falling back to TuRBO.")
-                return "turbo"
+                raise ValueError(
+                    "SAASBO was explicitly requested but Pyro is unavailable. "
+                    "Install ffopt-lammps[saasbo], or choose method auto/turbo."
+                )
             return method
 
         accuracy_priority = opt_cfg.get("accuracy_priority", True)
@@ -601,6 +535,17 @@ class ForceFieldOptimizer:
             seed.setdefault(name, 0.5 * (lo + hi))
         return seed
 
+    def _resolve_warm_start(self):
+        """Return the optional warm-start point and its user-facing source."""
+        seed = self._init_seed_from_config()
+        if seed is not None:
+            return seed, "atom_types init values"
+
+        seed_path = self.config["optimization"].get("seed_params")
+        if seed_path and os.path.exists(seed_path):
+            return self._parse_seed_params(seed_path), seed_path
+        return None, None
+
     def run(self) -> dict:
         start_time = time.time()
         self._print_header()
@@ -618,13 +563,7 @@ class ForceFieldOptimizer:
             # basin instead of a cold, sparse LHS. Priority:
             #   (1) per-param 'init' values in atom_types  (general, material-agnostic)
             #   (2) optimization.seed_params file (legacy)
-            seed = self._init_seed_from_config()
-            src  = "atom_types init values"
-            if seed is None:
-                seed_path = self.config["optimization"].get("seed_params")
-                if seed_path and os.path.exists(seed_path):
-                    seed = self._parse_seed_params(seed_path)
-                    src = seed_path
+            seed, src = self._resolve_warm_start()
             if seed:
                 initial_points = [seed] + initial_points
                 print(f"  Warm-start: seeded initial batch from {src}")
@@ -1721,7 +1660,7 @@ class ForceFieldOptimizer:
         # best_parameters.txt (read by run.py --dry-run auto-loader)
         param_path = os.path.join(self.work_dir, "best_parameters.txt")
         with open(param_path, "w") as f:
-            f.write("# Force Field Optimizer v8\n")
+            f.write("# FFOpt-LAMMPS force-field optimizer\n")
             f.write(f"# System    : {self.config['manifest']['system_name']}\n")
             f.write(f"# Method    : {self.bo_method.upper()}\n")
             f.write(f"# Objective : {best['objective']:.6f}\n")
@@ -1736,7 +1675,7 @@ class ForceFieldOptimizer:
         n_t = len(self.all_feasible)
         report_path = os.path.join(self.work_dir, "optimization_report.txt")
         with open(report_path, "w") as f:
-            f.write("Force Field Optimization Report (v8)\n")
+            f.write("FFOpt-LAMMPS Force Field Optimization Report\n")
             f.write(f"System      : {self.config['manifest']['system_name']}\n")
             f.write(f"Date        : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"BO method   : {self.bo_method.upper()}\n")
@@ -1782,7 +1721,7 @@ class ForceFieldOptimizer:
 
     def _print_header(self):
         print(f"\n{'#'*60}")
-        print("# Force Field Bayesian Optimizer v8")
+        print("# FFOpt-LAMMPS Bayesian Optimizer")
         print(f"# {self.bo_method.upper()} | Pareto active={self.pareto_active}")
         print(f"# {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"{'#'*60}")
@@ -1807,10 +1746,25 @@ class ForceFieldOptimizer:
             print(f"  {prop:<14} = {info['value']}  (weight={w}){status}")
 
         print("\nBO settings:")
-        budget = self.n_initial + self.n_bo_iters * self.batch_size
+        warm_start_count = int(self._resolve_warm_start()[0] is not None)
+        initial_total = self.n_initial + warm_start_count
+        search_budget = initial_total + self.n_bo_iters * self.batch_size
+        audit_budget = (
+            self.stability_top_k * len(self.stability_seeds)
+            if self.stability_enabled
+            else 0
+        )
         print(f"  Method         : {self.bo_method.upper()}")
         print(f"  accuracy_prior : {self.config['optimization'].get('accuracy_priority', True)}")
         print(f"  Pareto active  : {self.pareto_active}")
         print(f"  Initial LHS    : {self.n_initial}")
+        print(f"  Warm-start     : +{warm_start_count} centre")
+        print(f"  Initial total  : {initial_total}")
         print(f"  BO rounds      : {self.n_bo_iters} x batch {self.batch_size}")
-        print(f"  Total budget   : {budget}")
+        print(f"  Search evals   : {search_budget}")
+        if self.stability_enabled:
+            print(
+                f"  Stability audit: top {self.stability_top_k} x "
+                f"{len(self.stability_seeds)} seeds (max {audit_budget})"
+            )
+        print(f"  Max stage evals: {search_budget + audit_budget}")

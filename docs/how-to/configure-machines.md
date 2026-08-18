@@ -16,10 +16,30 @@ policies with the cluster administrator.
 
 ## Configure profiles
 
+If `lmp` is on `PATH`, the built-in `local` profile works without creating a
+configuration:
+
+```bash
+ffopt doctor ffopt.in --machine local
+ffopt run ffopt.in --machine local
+```
+
+That zero-configuration profile deliberately uses one serial worker. Create a
+named profile when executable paths are not on `PATH` or when you want
+controlled MPI and parallel-worker settings.
+
+The built-in profile is visible and testable:
+
+```bash
+ffopt machine list
+ffopt machine show --name local
+ffopt machine test --name local
+```
+
 Local example:
 
 ```bash
-ffopt machine configure --name local \
+ffopt machine configure --name local-workstation \
   --backend local --lammps /path/to/lmp --mpi /path/to/mpirun \
   --workers 4 --mpi-ranks 4 --omp-threads 1 --force
 ```
@@ -64,6 +84,10 @@ For a full allocation, require:
 total-cores >= workers * mpi-ranks * omp-threads
 ```
 
+The per-evaluation `--timeout` must be shorter than `--walltime`. This lets
+FFOpt penalize and move past one pathological parameter point while the stage
+still has time to save checkpoints and finish other candidates.
+
 `omp-threads 1` is intentional when each LAMMPS job already uses MPI ranks.
 It prevents hidden thread oversubscription.
 
@@ -78,6 +102,11 @@ ffopt machine list
 ffopt machine show --name cluster-1node
 ffopt machine test --name cluster-1node
 ```
+
+For a multi-node profile, `machine test` allocates its configured node and
+worker topology and runs one tiny LAMMPS calculation in every worker slot. A
+passing result therefore verifies cross-node dispatch rather than only a
+single validation process.
 
 ## GPU behavior
 

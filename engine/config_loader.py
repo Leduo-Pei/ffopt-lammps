@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Composable YAML config loader for the force-field workflow.
+Internal runtime-config loader for the force-field workflow.
 
-Recipes may contain an ``include`` list. Included files are resolved relative
-to the file that declares them, loaded first, then overridden by the current
-file. Dictionaries are merged recursively; lists and scalar values replace the
-previous value. This keeps user-facing recipes short while preserving the old
-single-file config schema consumed by the existing BO/NN/AL code.
+The public ``ffopt.in`` file is compiled to an immutable JSON snapshot before
+engine stages start. JSON is valid YAML, so ``yaml.safe_load`` reads that
+snapshot while retaining compatibility with prerelease YAML checkpoints and
+their optional ``include`` lists. Includes are an internal compatibility API,
+not part of the public one-input workflow.
 """
 
 from __future__ import annotations
@@ -27,17 +27,17 @@ class ConfigIncludeError(RuntimeError):
 
 def load_config(path: str | os.PathLike[str]) -> Dict[str, Any]:
     """
-    Load a YAML config, recursively expanding ``include`` files.
+    Load an internal JSON/YAML config, recursively expanding ``include`` files.
 
     Parameters
     ----------
     path
-        Path to either a legacy monolithic config or a modular recipe.
+        Path to an immutable runtime snapshot or a prerelease YAML config.
 
     Returns
     -------
     dict
-        Expanded config in the legacy schema expected by the workflow.
+        Expanded runtime mapping consumed by the BO/NN/AL engines.
     """
     root = Path(path).expanduser().resolve()
     sources: List[str] = []
@@ -117,7 +117,12 @@ def require_sections(config: Dict[str, Any], sections: Iterable[str]) -> None:
 def save_config_snapshot(
     config: Dict[str, Any], output_dir: str | os.PathLike[str]
 ) -> Path:
-    """Save the fully expanded runtime config inside a run directory."""
+    """Save config for direct engine runs; pipelines already have provenance."""
+    source = config.get("_config_path")
+    if source:
+        source_path = Path(source).expanduser().resolve()
+        if source_path.parent.name == "provenance" and source_path.is_file():
+            return source_path
     destination = Path(output_dir) / "config_used.yaml"
     destination.parent.mkdir(parents=True, exist_ok=True)
     serializable = {

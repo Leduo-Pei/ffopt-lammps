@@ -281,11 +281,6 @@ def _marginals_and_corr(df:       pd.DataFrame,
 
     fig.suptitle(f"BO Parameter Space ({n} free params)", fontsize=13)
 
-    data_df = df[params + ["objective"]].copy()
-    data_df["corr_with_obj"] = df[params].corrwith(df["objective"]).reindex(
-        data_df.columns.difference(["objective", "corr_with_obj"]),
-        fill_value=np.nan).values[0] if False else np.nan
-    # Simpler: just save param values + objective
     data_df = df[params + ["objective", "success"]].copy()
     save_fig(fig, "bo_param_space", figs_dir, plot_cfg, data_df)
 

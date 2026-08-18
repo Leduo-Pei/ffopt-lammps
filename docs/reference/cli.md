@@ -17,8 +17,8 @@ resumes the compatible default campaign.
 | `ffopt inspect FILE.data` | Show type IDs, labels, counts, masses, LJ terms, and charge ranges. |
 | `ffopt data check ...` | Validate one or more data files and their cross-file contracts. |
 | `ffopt check ffopt.in` | Parse and semantically validate without running LAMMPS. |
-| `ffopt explain ffopt.in` | Print dimensions, fixed/free/derived parameters, properties, and protocols. |
-| `ffopt doctor ffopt.in --machine NAME` | Check the complete runtime environment. |
+| `ffopt explain ffopt.in` | Print dimensions, fixed/free/derived parameters, protocols, scientific budgets, and the effective BO method. |
+| `ffopt doctor ffopt.in --machine NAME` | Check the complete runtime environment and report any automatic BO-method fallback. |
 
 Use `ffopt <command> --help` for every option.
 
@@ -33,7 +33,8 @@ ffopt machine test --name NAME
 ```
 
 `configure --force` replaces the named profile only. Profiles are stored in
-`~/.config/ffopt/machines.toml`.
+`~/.config/ffopt/machines.toml`. `local` is the only built-in profile; a
+SLURM machine must be configured under an explicit name.
 
 ## Execution
 
@@ -45,14 +46,13 @@ ffopt run ffopt.in --machine NAME --watch
 
 | Option | Meaning |
 |---|---|
-| `--dry-run` | Print stage commands and SLURM plan without execution. |
+| `--dry-run` | Read-only preview of stage commands and SLURM plan. |
 | `--watch` | Poll SLURM and automatically submit the next completed dependency. |
 | `--poll-seconds N` | Scheduler polling interval. |
 | `--until STAGE` | Temporarily stop after a stage. |
 | `--from-stage STAGE` | Continue from an active stage after prior artifacts exist. |
 | `--run-id NAME` | Use a named restart state instead of `default`. |
 | `--new` | Start an independent timestamped campaign. |
-| `--resume` | Explicit resume flag; `.in` projects already auto-resume by default. |
 
 ## Monitoring and results
 
@@ -64,9 +64,13 @@ ffopt results ffopt.in
 ffopt results ffopt.in --json
 ```
 
-`status` reports persisted stage state and verifies artifact presence. `logs`
-reads scheduler stdout/stderr. `results` resolves exact paths for parameters,
-properties, metrics, histories, and trajectories.
+`status` reports persisted stage state and verifies artifact presence. On a
+SLURM login host it also queries the live scheduler state/reason and summarizes
+an in-progress BO checkpoint by round, evaluation count, and best objective.
+When `--machine` is omitted for an existing pipeline, it displays the profile
+recorded when that pipeline was run.
+`logs` reads scheduler stdout/stderr. `results` resolves exact paths for
+parameters, properties, metrics, histories, and trajectories.
 
 ## Packaged acceptance test
 
@@ -76,8 +80,9 @@ ffopt self-test --machine NAME --watch
 
 Useful options are `--prepare-only`, `--workdir PATH`, `--dry-run`, and
 `--skip-machine-test`. Reusing the same self-test work directory resumes its
-marked acceptance project; FFOpt refuses to overwrite an unrelated non-empty
-directory.
+marked acceptance project only when the input and packaged data fingerprints
+and FFOpt version match. FFOpt refuses to reuse modified, incomplete, stale,
+cross-version, or unrelated directories.
 
 ## Property plugins
 

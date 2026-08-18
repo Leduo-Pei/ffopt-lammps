@@ -1,7 +1,7 @@
 # FFOpt BTAH example: optimize epsilon, sigma, and 13 independent charges.
 ffopt 1
 project btah_full
-workflow bo sample nn al validate
+workflow bo sample nn al audit finalize validate
 
 parameters
     range epsilon factor 0.50 2.00
@@ -9,7 +9,8 @@ parameters
     range charge  delta  0.30
     charge_limit 1.0
     neutrality derive bhN1
-    mixing geometric
+    mixing epsilon geometric
+    mixing sigma geometric
 
     # With no fix command, every ranged epsilon/sigma/charge is optimized.
     type  1  bhN1  0.2000000142  3.2963252376  -0.609
@@ -64,6 +65,9 @@ bo
     initial_points 48
     batch_size 48
     max_rounds 300
+    stability_audit on
+    stability_top_k 20
+    stability_seeds 101 202 303
     early_stop patience 20
 end
 
@@ -87,7 +91,12 @@ al
     candidates 20
 end
 
+audit
+    top_k 8
+    seeds 101 202 303
+end
+
 validate
-    trajectory final
+    # Final validation always saves structures and trajectories.
     require_tolerances yes
 end

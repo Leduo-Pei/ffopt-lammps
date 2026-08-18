@@ -4,12 +4,14 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from engine.lammps_interface import LAMMPSRunner
 from workflow.cli import _free_parameter_count
 from workflow.input_compiler import compile_input
 from workflow.input_file import parse_input_file
 from workflow.machine import build_machine_profile, load_machine_profile, save_machine_profile
-from workflow.project import compose_config, load_project, write_generated_config
+from workflow.project import compose_config, load_project
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,11 +45,19 @@ class ProjectConfigTests(unittest.TestCase):
 
     def test_machine_profile_is_selected_outside_scientific_input(self) -> None:
         local = compose_config(self.project, "local")
-        cluster = compose_config(self.project, "cluster")
         self.assertEqual(local["machine"]["backend"], "local")
         self.assertEqual(local["lammps"]["executable"], "lmp")
+        profile = build_machine_profile(
+            name="cluster-test", backend="slurm", workers=1, ranks=1, cores=1
+        )
+        save_machine_profile("cluster-test", profile)
+        cluster = compose_config(self.project, "cluster-test")
         self.assertEqual(cluster["machine"]["backend"], "slurm")
         self.assertEqual(cluster["cluster"]["bo"]["cores"], 1)
+
+    def test_unconfigured_cluster_alias_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Only 'local' has a built-in profile"):
+            compose_config(self.project, "cluster")
 
     def test_user_machine_profile_uses_single_toml_file(self) -> None:
         profile = build_machine_profile(
@@ -75,7 +85,7 @@ class ProjectConfigTests(unittest.TestCase):
             (ROOT / "data/bulk/BTAH_822_bulk.data").resolve(),
         )
 
-    def test_two_node_slurm_profile_distributes_lammps_but_not_nn(self) -> None:
+    def test_two_node_slurm_profile_keeps_nn_workers_on_one_node(self) -> None:
         profile = build_machine_profile(
             name="ccelab-2node",
             backend="slurm",
@@ -100,6 +110,10 @@ class ProjectConfigTests(unittest.TestCase):
         self.assertEqual(profile["parallel"]["workers_per_node"], 12)
         self.assertEqual(profile["cluster"]["nn"]["nodes"], 1)
         self.assertEqual(profile["cluster"]["nn"]["cores"], 48)
+        self.assertEqual(profile["cluster"]["nn"]["tasks"], 12)
+        self.assertEqual(profile["cluster"]["nn"]["tasks_per_node"], 12)
+        self.assertEqual(profile["cluster"]["nn"]["cpus_per_task"], 4)
+        self.assertTrue(profile["cluster"]["nn"]["distributed_steps"])
         self.assertNotIn("gpu", profile["cluster"]["nn"])
         self.assertEqual(profile["cluster"]["validate"]["tasks"], 1)
 
@@ -121,27 +135,32 @@ class ProjectConfigTests(unittest.TestCase):
         self.assertEqual(one_config["parallel"]["max_workers"], 12)
         self.assertEqual(two_config["parallel"]["max_workers"], 24)
 
-    def test_generated_json_config_is_reloadable(self) -> None:
-        path = write_generated_config(self.project, "local")
-        self.assertTrue(path.exists())
-        self.assertEqual(path.suffix, ".json")
-        text = path.read_text(encoding="utf-8")
+    def test_composed_config_records_software_provenance(self) -> None:
         config = compose_config(self.project, "local")
-        self.assertIn(f'"system_name": "{config["manifest"]["system_name"]}"', text)
-        self.assertNotIn("_project_path", text)
+        self.assertIn("ffopt_lammps", config["manifest"]["software"])
+        self.assertIn("python", config["manifest"]["software"])
+
+    def test_bookkeeping_runner_does_not_start_scheduler_workers(self) -> None:
+        config = compose_config(self.project, "local")
+        with patch(
+            "engine.lammps_interface.SlurmCommandPool.from_config",
+            side_effect=AssertionError("scheduler pool must stay disabled"),
+        ):
+            runner = LAMMPSRunner(config, start_scheduler_pool=False)
+        self.assertIsNone(runner.scheduler_pool)
 
     def test_parameter_regimes_share_one_schema(self) -> None:
         charge = load_project(ROOT / "examples/btah/charge_only.in")
         full = load_project(ROOT / "examples/btah/full.in")
-        self.assertEqual(_free_parameter_count(compose_config(charge, "cluster")), 13)
-        self.assertEqual(_free_parameter_count(compose_config(full, "cluster")), 41)
+        self.assertEqual(_free_parameter_count(compose_config(charge, "local")), 13)
+        self.assertEqual(_free_parameter_count(compose_config(full, "local")), 41)
 
         fix_sigma = parse_input_file(ROOT / "examples/btah/full.in")
         fix_sigma.parameters.fixed.add("sigma")
         self.assertEqual(_free_parameter_count(compile_input(fix_sigma).config), 27)
 
     def test_charge_only_uses_general_ann_cutoffs(self) -> None:
-        config = compose_config(self.project, "cluster")
+        config = compose_config(self.project, "local")
         training = config["nn"]["training_data"]
         self.assertEqual(training["core_objective_max"], 1.0)
         self.assertEqual(training["buffer_objective_max"], 2.0)

@@ -1,6 +1,8 @@
 import sys
+from concurrent.futures import Future
 
-from engine.lammps_interface import LAMMPSRunner
+import engine.lammps_interface as lammps_interface
+from engine.lammps_interface import EvalResult, LAMMPSRunner
 
 
 def _runner(
@@ -52,3 +54,58 @@ def test_regular_mpi_launcher_keeps_n_flag():
     assert _runner("/opt/mpi/bin/mpiexec")._mpi_prefix(4) == [
         "/opt/mpi/bin/mpiexec", "-n", "4",
     ]
+
+
+def test_python311_linux_batch_uses_dynamic_fresh_processes(
+    tmp_path, monkeypatch, capsys
+):
+    created = []
+
+    class RecordingExecutor:
+        def __init__(self, *, max_workers, **options):
+            self.max_workers = max_workers
+            self.options = options
+            self.submissions = []
+            created.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def submit(self, function, *args):
+            self.submissions.append(args)
+            future = Future()
+            try:
+                future.set_result(function(*args))
+            except Exception as exc:
+                future.set_exception(exc)
+            return future
+
+    runner = object.__new__(LAMMPSRunner)
+    runner.ads_enabled = False
+    runner._slab_pe = None
+    runner.max_workers = 2
+    runner._run_single = lambda params, *_: EvalResult(
+        params=params,
+        properties={"value": params["value"]},
+        objective=float(params["value"]),
+        success=True,
+    )
+    monkeypatch.setattr(lammps_interface.os, "name", "posix")
+    monkeypatch.setattr(lammps_interface.sys, "version_info", (3, 11, 0))
+    monkeypatch.setattr(lammps_interface, "ProcessPoolExecutor", RecordingExecutor)
+
+    results = runner.evaluate_batch(
+        [{"value": 1.0}, {"value": 2.0}, {"value": 3.0}], str(tmp_path)
+    )
+
+    assert [result.objective for result in results] == [1.0, 2.0, 3.0]
+    assert len(created) == 1
+    assert created[0].max_workers == 2
+    assert created[0].options == {"max_tasks_per_child": 1}
+    assert len(created[0].submissions) == 3
+    output = capsys.readouterr().out
+    assert "LAMMPS progress: 3/3 finished" in output
+    assert "objective=3.000000" in output

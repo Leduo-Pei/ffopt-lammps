@@ -1,11 +1,15 @@
 * text=auto
 
+.gitattributes text eol=lf
+.gitignore text eol=lf
 *.py text eol=lf
 *.toml text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf
 *.md text eol=lf
+*.cff text eol=lf
+*.sh text eol=lf
 *.in text eol=lf
 *.lmp text eol=lf
 *.data text eol=lf
-
+lammps/inputs/** text eol=lf

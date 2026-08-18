@@ -11,7 +11,7 @@ ffopt.in
    -> lexer and typed input model
    -> semantic and physical validation
    -> compiled engine configuration
-   -> BO / sampling / ANN / AL / validation
+   -> BO / sampling / ANN / AL / audit / finalize / validation
 ```
 
 The compiled configuration is saved as generated JSON for provenance. Users do
@@ -32,8 +32,10 @@ emits the established engine schema. Defaults are typed dictionaries in
 ## Property execution
 
 `engine.lammps_interface.LAMMPSRunner` supplies the validated LAMMPS
-primitives. Bulk, sublimation, adsorption, and surface evaluators declare
-dependencies and are ordered by the property registry.
+primitives. Evaluators declare dependencies and are ordered by the property
+registry. Schema 1 exposes bulk, sublimation, and adsorption in `ffopt.in`;
+the legacy surface evaluator remains an internal engine API until its public
+data contract and templates are defined.
 
 - Bulk always performs fixed-box minimization followed by finite-temperature
   NPT equilibration and production.
@@ -52,13 +54,15 @@ Completed stages with verified artifacts are reused. The public graph is
 selected by the input, for example:
 
 ```text
-BO -> focused sampling -> ANN -> AL -> validation
+BO -> focused sampling -> ANN -> AL -> robust audit -> finalize -> validation
 ```
 
-Audit and finalize remain optional stages. Validation can consume a BO, ANN,
-AL, or finalized optimum directly. Repeating `ffopt run ffopt.in` resumes a
-compatible run automatically. A changed scientific input is rejected unless
-the user starts an independent run with `--new`.
+Audit and finalize are included in newly generated production workflows, but
+remain optional for short method-development runs. Validation can consume a
+BO, ANN, AL, or finalized optimum directly. Repeating `ffopt run ffopt.in`
+resumes a compatible run automatically. A changed scientific input or FFOpt
+software version is rejected after stages exist; use the original version to
+resume or start an independent run with `--new`.
 
 ## Acceptance criteria
 

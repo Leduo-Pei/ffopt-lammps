@@ -5,7 +5,7 @@ read developer internals before running a calculation.
 
 ## Tutorials
 
-- [Five-minute first run](tutorials/quickstart.md)
+- [First-run setup and acceptance](tutorials/quickstart.md)
 - [Create a new molecular project](tutorials/new-molecular-project.md)
 - [Install and verify on the mag1 SLURM server](tutorials/mag1-slurm.md)
 
@@ -13,7 +13,7 @@ read developer internals before running a calculation.
 
 - [Configure local and SLURM machines](how-to/configure-machines.md)
 - [Resume, stop, and extend a workflow](how-to/resume-and-stage-control.md)
-- [Add a property evaluator plugin](how-to/property-plugins.md)
+- [Property evaluator plugin API (advanced)](how-to/property-plugins.md)
 
 ## Reference
 
@@ -21,6 +21,7 @@ read developer internals before running a calculation.
 - [Machine profiles](reference/machine-profiles.md)
 - [CLI commands](reference/cli.md)
 - [Outputs and naming](reference/outputs-and-naming.md)
+- [0.3.0a3 acceptance record](reference/acceptance-v0.3.0a3.md)
 
 ## Explanation
 

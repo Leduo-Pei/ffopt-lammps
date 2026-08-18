@@ -5,8 +5,10 @@ workflow. The current public examples are:
 
 - `examples/btah/charge_only.in`: fixed epsilon/sigma, 13 independent charges.
 - `examples/btah/full.in`: 14 epsilon, 14 sigma, and 13 independent charges.
+- `examples/btah/acceptance.in`: reduced-budget warm-start workflow used by
+  `ffopt self-test` to verify a machine and the installed release.
 
-Both inputs fit bulk crystal properties and the 98.5 kJ/mol sublimation target.
+The two production examples fit bulk crystal properties and the 98.5 kJ/mol sublimation target.
 Adsorption has no experimental target in these examples, so it is calculated
 only during final validation and does not affect BO, ANN, or AL.
 
@@ -60,8 +62,10 @@ every evaluation.
 
 Each pipeline stores its SQLite state, generated runtime manifest, BO results,
 stability audit, local sampling replicates, ANN model and metrics, AL history,
-final parameters, computed properties, trajectories, and final structures
-under `runs/<project>/pipelines/<run-id>/`.
+post-AL audit, robust final parameters, computed properties, trajectories, and
+final structures under `runs/<project>/pipelines/<run-id>/`.
 
 Historical campaign analysis is retained in the Git history and the baseline
 audit under `docs/`; it is not part of the user-facing configuration surface.
+The packaged workflow's actual one/two-node results are in the
+[0.3.0a3 acceptance record](../../docs/reference/acceptance-v0.3.0a3.md).

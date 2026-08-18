@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 import shlex
 from dataclasses import dataclass, field
@@ -58,10 +59,13 @@ class ParameterSpec:
     type_ranges: dict[tuple[str, str], RangeSpec] = field(default_factory=dict)
     fixed: set[str] = field(default_factory=set)
     fixed_by_type: set[tuple[str, str]] = field(default_factory=set)
+    fixed_lines: dict[str, int] = field(default_factory=dict)
+    fixed_by_type_lines: dict[tuple[str, str], int] = field(default_factory=dict)
     derive_charge: str | None = None
     mixing_epsilon: str = "geometric"
     mixing_sigma: str = "geometric"
     charge_abs_max: float = 1.0
+    setting_lines: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -93,12 +97,11 @@ class FFOptInput:
     path: Path
     version: int | None = None
     project: str = ""
-    workflow: list[str] = field(default_factory=lambda: [
-        "bo", "sample", "nn", "al", "validate"
-    ])
+    workflow: list[str] = field(default_factory=list)
     parameters: ParameterSpec = field(default_factory=ParameterSpec)
     properties: list[PropertySpec] = field(default_factory=list)
     stage_settings: dict[str, dict[str, Any]] = field(default_factory=dict)
+    stage_setting_lines: dict[str, dict[str, int]] = field(default_factory=dict)
 
 
 def _tokens(path: Path, line_number: int, raw: str) -> list[str]:
@@ -114,9 +117,12 @@ def _tokens(path: Path, line_number: int, raw: str) -> list[str]:
 
 def _float(path: Path, line: int, value: str, label: str) -> float:
     try:
-        return float(value)
+        result = float(value)
     except ValueError as exc:
         raise InputFileError(path, line, f"{label} must be numeric, got {value!r}") from exc
+    if not math.isfinite(result):
+        raise InputFileError(path, line, f"{label} must be finite, got {value!r}")
+    return result
 
 
 def _int(path: Path, line: int, value: str, label: str) -> int:
@@ -246,6 +252,21 @@ def _parse_parameter_line(document: FFOptInput, line: int, tokens: list[str]) ->
             _float(path, line, args[4], "charge"),
             line,
         )
+        for previous in params.atom_types:
+            if atom_type.type_id == previous.type_id:
+                raise InputFileError(
+                    path,
+                    line,
+                    f"duplicate type ID {atom_type.type_id} "
+                    f"(first set on line {previous.line})",
+                )
+            if atom_type.label == previous.label:
+                raise InputFileError(
+                    path,
+                    line,
+                    f"duplicate type label {atom_type.label!r} "
+                    f"(first set on line {previous.line})",
+                )
         params.atom_types.append(atom_type)
         return
     if command == "fix":
@@ -259,13 +280,34 @@ def _parse_parameter_line(document: FFOptInput, line: int, tokens: list[str]) ->
             unknown = names - PARAMETER_NAMES
             if unknown:
                 raise InputFileError(path, line, f"unknown parameter(s): {sorted(unknown)}")
-            params.fixed_by_type.update((label, name) for name in names)
+            for name in names:
+                key = (label, name)
+                if key in params.fixed_by_type:
+                    previous = params.fixed_by_type_lines[key]
+                    raise InputFileError(
+                        path,
+                        line,
+                        f"duplicate fix for type {label!r} parameter {name!r} "
+                        f"(first set on line {previous})",
+                    )
+                params.fixed_by_type.add(key)
+                params.fixed_by_type_lines[key] = line
         else:
             names = {name.lower() for name in args}
             unknown = names - PARAMETER_NAMES
             if unknown:
                 raise InputFileError(path, line, f"unknown parameter(s): {sorted(unknown)}")
-            params.fixed.update(names)
+            for name in names:
+                if name in params.fixed:
+                    previous = params.fixed_lines[name]
+                    raise InputFileError(
+                        path,
+                        line,
+                        f"duplicate fix for parameter {name!r} "
+                        f"(first set on line {previous})",
+                    )
+                params.fixed.add(name)
+                params.fixed_lines[name] = line
         return
     if command == "range":
         if len(args) < 2:
@@ -276,20 +318,45 @@ def _parse_parameter_line(document: FFOptInput, line: int, tokens: list[str]) ->
             label, name = args[1], args[2].lower()
             if name not in PARAMETER_NAMES:
                 raise InputFileError(path, line, f"unknown parameter {name!r}")
-            params.type_ranges[(label, name)] = _range_spec(path, line, args[3:])
+            key = (label, name)
+            if key in params.type_ranges:
+                previous = params.type_ranges[key].line
+                raise InputFileError(
+                    path,
+                    line,
+                    f"duplicate range for type {label!r} parameter {name!r} "
+                    f"(first set on line {previous})",
+                )
+            params.type_ranges[key] = _range_spec(path, line, args[3:])
         else:
             name = args[0].lower()
             if name not in PARAMETER_NAMES:
                 raise InputFileError(path, line, f"unknown parameter {name!r}")
+            if name in params.default_ranges:
+                previous = params.default_ranges[name].line
+                raise InputFileError(
+                    path,
+                    line,
+                    f"duplicate default range for parameter {name!r} "
+                    f"(first set on line {previous})",
+                )
             params.default_ranges[name] = _range_spec(path, line, args[1:])
         return
     if command == "neutrality":
+        if "neutrality" in params.setting_lines:
+            previous = params.setting_lines["neutrality"]
+            raise InputFileError(
+                path,
+                line,
+                f"duplicate neutrality setting (first set on line {previous})",
+            )
         if len(args) == 1 and args[0].lower() in {"none", "off"}:
             params.derive_charge = None
         elif len(args) == 2 and args[0].lower() == "derive":
             params.derive_charge = args[1]
         else:
             raise InputFileError(path, line, "neutrality syntax: derive LABEL | none")
+        params.setting_lines["neutrality"] = line
         return
     if command == "mixing":
         if len(args) == 1:
@@ -299,6 +366,17 @@ def _parse_parameter_line(document: FFOptInput, line: int, tokens: list[str]) ->
                     path, line, "mixing rule must be geometric or arithmetic"
                 )
             # LAMMPS mix arithmetic still uses geometric epsilon mixing.
+            for parameter in ("epsilon", "sigma"):
+                setting = f"mixing_{parameter}"
+                if setting in params.setting_lines:
+                    previous = params.setting_lines[setting]
+                    raise InputFileError(
+                        path,
+                        line,
+                        f"duplicate mixing rule for {parameter!r} "
+                        f"(first set on line {previous})",
+                    )
+                params.setting_lines[setting] = line
             params.mixing_epsilon = "geometric"
             params.mixing_sigma = rule
         elif len(args) == 2 and args[0].lower() in {"epsilon", "sigma"}:
@@ -313,6 +391,16 @@ def _parse_parameter_line(document: FFOptInput, line: int, tokens: list[str]) ->
                     path, line,
                     "the current LAMMPS backend requires geometric epsilon mixing",
                 )
+            setting = f"mixing_{parameter}"
+            if setting in params.setting_lines:
+                previous = params.setting_lines[setting]
+                raise InputFileError(
+                    path,
+                    line,
+                    f"duplicate mixing rule for {parameter!r} "
+                    f"(first set on line {previous})",
+                )
+            params.setting_lines[setting] = line
             setattr(params, f"mixing_{parameter}", rule)
         else:
             raise InputFileError(
@@ -322,6 +410,13 @@ def _parse_parameter_line(document: FFOptInput, line: int, tokens: list[str]) ->
             )
         return
     if command == "charge_limit":
+        if "charge_limit" in params.setting_lines:
+            previous = params.setting_lines["charge_limit"]
+            raise InputFileError(
+                path,
+                line,
+                f"duplicate charge_limit setting (first set on line {previous})",
+            )
         if len(args) not in {1, 2}:
             raise InputFileError(path, line, "charge_limit requires VALUE [e]")
         if len(args) == 2 and args[1].lower() != "e":
@@ -329,6 +424,7 @@ def _parse_parameter_line(document: FFOptInput, line: int, tokens: list[str]) ->
         params.charge_abs_max = _float(path, line, args[0], "charge limit")
         if params.charge_abs_max <= 0.0:
             raise InputFileError(path, line, "charge_limit must be positive")
+        params.setting_lines["charge_limit"] = line
         return
     raise InputFileError(path, line, f"unknown parameters command {tokens[0]!r}")
 
@@ -374,6 +470,21 @@ def _parse_property_line(document: FFOptInput, prop: PropertySpec, line: int, to
     if not args:
         raise InputFileError(path, line, f"{command} requires a value")
 
+    allowed_settings = {
+        "bulk": {
+            "cells_in_data", "temperature", "pressure", "timestep", "cutoff",
+            "equilibration", "production", "seed",
+        },
+        "sublimation": {"temperature", "cutoff"},
+        "adsorption": {"cutoff", "protocol", "metal"},
+    }[prop.name]
+    if command not in allowed_settings:
+        raise InputFileError(
+            path,
+            line,
+            f"property {prop.name!r} does not use setting {command!r}",
+        )
+
     def set_setting(key: str, value: Any) -> None:
         if key in prop.settings:
             previous = prop.setting_lines[key]
@@ -407,7 +518,7 @@ def _parse_property_line(document: FFOptInput, prop: PropertySpec, line: int, to
             )
         set_setting(command, _float(path, line, args[0], command))
         return
-    if command in {"equilibration", "production", "seed", "molecule_atoms"}:
+    if command in {"equilibration", "production", "seed"}:
         if len(args) != 1:
             raise InputFileError(path, line, f"{command} requires one integer value")
         set_setting(command, _int(path, line, args[0], command))
@@ -424,6 +535,7 @@ def _parse_stage_line(document: FFOptInput, stage: str, line: int, tokens: list[
     if len(tokens) < 2:
         raise InputFileError(document.path, line, f"{tokens[0]} requires a value")
     settings = document.stage_settings.setdefault(stage, {})
+    setting_lines = document.stage_setting_lines.setdefault(stage, {})
     key = tokens[0].lower()
     values = [_scalar(value) for value in tokens[1:]]
     if key == "early_stop":
@@ -434,10 +546,12 @@ def _parse_stage_line(document: FFOptInput, stage: str, line: int, tokens: list[
         if child in early_stop:
             raise InputFileError(document.path, line, f"duplicate early_stop {child!r}")
         early_stop[child] = _scalar(tokens[2])
+        setting_lines[f"early_stop.{child}"] = line
         return
     if key in settings:
         raise InputFileError(document.path, line, f"duplicate {stage} setting {key!r}")
     settings[key] = values[0] if len(values) == 1 else values
+    setting_lines[key] = line
 
 
 def _validate(document: FFOptInput) -> None:
@@ -446,6 +560,8 @@ def _validate(document: FFOptInput) -> None:
         raise InputFileError(path, 1, "missing 'ffopt 1' schema declaration")
     if not document.project:
         raise InputFileError(path, 1, "missing 'project NAME'")
+    if not document.workflow:
+        raise InputFileError(path, 1, "missing 'workflow STAGE ...' declaration")
     if not document.parameters.atom_types:
         raise InputFileError(path, 1, "parameters block contains no atom types")
     ids = [item.type_id for item in document.parameters.atom_types]
@@ -457,6 +573,13 @@ def _validate(document: FFOptInput) -> None:
     if min(ids) < 1:
         raise InputFileError(path, 1, "atom type IDs must be positive")
     for item in document.parameters.atom_types:
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", item.label):
+            raise InputFileError(
+                path,
+                item.line,
+                "type label must start with a letter and contain only letters, "
+                "numbers, or underscores",
+            )
         if item.epsilon <= 0.0:
             raise InputFileError(path, item.line, "initial epsilon must be positive")
         if item.sigma <= 0.0:
@@ -470,18 +593,48 @@ def _validate(document: FFOptInput) -> None:
             )
     if document.parameters.derive_charge not in {None, *labels}:
         raise InputFileError(path, 1, f"neutrality label {document.parameters.derive_charge!r} is unknown")
-    for name in PARAMETER_NAMES - document.parameters.fixed:
-        missing = [
-            item.label for item in document.parameters.atom_types
-            if (item.label, name) not in document.parameters.fixed_by_type
-            and (item.label, name) not in document.parameters.type_ranges
-            and name not in document.parameters.default_ranges
-        ]
-        if missing:
+    known_labels = set(labels)
+    for (label, name), spec in document.parameters.type_ranges.items():
+        if label not in known_labels:
             raise InputFileError(
-                path, 1,
-                f"free parameter {name!r} has no range for type(s): {', '.join(missing)}",
+                path,
+                spec.line,
+                f"range refers to unknown type label {label!r}",
             )
+        if name in document.parameters.fixed or (label, name) in document.parameters.fixed_by_type:
+            raise InputFileError(
+                path,
+                spec.line,
+                f"type {label!r} parameter {name!r} cannot be both fixed and ranged",
+            )
+    for key, line in document.parameters.fixed_by_type_lines.items():
+        label, _ = key
+        if label not in known_labels:
+            raise InputFileError(
+                path,
+                line,
+                f"fix refers to unknown type label {label!r}",
+            )
+    for name, spec in document.parameters.default_ranges.items():
+        if name in document.parameters.fixed:
+            raise InputFileError(
+                path,
+                spec.line,
+                f"parameter {name!r} cannot be both globally fixed and ranged",
+            )
+    if "bo" in document.workflow:
+        for name in PARAMETER_NAMES - document.parameters.fixed:
+            missing = [
+                item.label for item in document.parameters.atom_types
+                if (item.label, name) not in document.parameters.fixed_by_type
+                and (item.label, name) not in document.parameters.type_ranges
+                and name not in document.parameters.default_ranges
+            ]
+            if missing:
+                raise InputFileError(
+                    path, 1,
+                    f"free parameter {name!r} has no range for type(s): {', '.join(missing)}",
+                )
     prop_names = [item.name for item in document.properties]
     if len(prop_names) != len(set(prop_names)):
         raise InputFileError(path, 1, "each property block may appear only once")
@@ -490,6 +643,24 @@ def _validate(document: FFOptInput) -> None:
         and not any(prop.fitted for prop in document.properties)
     ):
         raise InputFileError(path, 1, "optimization workflow requires at least one target")
+    active_targets = [
+        target
+        for prop in document.properties
+        for target in prop.targets
+        if target.weight > 0.0
+    ]
+    if any(stage in {"bo", "sample", "nn", "al"} for stage in document.workflow):
+        if not active_targets:
+            raise InputFileError(
+                path, 1, "optimization workflow requires a target with positive weight"
+            )
+        zero_targets = [target.name for target in active_targets if target.value == 0.0]
+        if zero_targets:
+            raise InputFileError(
+                path, 1,
+                "weighted relative RMSE requires nonzero active target values: "
+                + ", ".join(zero_targets),
+            )
     unused_blocks = set(document.stage_settings) - set(document.workflow)
     if unused_blocks:
         raise InputFileError(
@@ -589,7 +760,7 @@ def parse_input_file(value: str | Path) -> FFOptInput:
             prop = PropertySpec(tokens[1].lower(), line_number)
             document.properties.append(prop)
             block = ("property", prop)
-        elif command in {"bo", "sample", "nn", "al", "validate"}:
+        elif command in PIPELINE_STAGES:
             if command in seen_top_level:
                 raise InputFileError(path, line_number, f"duplicate {command} block")
             seen_top_level.add(command)

@@ -4,6 +4,10 @@ FFOpt writes profiles to `~/.config/ffopt/machines.toml`. Users should normally
 create them with `ffopt machine configure`; direct TOML editing is supported
 for inspection and site-specific adjustments.
 
+Only `local` has a built-in zero-configuration profile. Every scheduler must
+use a configured name. Names start with an ASCII letter and then use only
+letters, numbers, `.`, `_`, or `-`, for example `cluster-2node`.
+
 ## Example
 
 ```toml
@@ -29,8 +33,10 @@ workers_per_node = 12
 
 Generated `cluster` tables hold stage-specific SLURM directives. `bo`,
 `sample`, `al`, and `audit` can distribute independent LAMMPS evaluations over
-all nodes. `nn` is one Python process and may request a GPU. `validate` runs
-one final parameter set and therefore requests one LAMMPS-sized allocation.
+all nodes. `nn` keeps its ANN training controller on one node and may request a
+GPU; that same allocation exposes several worker slots for the stage's
+post-training LAMMPS candidate validation. `validate` runs one final parameter
+set and therefore requests one LAMMPS-sized allocation.
 
 ## Field mapping
 
@@ -49,7 +55,7 @@ one final parameter set and therefore requests one LAMMPS-sized allocation.
 | `cluster.*.qos` | `--qos` | Optional SLURM QOS |
 | `cluster.*.time` | `--walltime` | Job wall-time request |
 | `cluster.*.mem` | `--memory-per-node` | SLURM memory request per node |
-| `cluster.nn.gpu` | `--gpus` | GPUs requested for ML stages |
+| `cluster.nn/al.gpu` | `--gpus` | GPUs requested for ML stages |
 
 Machine fields do not alter parameter bounds, random seeds, BO batch size,
 sampling count, targets, weights, or LAMMPS protocol. Those belong to

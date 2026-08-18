@@ -33,7 +33,7 @@ SLURM_MACHINE_DEFAULTS: dict[str, Any] = {
     "lammps": {
         "executable": "lmp",
         "mpiexec": "srun",
-        "timeout": 216000,
+        "timeout": 21600,
     },
     "parallel": {
         "max_workers": 1,

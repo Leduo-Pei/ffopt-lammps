@@ -1,33 +1,9 @@
 #!/usr/bin/env python3
-"""
-Force Field BO + NN Pipeline -- v8 entry point.
+"""Internal Bayesian-optimization stage invoked by ``ffopt run``.
 
-Modes
------
-  python -m engine.run --config runs/.../_configs/project_local.json
-  python run.py --resume                   # resume BO from checkpoint
-  python run.py --dry-run                  # single LAMMPS at best known params
-  python run.py --dry-run --no-mpi         # same, serial (login/management nodes)
-  python run.py --dry-run --save-traj      # also save NPT trajectory + structures
-  python run.py --plot <bo_dir>            # generate all paper figures
-
---dry-run auto-loads parameters (priority: AL final → NN optimize → BO best).
---no-mpi : uses mpiexec -n 1 with I_MPI_FABRICS=shm.
-           Requires Intel MPI module: module load mpi/2021.15
-           Use on management/login nodes where InfiniBand/OFI is unavailable.
-
-v8 changes vs v6:
-  - load_config(): validates v8 schema (atom_types, pair_params, charge, etc.).
-    Removed: parameters, fixed_params.  Added: atom_types, pair_params, charge,
-    compute_surface, n_bo_iterations.
-  - _load_best_params(): fully generic — parses any "name = value" pair from
-    best_parameters.txt (not limited to ep_atom1 / si_atom1).
-  - cmd_dry_run(): displays all free BO params dynamically (not hardcoded names).
-  - ForceFieldOptimizer v8: auto-selects GP / TuRBO / SAASBO by n_params.
-
-After BO completes:
-  ffopt run ffopt.in
-  python run.py --plot <bo_dir>
+The public interface is the restartable ``ffopt run ffopt.in`` execution
+graph. Direct module options remain for compatibility with archived campaigns
+and are not part of the supported beginner workflow.
 """
 
 import argparse
@@ -51,9 +27,9 @@ if hasattr(sys.stdout, "reconfigure"):
 
 def load_config(path: str) -> dict:
     """
-    Load and validate config.yaml (v8 schema).
+    Load and validate a generated expanded engine configuration.
 
-    All sections listed below are required — the pipeline fails fast if any
+    All sections listed below are required; the pipeline fails fast if any
     are missing, avoiding hard-to-debug errors later in long BO runs.
     """
     config = load_expanded_config(path)
@@ -104,7 +80,7 @@ def load_config(path: str) -> dict:
     if ("surf_energy" in config["targets"] and
             not config["lammps"].get("compute_surface", True)):
         print("  NOTE: 'surf_energy' target is defined but lammps.compute_surface "
-              "is false — surf_energy will be excluded from the objective.")
+              "is false; surf_energy will be excluded from the objective.")
 
     # ── lammps: required sub-keys ─────────────────────────────────────────────
     lmp = config["lammps"]
@@ -155,7 +131,7 @@ def _load_best_params(config: dict = None):
     -------
     (params_dict, source_label) or (None, None) if nothing found.
 
-    params_dict keys are dynamic (e.g. "Fe_corner_epsilon") — no hardcoding.
+    params_dict keys are dynamic (e.g. "Fe_corner_epsilon"); no hardcoding.
     """
 
     def _from_json(path: str) -> dict:
@@ -184,11 +160,11 @@ def _load_best_params(config: dict = None):
         """
         Parse best_parameters.txt written by optimizer._save_summary_files.
 
-        v8 format (one param per line):
+        Current format (one parameter per line):
             # comment lines starting with #
             Fe_corner_epsilon = 0.50123456  # range [0.01, 10.0]
             Fe_corner_sigma   = 2.34567890  # range [1.0, 4.0]
-        Also handles v6 format:
+        Also handles the historical short-name format:
             ep_atom1 = 0.5
             si_atom1 = 2.5
         """
@@ -254,7 +230,7 @@ def _load_best_params(config: dict = None):
     if p:
         return p, "NN optimize  (legacy nn_output/nn_optimize_result.json)"
 
-    # 4. BO best_parameters.txt — prefer bo dirs matching THIS config's
+    # 4. BO best_parameters.txt: prefer bo dirs matching THIS config's
     #    system_name (so cfg1/cfg2/full experiments load their OWN best),
     #    then fall back to the newest bo_* of any name.
     bo_txts = []
@@ -284,7 +260,7 @@ def cmd_dry_run(config: dict,
     Run a single LAMMPS evaluation to validate the pipeline wiring.
 
     Parameters are auto-loaded from AL / NN / BO results (priority order).
-    All free BO parameter names are printed dynamically — no hardcoded names.
+    All free BO parameter names are printed dynamically; no hardcoded names.
 
     --no-mpi   : override use_mpi=true; needed on login/management nodes
     --save-traj: write NPT trajectory + final structure files
@@ -296,8 +272,8 @@ def cmd_dry_run(config: dict,
     print()
 
     # ── Build expected free param names from config ──────────────────────────
-    from .optimizer import ForceFieldOptimizer
-    param_space = ForceFieldOptimizer._build_param_space(config)
+    from .parameter_space import build_parameter_space
+    param_space = build_parameter_space(config)
     param_names = [p[0] for p in param_space]
 
     print(f"  Free parameters ({len(param_names)}):")
@@ -393,7 +369,7 @@ def cmd_dry_run(config: dict,
     print()
     print("  Per-property errors (%):")
     for k, v in r.per_property_error.items():
-        flag = "  ← !" if v > 5.0 else ""
+        flag = "  <- !" if v > 5.0 else ""
         print(f"    {k:<16} = {v:>8.2f}%{flag}")
 
     print()
@@ -406,9 +382,9 @@ def cmd_dry_run(config: dict,
 
 def _reference_params(config: dict) -> dict:
     """Load best known params for this config, falling back to range midpoints."""
-    from .optimizer import ForceFieldOptimizer
+    from .parameter_space import build_parameter_space
 
-    param_space = ForceFieldOptimizer._build_param_space(config)
+    param_space = build_parameter_space(config)
     param_names = [p[0] for p in param_space]
     ref, source = _load_best_params(config)
     if ref:
@@ -506,7 +482,7 @@ def cmd_plot(config: dict, bo_dir: str, nn_dir: str = None) -> bool:
     figs_dir  = Path("figures")
     figs_dir.mkdir(exist_ok=True)
 
-    print(f"Generating figures from {bo_dir} → {figs_dir}/")
+    print(f"Generating figures from {bo_dir} -> {figs_dir}/")
 
     print("  [1/8] bo_convergence")
     plot_bo_convergence(bo_csv, plot_cfg, figs_dir)
@@ -573,7 +549,7 @@ def cmd_plot(config: dict, bo_dir: str, nn_dir: str = None) -> bool:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Force Field BO + NN Pipeline v8",
+        description="FFOpt-LAMMPS force-field pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -595,7 +571,7 @@ def main():
                         help="Override optimization.method without editing config.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Run a single LAMMPS evaluation (pipeline validation). "
-                             "Params auto-loaded from AL → NN → BO results.")
+                             "Params auto-loaded from AL -> NN -> BO results.")
     parser.add_argument("--sublimation-test", action="store_true",
                         help="Run an NPT-bulk sublimation/cohesive-energy proxy audit.")
     parser.add_argument("--no-mpi", action="store_true",
@@ -617,7 +593,7 @@ def main():
     # ── Header ────────────────────────────────────────────────────────────────
     print()
     print("#" * 70)
-    print("# Force Field BO + NN Pipeline v8")
+    print("# FFOpt-LAMMPS force-field pipeline")
     print(f"# {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("#" * 70)
 
@@ -677,24 +653,17 @@ def main():
     try:
         summary = optimizer.run()
         if summary:
-            sys.name = mf["system_name"]
             print(f"\n{'='*60}")
             print("BO completed successfully.")
             print(f"{'='*60}")
-            machine = "cluster" if "cluster" in config else "local"
-            print("\nNext steps:")
-            print(f"  1. ffopt nn --machine {machine}")
-            print(f"  2. ffopt al --machine {machine}")
-            print("  3. ffopt plot")
-            print(f"  4. ffopt validate --machine {machine}")
+            print("The managed ffopt pipeline will continue with its next stage.")
         else:
-            print("\nBO failed — no valid results found.")
+            print("\nBO failed: no valid results found.")
             sys.exit(1)
     except KeyboardInterrupt:
-        print("\n\nInterrupted — saving checkpoint...")
+        print("\n\nInterrupted: saving checkpoint...")
         optimizer._save_checkpoint()
-        machine = "cluster" if "cluster" in config else "local"
-        print(f"Checkpoint saved. Resume with: ffopt bo --machine {machine} --resume")
+        print("Checkpoint saved. Repeat the same 'ffopt run ffopt.in ...' command.")
         sys.exit(130)
 
 

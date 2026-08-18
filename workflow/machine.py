@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -40,9 +41,17 @@ def machine_dir() -> Path:
     return config_home() / "machines"
 
 
+def _validate_machine_name(name: str) -> str:
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]*", name):
+        raise ValueError(
+            "Machine profile name must start with a letter and contain only "
+            f"letters, numbers, '.', '_' or '-': {name!r}"
+        )
+    return name
+
+
 def machine_path(name: str) -> Path:
-    if not name or any(char in name for char in "\\/:"):
-        raise ValueError(f"Invalid machine profile name: {name!r}")
+    _validate_machine_name(name)
     return config_home() / "machines.toml"
 
 
@@ -279,6 +288,7 @@ print \"FFOPT_MACHINE_TEST_OK\"
 
 def prepare_machine_test(name: str, profile: dict[str, Any]) -> dict[str, Any]:
     """Write a tiny LAMMPS smoke input and return local/SLURM commands."""
+    _validate_machine_name(name)
     root = config_home() / "machine-tests" / name
     root.mkdir(parents=True, exist_ok=True)
     input_path = root / "in.machine_test"
@@ -315,7 +325,27 @@ def prepare_machine_test(name: str, profile: dict[str, Any]) -> dict[str, Any]:
     }
     if backend == "slurm":
         cluster = profile.get("cluster", {})
-        resources = cluster.get("validate", cluster.get("bo", {}))
+        distributed_nodes = int(parallel.get("scheduler_nodes", 1))
+        distributed = distributed_nodes > 1
+        resources = cluster.get(
+            "bo" if distributed else "validate",
+            cluster.get("bo", {}),
+        )
+        if distributed:
+            workers = int(parallel.get("max_workers", 1))
+            command = [
+                sys.executable,
+                "-m", "workflow.machine_test_runner",
+                "--root", str(root / "distributed"),
+                "--lammps", lammps,
+                "--mpi", mpi,
+                "--input", str(input_path),
+                "--workers", str(workers),
+                "--nodes", str(distributed_nodes),
+                "--ranks", str(ranks),
+                "--omp-threads", str(omp_threads),
+            ]
+            result["command"] = command
         output_path = root / "slurm_%j.out"
         error_path = root / "slurm_%j.err"
         directives = [
@@ -323,11 +353,15 @@ def prepare_machine_test(name: str, profile: dict[str, Any]) -> dict[str, Any]:
             f"#SBATCH --job-name=ffopt_test_{name}",
             f"#SBATCH --output={output_path}",
             f"#SBATCH --error={error_path}",
-            "#SBATCH --nodes=1",
-            "#SBATCH --ntasks=1",
+            f"#SBATCH --nodes={distributed_nodes if distributed else 1}",
+            f"#SBATCH --ntasks={workers if distributed else 1}",
             f"#SBATCH --cpus-per-task={ranks * omp_threads}",
             "#SBATCH --time=00:10:00",
         ]
+        if distributed and workers % distributed_nodes == 0:
+            directives.append(
+                f"#SBATCH --ntasks-per-node={workers // distributed_nodes}"
+            )
         if str(resources.get("partition", "")).strip():
             directives.append(f"#SBATCH --partition={resources['partition']}")
         if str(resources.get("qos", "")).strip():
@@ -340,6 +374,7 @@ def prepare_machine_test(name: str, profile: dict[str, Any]) -> dict[str, Any]:
         script.write_text(
             "\n".join([
                 *directives, "", "set -euo pipefail",
+                "export PYTHONNOUSERSITE=1",
                 f"export OMP_NUM_THREADS={omp_threads}",
                 f"cd {shlex.quote(str(root))}", quoted, "",
             ]),
@@ -356,6 +391,7 @@ def execute_machine_test(
     if dry_run:
         return {**prepared, "status": "dry-run"}
     environment = os.environ.copy()
+    environment["PYTHONNOUSERSITE"] = "1"
     environment["OMP_NUM_THREADS"] = str(prepared["omp_threads"])
     if prepared["backend"] == "local":
         try:
@@ -423,6 +459,7 @@ def build_machine_profile(
     walltime: str = "24:00:00",
     memory_per_node: str | None = None,
 ) -> dict[str, Any]:
+    _validate_machine_name(name)
     if backend not in {"local", "slurm"}:
         raise ValueError("backend must be 'local' or 'slurm'")
     cpu_count = max(1, os.cpu_count() or 1)
@@ -430,6 +467,9 @@ def build_machine_profile(
     omp_threads = max(1, int(omp_threads))
     nodes = max(1, int(nodes))
     gpus = max(0, int(gpus))
+    timeout = int(timeout)
+    if timeout < 1:
+        raise ValueError("Per-evaluation timeout must be a positive number of seconds")
     memory = str(memory_per_node or "0").strip()
     if not memory:
         memory = "0"
@@ -443,7 +483,7 @@ def build_machine_profile(
         "lammps": {
             "executable": lammps or _detect_lammps(),
             "mpiexec": mpi or _detect_mpi(),
-            "timeout": int(timeout),
+            "timeout": timeout,
         },
         "parallel": {
             "max_workers": workers,
@@ -459,6 +499,27 @@ def build_machine_profile(
         "machine_learning": {"device": "auto"},
     }
     if backend == "slurm":
+        if workers < nodes:
+            raise ValueError(
+                "SLURM workers must be at least the node count so every requested "
+                f"node can participate ({workers} < {nodes})"
+            )
+        match = re.fullmatch(r"(?:(\d+)-)?(\d+):(\d{2}):(\d{2})", walltime)
+        if not match:
+            raise ValueError(
+                "SLURM walltime must use HH:MM:SS or D-HH:MM:SS format"
+            )
+        days, hours, minutes, seconds = match.groups(default="0")
+        if int(minutes) >= 60 or int(seconds) >= 60:
+            raise ValueError("SLURM walltime minutes and seconds must be below 60")
+        walltime_seconds = (
+            int(days) * 86400 + int(hours) * 3600 + int(minutes) * 60 + int(seconds)
+        )
+        if timeout >= walltime_seconds:
+            raise ValueError(
+                "Per-evaluation timeout must be shorter than the SLURM walltime "
+                f"({timeout} >= {walltime_seconds} seconds)"
+            )
         required_cpus = workers * ranks * omp_threads
         allocated_cpus = int(cores or required_cpus)
         if allocated_cpus < required_cpus:
@@ -499,10 +560,22 @@ def build_machine_profile(
             "mem": memory,
             **({"gpu": gpus} if gpus else {}),
         }
+        nn_workers = max(
+            1,
+            min(workers, per_node_cpus // (ranks * omp_threads)),
+        )
+        nn_python = {
+            **single_python,
+            "cores": nn_workers * ranks * omp_threads,
+            "tasks": nn_workers,
+            "tasks_per_node": nn_workers,
+            "cpus_per_task": ranks * omp_threads,
+            "distributed_steps": True,
+        }
         profile["cluster"] = {
             "bo": dict(distributed),
             "sample": dict(distributed),
-            "nn": dict(single_python),
+            "nn": nn_python,
             "al": {
                 **distributed,
                 **({"gpu": gpus} if gpus else {}),

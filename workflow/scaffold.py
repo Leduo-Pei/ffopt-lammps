@@ -44,23 +44,33 @@ class ScaffoldResult:
 
 
 def parse_target_spec(value: str) -> TargetSpec:
-    """Parse ``NAME=VALUE[,WEIGHT[,UNIT]]`` from the CLI."""
+    """Parse ``NAME=VALUE[,WEIGHT[,UNIT[,TOLERANCE]]]`` from the CLI."""
     name, separator, payload = value.partition("=")
     name = name.strip()
     if not separator or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", name):
         raise ValueError(
-            f"Invalid target {value!r}; expected NAME=VALUE[,WEIGHT[,UNIT]]"
+            "Invalid target "
+            f"{value!r}; expected NAME=VALUE[,WEIGHT[,UNIT[,TOLERANCE]]]"
         )
     name = TARGET_ALIASES.get(name, name)
-    columns = [item.strip() for item in payload.split(",", maxsplit=2)]
+    columns = [item.strip() for item in payload.split(",", maxsplit=3)]
     if not columns[0]:
         raise ValueError(f"Target {name!r} has no value")
     target_value = float(columns[0])
     weight = float(columns[1]) if len(columns) > 1 and columns[1] else 1.0
     unit = columns[2] if len(columns) > 2 and columns[2] else DEFAULT_UNITS.get(name, "")
+    tolerance = float(columns[3]) if len(columns) > 3 and columns[3] else None
     if weight < 0.0:
         raise ValueError(f"Target {name!r} weight must be non-negative")
-    return TargetSpec(name=name, value=target_value, weight=weight, unit=unit)
+    if tolerance is not None and tolerance <= 0.0:
+        raise ValueError(f"Target {name!r} tolerance must be positive")
+    return TargetSpec(
+        name=name,
+        value=target_value,
+        weight=weight,
+        unit=unit,
+        tolerance=tolerance,
+    )
 
 
 def _safe_label(raw: str, type_id: int, used: set[str]) -> str:
@@ -94,17 +104,33 @@ def _copy(source: Path, destination: Path) -> None:
         shutil.copy2(source, destination)
 
 
+def _input_token(value: str) -> str:
+    """Quote a generated input token when shlex would split or truncate it."""
+    if re.fullmatch(r"[^\s#\"']+", value):
+        return value
+    if '"' not in value:
+        return f'"{value}"'
+    if "'" not in value:
+        return f"'{value}'"
+    raise ValueError(
+        f"Cannot represent generated input path {value!r}; rename the file so its "
+        "name does not contain both single and double quotes"
+    )
+
+
 def _target_lines(targets: list[TargetSpec]) -> list[str]:
     lines = []
     for target in targets:
         name = "gamma" if target.name == "gamma_ang" else target.name
-        tolerance = (
-            f" tolerance {target.tolerance:g}" if target.tolerance is not None else ""
+        tolerance_value = (
+            target.tolerance
+            if target.tolerance is not None
+            else max(abs(target.value) * 0.03, 1.0e-6)
         )
         lines.append(
             f"    target {name:<9s} {target.value:g} "
             f"{target.unit or DEFAULT_UNITS[target.name]} "
-            f"weight {target.weight:g}{tolerance}"
+            f"weight {target.weight:g} tolerance {tolerance_value:g}"
         )
     return lines
 
@@ -241,7 +267,7 @@ def create_project(
         labels[atom_type.type_id] = label
         epsilon, sigma = map(float, atom_type.pair_coefficients[:2])
         charge = float(_single_charge(atom_type) or 0.0)
-        if abs(charge) >= charge_limit:
+        if abs(charge) > charge_limit:
             raise ValueError(
                 f"Initial charge {charge} for type {atom_type.type_id} reaches "
                 f"--charge-limit {charge_limit}"
@@ -261,7 +287,22 @@ def create_project(
                 ).type_id
                 derive_label = labels[derive_id]
         else:
-            derive_id = int(derive_charge)
+            requested = str(derive_charge)
+            try:
+                derive_id = int(requested)
+            except ValueError:
+                matches = [
+                    item.type_id
+                    for item in summary.atom_types
+                    if item.label == requested or labels[item.type_id] == requested
+                ]
+                if not matches:
+                    available = ", ".join(labels.values())
+                    raise ValueError(
+                        f"Derived charge type {requested!r} is not in the data file; "
+                        f"choose an ID or label from: {available}"
+                    ) from None
+                derive_id = matches[0]
             if derive_id not in labels:
                 raise ValueError(f"Derived charge type {derive_id} is not in the data file")
             derive_label = labels[derive_id]
@@ -269,12 +310,26 @@ def create_project(
     fixed = {
         "full": "", "fix_sigma": "    fix sigma\n",
         "charge_only": "    fix epsilon sigma\n", "lj_only": "    fix charge\n",
+    }[mode] if target_list else ""
+    range_lines: list[str] = []
+    if target_list and mode in {"full", "fix_sigma", "lj_only"}:
+        range_lines.append(
+            f"    range epsilon factor {epsilon_scale[0]:g} {epsilon_scale[1]:g}"
+        )
+    if target_list and mode in {"full", "lj_only"}:
+        range_lines.append(
+            f"    range sigma   factor {sigma_scale[0]:g} {sigma_scale[1]:g}"
+        )
+    if target_list and mode in {"full", "fix_sigma", "charge_only"}:
+        range_lines.append(f"    range charge  delta  {charge_window:g}")
+    range_block = "\n".join(range_lines)
+    optimized_per_type = {
+        "full": 3, "fix_sigma": 2, "charge_only": 1, "lj_only": 2
     }[mode]
-    optimized_per_type = {"full": 3, "fix_sigma": 2, "charge_only": 1, "lj_only": 2}[mode]
-    estimated_dimensions = len(rows) * optimized_per_type
-    if derive_label and mode != "lj_only":
+    estimated_dimensions = len(rows) * optimized_per_type if target_list else 0
+    if target_list and derive_label and mode != "lj_only":
         estimated_dimensions -= 1
-    sample_points = min(2500, max(800, 50 * max(estimated_dimensions, 1)))
+    sample_points = min(2500, max(1500, 75 * max(estimated_dimensions, 1)))
     neutrality = (
         f"    neutrality derive {derive_label}\n" if derive_label else "    neutrality none\n"
     )
@@ -284,9 +339,10 @@ def create_project(
     adsorption_target = next((item for item in target_list if item.name == "ead"), None)
     property_blocks: list[str] = []
     if bulk_destination and source:
+        bulk_path = _input_token(f"data/bulk/{source.name}")
         property_blocks.append(f"""property bulk
     # Standard protocol is fixed: energy minimization, then 300 K NPT.
-    data data/bulk/{source.name}
+    data {bulk_path}
     cells_in_data {cells[0]} {cells[1]} {cells[2]}
     temperature 300 K
     pressure 1 atm
@@ -296,49 +352,60 @@ def create_project(
 end""")
     sub_block = ""
     if single_destination and source:
+        bulk_path = _input_token(f"data/bulk/{source.name}")
+        single_path = _input_token(f"data/molecule/{single_destination.name}")
         target_line = ""
         if sub_target:
-            tolerance = (
-                f" tolerance {sub_target.tolerance:g}"
-                if sub_target.tolerance is not None else ""
-            )
+            tolerance = sub_target.tolerance if sub_target.tolerance is not None else 10.0
             target_line = (
                 f"    target {sub_target.value:g} {sub_target.unit or 'kJ/mol'} "
-                f"weight {sub_target.weight:g}{tolerance}\n"
+                f"weight {sub_target.weight:g} tolerance {tolerance:g}\n"
             )
         sub_block = f"""
 property sublimation
-    # Potential-energy estimate: bulk NPT mean PE - minimized isolated-molecule PE.
-    bulk data/bulk/{source.name}
-    single data/molecule/{single_destination.name}
+    # E_sub estimate = E_single,min - <PE_bulk,NPT> / number_of_molecules.
+    bulk {bulk_path}
+    single {single_path}
     temperature 298.15 K
 {target_line.rstrip()}
 end
 """.strip()
         property_blocks.append(sub_block)
     if adsorption_destinations:
+        complex_path = _input_token(
+            f"data/adsorption/{adsorption_destinations['complex'].name}"
+        )
+        slab_path = _input_token(
+            f"data/adsorption/{adsorption_destinations['slab'].name}"
+        )
+        molecule_path = _input_token(
+            f"data/adsorption/{adsorption_destinations['molecule'].name}"
+        )
         target_line = ""
         if adsorption_target:
             tolerance = (
-                f" tolerance {adsorption_target.tolerance:g}"
-                if adsorption_target.tolerance is not None else ""
+                adsorption_target.tolerance
+                if adsorption_target.tolerance is not None
+                else max(abs(adsorption_target.value) * 0.03, 1.0e-6)
             )
             target_line = (
                 f"    target {adsorption_target.value:g} "
                 f"{adsorption_target.unit or 'kcal/mol'} "
-                f"weight {adsorption_target.weight:g}{tolerance}\n"
+                f"weight {adsorption_target.weight:g} tolerance {tolerance:g}\n"
             )
         property_blocks.append(f"""property adsorption
     # Without a target, adsorption is calculated only during final validation.
-    data complex data/adsorption/{adsorption_destinations['complex'].name}
-    data slab data/adsorption/{adsorption_destinations['slab'].name}
-    data molecule data/adsorption/{adsorption_destinations['molecule'].name}
+    data complex {complex_path}
+    data slab {slab_path}
+    data molecule {molecule_path}
     protocol minimize
     metal {metal_label}
 {target_line.rstrip()}
 end""")
 
-    workflow = "bo sample nn al validate" if target_list else "validate"
+    workflow = (
+        "bo sample nn al audit finalize validate" if target_list else "validate"
+    )
     optimization_blocks = ""
     if target_list:
         optimization_blocks = f"""
@@ -349,6 +416,10 @@ bo
     # Scientific candidates per BO round; independent of machine workers.
     batch_size 48
     max_rounds 200
+    # Stable BO centers used by focused sampling: top_k x number of seeds.
+    stability_audit on
+    stability_top_k 20
+    stability_seeds 101 202 303
     early_stop patience 30
 end
 
@@ -372,8 +443,20 @@ al
     rounds 2
     candidates 20
 end
+
+audit
+    # Re-evaluate the best accumulated candidates before final selection.
+    top_k 8
+    seeds 101 202 303
+end
 """
 
+    range_notes = (
+        "    # Only free parameters need ranges. Fixed values remain explicit below.\n"
+        "    # LJ uses multiplicative factors; charge uses an absolute +/- window."
+        if target_list
+        else "    # Validation-only workflow: no parameter ranges or fix commands are needed."
+    )
     text = f"""# Generated by ffopt init. Paths are relative to this file.
 # Review the force-field values, ranges, targets, and run lengths before production.
 ffopt 1
@@ -381,11 +464,8 @@ project {name}
 workflow {workflow}
 
 parameters
-    # epsilon/sigma use multiplicative factors around each initial value.
-    # charge uses initial charge +/- this absolute window in elementary charge.
-    range epsilon factor {epsilon_scale[0]:g} {epsilon_scale[1]:g}
-    range sigma   factor {sigma_scale[0]:g} {sigma_scale[1]:g}
-    range charge  delta  {charge_window:g}
+{range_notes}
+{range_block}
     # Absolute safety bound applied after the per-type charge range.
     charge_limit {charge_limit:g}
     # LAMMPS always uses geometric epsilon mixing; sigma may be geometric or arithmetic.
@@ -399,21 +479,31 @@ end
 {chr(10).join(property_blocks)}
 {optimization_blocks}
 validate
-    trajectory final
+    # Final validation always saves structures and trajectories.
     require_tolerances {"yes" if target_list else "no"}
 end
 """
     input_path = root / "ffopt.in"
-    input_path.write_text(text, encoding="ascii", newline="\n")
+    input_path.write_text(text, encoding="utf-8", newline="\n")
 
     from .input_compiler import compile_input
     from .input_file import parse_input_file
 
     compilation = compile_input(parse_input_file(input_path))
     (root / "README.md").write_text(
-        f"# {name}\n\nReview `ffopt.in`, then run:\n\n"
-        "```bash\nffopt check ffopt.in\nffopt explain ffopt.in\n"
-        "ffopt run ffopt.in\n```\n",
+        f"# {name}\n\n"
+        f"Generated FFOpt project type: `{project_type}`; parameter mode: "
+        f"`{mode if target_list else 'validation_only'}`.\n\n"
+        "Review every type, any ranges and targets, tolerances, and run lengths in "
+        "`ffopt.in`, then run:\n\n"
+        "```bash\n"
+        "ffopt check ffopt.in\n"
+        "ffopt explain ffopt.in\n"
+        "ffopt doctor ffopt.in --machine local\n"
+        "ffopt run ffopt.in --machine local --dry-run\n"
+        "ffopt run ffopt.in --machine local\n"
+        "```\n\n"
+        "Replace `local` with a configured SLURM profile when running on a cluster.\n",
         encoding="ascii", newline="\n",
     )
     (root / ".gitignore").write_text(
@@ -429,7 +519,7 @@ end
             "slab": str(slab_source) if slab_source else None,
             "molecule": str(molecule_source) if molecule_source else None,
         },
-        "parameter_mode": mode,
+        "parameter_mode": mode if target_list else "validation_only",
         "dimensions": compilation.dimensions,
         "atom_types": len(rows),
         "targets": names,

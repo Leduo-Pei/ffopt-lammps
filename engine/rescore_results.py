@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from .config_loader import load_config
-from .optimizer import ForceFieldOptimizer
+from .parameter_space import build_parameter_space
 from utils.objective_rescoring import (
     active_targets,
     aggregate_replicates,
@@ -50,7 +50,7 @@ def main() -> None:
     config = load_config(args.config)
     targets = active_targets(config)
     parameter_columns = [
-        item[0] for item in ForceFieldOptimizer._build_param_space(config)
+        item[0] for item in build_parameter_space(config)
     ]
     input_root = args.input_root.resolve()
     output_dir = args.output_dir.resolve()

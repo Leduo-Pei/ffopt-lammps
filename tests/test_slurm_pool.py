@@ -1,6 +1,7 @@
 import sys
+import json
 
-from workflow.slurm_pool import SlurmCommandPool
+from workflow.slurm_pool import SlurmCommandPool, _write_shared_json
 from workflow.slurm_worker import execute_request, request_command
 
 
@@ -45,3 +46,19 @@ def test_worker_wraps_mpi_inside_its_allocated_node(monkeypatch):
     assert command[-6:] == [
         "taskset", "-c", "4,5,6,7", "lmp", "-in", "in.bulk",
     ]
+
+
+def test_shared_json_publishes_the_final_name_without_a_rename(tmp_path, monkeypatch):
+    destination = tmp_path / "request.json"
+    monkeypatch.setattr(
+        "workflow.slurm_pool.os.replace",
+        lambda *_: (_ for _ in ()).throw(AssertionError("rename is not NFS-safe")),
+    )
+
+    _write_shared_json(destination, {"id": "request-1", "value": 3})
+
+    assert json.loads(destination.read_text(encoding="utf-8")) == {
+        "id": "request-1",
+        "value": 3,
+    }
+    assert list(tmp_path.glob("*.tmp")) == []

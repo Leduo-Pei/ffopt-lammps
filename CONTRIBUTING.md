@@ -40,6 +40,8 @@ python -m ruff check .
 python -m pytest -q
 python -m build --wheel
 python tests/check_wheel.py dist/*.whl
+python -m build --sdist
+python tests/check_sdist.py dist/*.tar.gz
 ```
 
 Do not commit generated `runs/`, model checkpoints, scheduler logs, Conda

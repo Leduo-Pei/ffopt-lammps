@@ -7,6 +7,8 @@ BO、局域采样、ANN、主动学习和最终 LAMMPS 验证，并在中断后�
 > 当前版本为 alpha。正式支持范围是分子晶体、孤立分子和分子吸附模型。
 > BTAH 是软件回归体系。单质、合金、反应力场和多晶型迁移尚未作为当前版本
 > 的通用能力承诺。
+> 当前吸附后端把一个指定的零电荷金属 type 视为固定基底，只优化分子 types；
+> 带电、多组分或也需要优化参数的基底不属于 schema 1 的支持范围。
 
 ## 1. 先理解三个文件层次
 
@@ -45,14 +47,24 @@ my_project/
 
 ### 2.2 Linux 或集群安装
 
+当前 alpha 版通过 GitHub Release wheel 分发，尚未发布到 PyPI；因此请使用下面
+带版本号的完整 URL，不要把它简写成未经确认的 `pip install ffopt-lammps`。
+
 ```bash
 conda create -n ffopt python=3.11 -y
 conda activate ffopt
-conda install -c conda-forge lammps openmpi -y
+conda env config vars set PYTHONNOUSERSITE=1
+conda deactivate
+conda activate ffopt
+conda install -c conda-forge "lammps=*=*openmpi*" openmpi -y
+python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 python -m pip install \
-  "ffopt-lammps[full] @ git+https://github.com/Leduo-Pei/ffopt-lammps.git@v0.3.0a2"
+  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a3/ffopt_lammps-0.3.0a3-py3-none-any.whl"
 ```
+
+上面的命令有意安装 CPU 版 PyTorch。GPU 工作站应先按 PyTorch 官方安装选择器
+安装与本机 CUDA 驱动匹配的版本，再安装 FFOpt；`[full]` 会复用已有 PyTorch。
 
 检查安装来源：
 
@@ -61,13 +73,23 @@ which python
 which ffopt
 which lmp
 which mpirun
+ffopt --version
+python -c "import site; print(site.ENABLE_USER_SITE)"
 python -c "import ffopt, torch; print(ffopt.__version__); print(torch.__version__, torch.cuda.is_available())"
 lmp -help | head
 ```
 
+`site.ENABLE_USER_SITE` 应为 `False`，这样旧的 `~/.local` Python 包不会混入
+新环境。若 `python -m pip check` 报缺包，应在当前 `ffopt` 环境补装，不能依赖
+其他环境中的同名包。`ffopt doctor` 发现 user-site 开启时也会给出警告。FFOpt
+生成的 SLURM 脚本还会自动设置 `PYTHONNOUSERSITE=1`，避免计算节点加载用户级包。
+
 CPU 环境中 `torch.cuda.is_available()` 显示 `False` 是正常现象，不是报错。
 这表示 NN/AL 使用 CPU。只有安装 CUDA 版 PyTorch 且能识别 GPU 时才会显示
 `True`。
+
+若从 GitHub Release 页面手工下载 wheel 或源码包，可用同一页面的
+`SHA256SUMS.txt` 与 `sha256sum -c SHA256SUMS.txt --ignore-missing` 检查文件完整性。
 
 ### 2.3 Windows 本地安装
 
@@ -76,7 +98,10 @@ CPU 环境中 `torch.cuda.is_available()` 显示 `False` 是正常现象，不�
 ```powershell
 conda create -n ffopt python=3.11 -y
 conda activate ffopt
-python -m pip install "ffopt-lammps[full] @ git+https://github.com/Leduo-Pei/ffopt-lammps.git@v0.3.0a2"
+conda env config vars set PYTHONNOUSERSITE=1
+conda deactivate
+conda activate ffopt
+python -m pip install "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a3/ffopt_lammps-0.3.0a3-py3-none-any.whl"
 ```
 
 LAMMPS 和 MPI 可以由用户单独安装，随后在机器配置中填写绝对路径。路径含空格
@@ -93,6 +118,35 @@ python -m pytest -q
 
 普通用户优先安装固定 release/tag；开发者才使用 `-e`。
 
+不带 extra 的基础包可执行 data 检查、输入编译和 validate-only LAMMPS
+计算。完整 `bo sample nn al audit finalize validate` 必须安装 `[full]`；`[saasbo]` 和
+`[xgboost]` 各自包含其完整运行依赖，不要求用户先猜测组合多个 extra。
+
+### 2.5 升级、重装和卸载
+
+普通升级应安装一个明确的新 release，而不是跟随随时变化的 `main`。升级前先让
+正在使用该环境的作业结束，并记录 `ffopt --version`。最干净的重装方法是删除并
+重建独立 Conda 环境：
+
+```bash
+conda deactivate
+conda env remove -n ffopt -y
+conda create -n ffopt python=3.11 -y
+conda activate ffopt
+# 随后按 2.2 节重新安装 LAMMPS、MPI、PyTorch 和 FFOpt。
+```
+
+删除 Conda 环境不会删除用户项目、`runs/` 或
+`~/.config/ffopt/machines.toml`。若要重新探测机器，先备份配置再重建：
+
+```bash
+cp -a "$HOME/.config/ffopt" "$HOME/.config/ffopt.backup"
+```
+
+确认新环境中的 `which python`、`which ffopt`、`which lmp` 和 `which mpirun`
+都指向同一个环境后，再运行 `machine test` 和 `self-test`。不要在仍有 SLURM 作业
+运行时删除它正在使用的环境。
+
 ## 3. 配置机器
 
 ### 3.1 自动探测
@@ -105,7 +159,31 @@ ffopt machine probe --partition CPU
 该命令只读取环境，不修改配置。它会报告 Python、LAMMPS、MPI、CPU、GPU 和
 SLURM 分区，并给出保守建议。建议仍需结合本集群的节点共享和内存规则审核。
 
+只有 `local` 有内置零配置 profile；集群必须先执行 `machine configure` 并使用
+明确名称，不能依赖隐藏的通用 `cluster`。profile 名必须以英文字母开头，后面只
+能使用英文字母、数字、点、下划线或连字符，例如 `mag1-2node`。
+
 ### 3.2 本地机器
+
+若 `lmp` 已经在当前环境的 `PATH` 中，可以不写任何机器配置，直接使用内置
+`local`：
+
+```bash
+ffopt doctor ffopt.in --machine local
+ffopt run ffopt.in --machine local
+```
+
+这个零配置模式为了稳妥只启用一个串行 worker。需要指定 LAMMPS/MPI 绝对路径或
+充分利用本机多核时，再创建下面的命名 profile：
+
+```bash
+ffopt machine list
+ffopt machine show --name local
+ffopt machine test --name local
+```
+
+列表会把它标记为 `[built-in, serial]`；如果用户显式配置同名 `local`，则显示
+`[user override]`。
 
 ```bash
 ffopt machine configure \
@@ -176,6 +254,14 @@ ffopt machine configure \
 `workers` 只影响速度，不控制 BO 每轮候选数。BO 的科学预算由 `ffopt.in` 中
 的 `batch_size` 决定。
 
+`walltime` 应按任务真实上限填写。过长的时限可能让共享集群无法回填当前空闲核，
+导致小型验收任务看似有资源却长期显示 `Priority`；软件验收通常用 4--6 小时，
+正式长模拟再使用 14 天等生产时限。
+
+单个 LAMMPS 参数点的 `timeout` 必须短于 `walltime`。这样某个病态参数异常缓慢时，
+FFOpt 可以及时判失败并继续其他候选，还能留下时间写 checkpoint；6 小时验收任务
+建议从 `--timeout 7200`（2 小时）开始。
+
 多次执行 `machine configure` 时，不加 `--force` 会拒绝覆盖；加 `--force`
 只替换同名 profile，不会追加重复表，也不会删除其他机器配置。
 
@@ -188,9 +274,14 @@ ffopt machine test --name cluster-1node
 ffopt self-test --machine cluster-1node --watch
 ```
 
-`machine test` 只检查一个极小 LAMMPS/MPI 作业。`self-test` 会跑完整 BTAH
-软件验收流程，并检查最终 objective、性质误差和 tolerance；新服务器正式计算前
-必须先通过两者。
+`machine test` 使用极小 LAMMPS/MPI 作业，通常几分钟内完成。单节点 profile 测试
+一个执行 slot；多节点 profile 会按其真实 `nodes`、`workers` 和 `mpi-ranks` 启动
+分布式 worker pool，在所有 slot 上并发执行并确认实际覆盖全部节点，因此可以在
+科学计算前发现跨节点共享文件系统、MPI 或资源映射问题。`self-test`
+会执行真实的 BTAH NPT、BO、采样、ANN、AL、审计和最终验证，通常需要数小时；
+它包括只在末端执行的吸附模块，并检查最终 objective、性质误差和 tolerance。
+新服务器正式计算前必须先通过两者，不能因为 `self-test` 没有几分钟结束就判断
+程序卡住，应使用 `squeue`、`ffopt status` 和 `ffopt logs` 查看进度。
 
 ## 4. 准备 LAMMPS data 文件
 
@@ -230,6 +321,10 @@ BTAH_Au111_molecule.data
 
 不要使用 `new.data`、`final2.data`、`test-ok.data` 等无法追溯角色的名称。
 
+`type` 标签必须以英文字母开头，后面只能使用英文字母、数字和下划线，例如
+`bhN1`、`C_aromatic_1`。不要使用空格、斜杠、连字符或中文；FFOpt 会用标签构造
+参数名和 CSV 列名，并在运行前拒绝不安全的手写标签。
+
 ### 4.4 检查 data
 
 ```bash
@@ -248,6 +343,22 @@ ffopt data check \
 ```
 
 `--strict` 把 warning 也视为失败，适合生产前验收。
+
+### 4.5 命名规则速查
+
+| 对象 | 推荐形式 | 限制或含义 |
+|---|---|---|
+| `project` | `benzene_charge_only` | 英文字母开头；只用字母、数字、`.`、`_`、`-` |
+| machine profile | `ccelab-2node` | 与 project 相同的可移植字符规则 |
+| type label | `C_aromatic_1` | 英文字母开头；只用字母、数字、`_` |
+| data 文件 | `benzene_bulk.data` | 写清材料、角色，必要时再加晶面或构型 |
+| run ID | `production_01` | 只用字母、数字、`.`、`_`、`-` |
+| 内部参数列 | `C_aromatic_1_charge` | 软件由 `type label + 参数族` 自动生成，不手写 |
+
+路径可以包含空格或 UTF-8 字符；命令行中的含空格路径必须加引号，`ffopt init`
+写入 `ffopt.in` 时会自动为需要的路径加引号。名称中不要写机器核数、日期或
+“final”等会很快失真的状态；节点资源属于 machine profile，时间与版本由
+provenance 自动记录，最终结果由 validation 状态决定。
 
 ## 5. 自动创建项目
 
@@ -280,6 +391,15 @@ ffopt init btah_charge_only \
 规范目录。它无法判断初始值是否真的是 CHARMM，也无法替用户判断参数范围是否
 有物理意义；生成后必须人工审核。
 
+初始化器默认写入 `range charge delta 0.30` 和 `charge_limit 2.0`。前者是相对
+每个初始电荷的局域 `+/-0.30 e` 搜索窗，后者是所有最终电荷都必须满足的独立
+绝对安全上限；对中性有机分子可按物理判断把后者收紧到 `1.0`，二者不能混为一谈。
+
+`--target` 的完整格式为
+`NAME=VALUE[,WEIGHT[,UNIT[,TOLERANCE]]]`。例如
+`density=1.3285,1.0,g/cm3,0.03`。省略 tolerance 时，`ffopt init` 会把当前默认值
+明确写进 `ffopt.in`，用户仍应根据实验误差和拟合用途审核它。
+
 ## 6. 编辑 `ffopt.in`
 
 ### 6.1 顶层
@@ -287,14 +407,18 @@ ffopt init btah_charge_only \
 ```text
 ffopt 1
 project btah_charge_only
-workflow bo sample nn al validate
+workflow bo sample nn al audit finalize validate
 ```
 
 - `ffopt 1` 是输入格式版本。
 - `project` 只是项目和结果目录名，不会调用任何 BTAH 专用代码。
 - `workflow bo` 只跑 BO。
 - `workflow validate` 直接验证 type 行中的初始参数。
-- `workflow bo sample nn al validate` 跑完整流程。
+- `workflow bo sample nn al audit finalize validate` 跑完整生产流程。
+
+仅有 `workflow validate` 时不需要写任何 `range`：软件不会建立搜索空间，所有
+`type` 初值直接交给 LAMMPS。只要 workflow 包含 `bo`，每个未固定参数就必须有
+全局或逐 type 的范围。
 
 ### 6.2 参数和范围
 
@@ -362,6 +486,12 @@ end
 bulk 标准流程写死为：固定盒子最小化、生成速度、三斜全柔性 NPT 平衡、NPT
 生产统计。`cells_in_data` 是 data 文件中已经包含的晶胞重复数，不会再复制超胞。
 
+可修改且真正生效的 bulk 参数如下：`temperature`（默认 `300 K`）、`pressure`
+（默认 `1 atm`）、`timestep`（默认 `1 fs`）、`cutoff`（默认 `8 A`）、
+`equilibration`（默认 `20000` 步）、`production`（默认 `40000` 步）和速度种子
+`seed`（默认 `101`）。schema 1 不提供 bulk `protocol` 开关，不能把标准流程改成
+NVT 或仅最小化；`production` 至少为固定统计间隔所需的 `5000` 步。
+
 ### 6.5 升华焓目标
 
 ```text
@@ -383,6 +513,10 @@ E_sub,estimate = E_single,min - <PE_bulk,NPT> / N_molecules
 标准态热修正。因此软件输出必须保留该计算定义。目标仍可使用实验升华焓，但用户
 需要理解这里是受控近似，而不是完整热化学自由能计算。
 
+这里的 `temperature`（默认 `298.15 K`）记录实验目标温度；真正的体相模拟温度由
+bulk 模块控制，默认 `300 K`。可选 `cutoff` 只覆盖单分子最小化截断，省略时继承
+bulk 截断。每个分子的原子数直接从必须提供的 single data 文件读取，不能另外手写。
+
 ### 6.6 吸附
 
 ```text
@@ -401,6 +535,14 @@ end
 ```text
 target -3.5 kcal/mol weight 1.0 tolerance 0.5
 ```
+
+吸附模块当前固定为确定性的 0 K 最小化。除必需路径和 `protocol minimize` 外，只有
+`metal`（默认 `Au`）和 `cutoff`（默认 `7 A`）可修改；温度、时间步、随机种子、
+平衡步数和生产步数不会被接受，避免用户写了参数却实际不生效。
+
+`metal` 必须对应一个固定、零电荷的基底 type，其 LJ 参数继续使用各 data 文件中
+的值；FFOpt 只更新 complex 与孤立分子共同拥有的分子 types。不要把带电、多组分
+或也需要拟合参数的基底强行改名为一个 metal type 来绕过这一约束。
 
 ### 6.7 目标函数
 
@@ -430,16 +572,31 @@ bo
     max_rounds 200
     random_seed 42
     stability_audit on
+    stability_top_k 20
+    stability_seeds 101 202 303
     early_stop patience 30
 end
 ```
 
-- `method auto` 根据独立维度选 GP、TuRBO 或 SAASBO。
-- `initial_points` 是初始设计数量。
+- `method auto` 根据独立维度选 GP、TuRBO 或 SAASBO。`ffopt explain` 和
+  `ffopt doctor` 会在运行前显示最终方法；若高维任务本应使用 SAASBO 但没有安装
+  Pyro，会明确警告并显示回退到 TuRBO，而不是只写一个含糊的 `auto`。
+- `initial_points` 是初始 Latin hypercube（LHS）设计点数。`type` 行给出的完整
+  初始参数还会作为一个 warm-start 中心额外计算一次，因此
+  `initial_points 48` 对应初始阶段共 49 次 LAMMPS 评估。
 - `batch_size` 是每轮科学候选数，不能与机器 `workers` 混为一谈。
 - `max_rounds` 是最大轮数。
 - `patience` 表示连续多少轮没有达到最小改进后提前结束。
 - BO 稳定性审计会对最优候选换种子验证，降低偶然低 objective 的风险。
+- `stability_top_k 20` 和三个 `stability_seeds` 表示搜索结束后最多额外执行
+  `20 * 3 = 60` 次 LAMMPS；它们控制审计成本，不是 NN 截断百分比。
+- `ffopt explain` 会分别打印 LHS 点数、warm-start 中心数、初始总数和完整 BO
+  搜索预算，还会单列稳定性审计上限与 BO 阶段总上限，避免把机器并发数误认为
+  科学采样数。
+
+高级阈值 `stability_max_objective_std`、`stability_max_property_rel_std`、
+`stability_noise_penalty` 和 `stability_failure_penalty` 默认分别为 `0.05`、`0.05`、
+`1.0`、`10.0`。没有针对新材料的噪声依据时不建议随意修改。
 
 ### 6.9 局域采样
 
@@ -498,11 +655,28 @@ end
 每轮先由代理模型筛选候选，再用真实 LAMMPS 计算 selected candidates，加入训练集
 后重新学习。最终好坏以 LAMMPS 验证 objective 为准，不以 ANN 预测值为准。
 
-### 6.12 最终验证
+### 6.12 稳健审计与最终定稿
+
+```text
+audit
+    top_k 8
+    seeds 101 202 303
+end
+```
+
+`audit` 从截至 AL 的累计数据中取互不重复、objective 最低的 `top_k` 个候选，
+每个候选再按列出的种子运行 LAMMPS。上例共进行 `8 * 3 = 24` 次评估，并按
+`objective 均值 + objective 标准差` 排序。失败种子不会被悄悄删除，而会保留在
+复算表中。
+
+BO 内部稳定性审计和这里的最终审计用途不同：前者为后续局域采样选择可重复的
+BO 中心；后者审核 AL 后的候选并决定最终可交付参数。`finalize` 没有参数块，只需
+写在 workflow 中；它会解析全部固定参数和中性约束恢复电荷，并导出完整 type 表。
+
+### 6.13 最终验证
 
 ```text
 validate
-    trajectory final
     require_tolerances yes
     objective_max 0.03
     max_error_percent 3.0
@@ -510,8 +684,8 @@ end
 ```
 
 三个门槛相互独立：总 objective、最大相对误差、每个性质的绝对 tolerance。最终
-验证保存性质表、参数表、日志、最终结构和相应轨迹。没有科学依据时不要照抄 BTAH
-的阈值，应按新材料实验误差和模型目标设置。
+验证默认且始终保存性质表、参数表、日志、最终结构和相应轨迹，不需要额外写轨迹
+开关。没有科学依据时不要照抄 BTAH 的阈值，应按新材料实验误差和模型目标设置。
 
 ## 7. 运行前四步检查
 
@@ -553,6 +727,8 @@ ffopt run ffopt.in --machine cluster-1node --watch
 
 默认 `.in` 项目会自动读取 `state.sqlite`，检查作业状态、checkpoint 和必须产物，
 从第一个不完整阶段恢复。不要使用 `--new` 续算；`--new` 明确表示新建独立计算。
+同一个 run 已经产生阶段记录后，必须使用同一 FFOpt 版本续算；软件检测到版本变化
+会拒绝混用结果。此时应恢复原版本，或确认要重新开始后使用 `--new`。
 
 暂时只跑到 BO：
 
@@ -577,6 +753,12 @@ ffopt results ffopt.in
 squeue -u "$USER"
 ```
 
+在 SLURM 主机上，`ffopt status` 会显示活动作业的实时 `RUNNING/PENDING` 状态、
+节点或排队原因；BO 已写 checkpoint 时还会显示已完成轮次、评估数和当前最佳
+objective。因此即使阶段最终 CSV 尚未生成，也能判断是否具备续算点。对于已经
+存在的 pipeline，省略 `--machine` 时会显示状态库中实际记录的 profile，不会把
+集群结果误标为 `local`。
+
 核心结果目录：
 
 ```text
@@ -594,9 +776,16 @@ runs/<project>/pipelines/default/
 - `nn/nn_optimize_result.json`：逐性质指标和 NN 候选。
 - `al/active_learning_history.json`：每轮 AL 预测与 LAMMPS 结果。
 - `al/final_parameters.json`：AL 阶段最终参数。
+- `audit/stability_replicates.csv`：最终候选逐种子的原始复算结果。
+- `audit/stable_results.csv`：最终候选的均值、标准差和稳健 objective 排名。
+- `finalize/final_summary.json`：稳健选择规则、来源和最终自由/派生参数。
+- `finalize/final_parameters.lammps`：稳健定稿后的完整 LAMMPS 参数命令。
 - `validate/computed_properties.csv`：最终性质、目标、误差和 tolerance。
 - `validate/validation_summary.json`：最终验收结论和失败原因。
-- `validate/bulk/`、`validate/adsorption/`：结构、日志和轨迹。
+- `validate/final_atom_parameters.csv`：全部 type 的最终 epsilon、sigma 和 q。
+- `validate/final_parameters.lammps`：可在 `read_data` 后 include 的完整 LAMMPS 命令。
+- `validate/final_parameters.json`：自由、固定、派生参数及来源。
+- `validate/eval_0000/bulk/`、`validate/eval_0000/adsorption/`：最终结构、日志和轨迹。
 
 ## 10. 单节点与双节点如何比较
 
@@ -637,6 +826,15 @@ CPU 版 PyTorch 的正常输出。CPU profile 可直接运行。需要 GPU 时�
 runner 不依赖用户手写一串 `afterok`；重复 `ffopt run ... --watch` 会检查阶段产物
 并重新提交不完整阶段。
 
+### 作业一直是 `PD`
+
+`Resources` 表示当前没有足够的节点/CPU/内存同时满足请求，作业仍可在资源释放后
+启动；`Priority` 表示正在等待调度优先级或回填窗口；`QOSMaxCpuPerJobLimit` 表示
+`--total-cores` 超过该 QOS 允许的单作业 CPU 上限，不会靠等待自行解决。前两者通常
+先等待或缩短验收 walltime，最后一种必须降低同名 machine profile 的 nodes、workers
+和 total-cores，或向管理员申请合适 QOS，再用 `machine configure --force` 更新。
+修改机器并发不会改变 `ffopt.in` 中的 BO/sample 科学预算。
+
 ### BO objective 很好但 NN R2 低
 
 BO 点是自适应相关数据，不一定覆盖平滑映射；稳定点数量可能不足，某些性质动态
@@ -675,6 +873,7 @@ BO 点是自适应相关数据，不一定覆盖平滑映射；稳定点数量�
 ## 13. 下一步阅读
 
 - [`ffopt.in` 逐项参考](../reference/input-file.md)
+- [`0.3.0a3` 单/双节点真实验收记录](../reference/acceptance-v0.3.0a3.md)
 - [机器配置参考](../reference/machine-profiles.md)
 - [输出与命名参考](../reference/outputs-and-naming.md)
 - [工作流与精度原理](../explanation/workflow-and-accuracy.md)

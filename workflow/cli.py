@@ -6,12 +6,17 @@ import argparse
 import importlib.util
 import json
 import os
+import site
 import shutil
+import subprocess
 import sys
 from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ffopt import __version__
+
+from .input_file import PROPERTY_NAMES
 from .lammps_data import inspect_lammps_data
 from .machine import (
     available_machine_profiles,
@@ -25,10 +30,38 @@ from .project import (
     compose_config,
     load_project,
     resolve_path,
-    write_generated_config,
 )
 
 DEFAULT_PROJECT = "ffopt.in"
+
+
+def _planned_bo_method(
+    config: dict,
+    dimensions: int,
+    *,
+    saasbo_available: bool | None = None,
+) -> tuple[str, str, str]:
+    """Return configured method, effective method, and any automatic fallback note."""
+    optimization = config.get("optimization", {})
+    configured = str(optimization.get("method", "auto")).lower()
+    if configured != "auto":
+        return configured, configured, ""
+
+    threshold = 10 if optimization.get("accuracy_priority", False) else 16
+    if dimensions < 7:
+        preferred = "gp"
+    elif dimensions < threshold:
+        preferred = "turbo"
+    else:
+        preferred = "saasbo"
+    if preferred != "saasbo":
+        return configured, preferred, ""
+
+    if saasbo_available is None:
+        saasbo_available = importlib.util.find_spec("pyro") is not None
+    if saasbo_available:
+        return configured, preferred, ""
+    return configured, "turbo", "SAASBO preferred by dimension, but Pyro is unavailable"
 
 
 def _timestamp() -> str:
@@ -41,6 +74,63 @@ def _newest(patterns: Iterable[str]) -> Path | None:
         matches.extend(Path.cwd().glob(pattern))
     matches = [path for path in matches if path.exists()]
     return max(matches, key=lambda path: path.stat().st_mtime) if matches else None
+
+
+def _slurm_job_summary(job_id: str | None) -> tuple[str, str] | None:
+    if not job_id:
+        return None
+    if shutil.which("squeue") is not None:
+        try:
+            result = subprocess.run(
+                ["squeue", "-h", "-j", str(job_id), "-o", "%T|%R"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            result = None
+        if result is not None:
+            lines = [line for line in result.stdout.splitlines() if line.strip()]
+            if result.returncode == 0 and lines:
+                state, separator, reason = lines[0].partition("|")
+                return state.strip().lower(), reason.strip() if separator else ""
+
+    if shutil.which("sacct") is None:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                "sacct", "-n", "-X", "-j", str(job_id),
+                "--format=State,Reason", "--parsable2",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    if result.returncode != 0 or not lines:
+        return None
+    state, separator, reason = lines[0].partition("|")
+    return state.split("+", 1)[0].strip().lower(), reason.strip() if separator else ""
+
+
+def _bo_checkpoint_summary(output_dir: str | None) -> str | None:
+    if not output_dir:
+        return None
+    path = Path(output_dir) / "checkpoints" / "latest.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    evaluations = len(data.get("all_results", []))
+    round_number = int(data.get("round", 0))
+    best = data.get("best_valid_obj")
+    best_text = f" best={float(best):.6f}" if best is not None else ""
+    return f"checkpoint round={round_number} evaluations={evaluations}{best_text}"
 
 
 def _latest_sample(project: Project) -> Path | None:
@@ -56,12 +146,12 @@ def _stage_defaults(project: Project, stage: str) -> dict:
     return dict(project.data.get("stages", {}).get(stage, {}))
 
 
-def _common(args: argparse.Namespace) -> tuple[Project, str, Path]:
+def _common(args: argparse.Namespace) -> tuple[Project, str]:
     selector = getattr(args, "input", None) or args.project
     project = load_project(selector)
     os.chdir(project.root)
     machine = args.machine or project.default_machine
-    return project, machine, write_generated_config(project, machine)
+    return project, machine
 
 
 def _execution_backend(project: Project, machine: str) -> str:
@@ -102,7 +192,7 @@ def _free_parameter_count(config: dict) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> None:
-    project, machine, _ = _common(args)
+    project, machine = _common(args)
     run_root = project.run_root
     nn_defaults = _stage_defaults(project, "nn")
     preferred_bo = nn_defaults.get("bo_dir")
@@ -126,14 +216,32 @@ def cmd_status(args: argparse.Namespace) -> None:
         ("AL history", _newest([f"runs/{project.name}/al_*/active_learning_history.json", f"runs/{project.name}/legacy/**/active_learning_history.json", "active_learning_output_*/active_learning_history.json"])),
         ("Validation", _newest([f"runs/{project.name}/validation_*/validation_summary.json", "outputs/**/validation_summary.json"])),
     ]
-    print(f"Project: {project.name} [{machine}]\nRun root: {run_root}\n")
     from .pipeline import load_pipeline_status
 
     pipeline = load_pipeline_status(project, args.run_id)
+    if pipeline and args.machine is None:
+        recorded_machine = pipeline.get("metadata", {}).get("machine")
+        if recorded_machine:
+            machine = str(recorded_machine)
+    print(f"Project: {project.name} [{machine}]\nRun root: {run_root}\n")
     if pipeline:
         print(f"Pipeline: {args.run_id}")
         for stage in pipeline["stages"]:
-            detail = stage.get("job_id") or stage.get("message") or ""
+            job_id = stage.get("job_id")
+            scheduler = _slurm_job_summary(job_id)
+            display_status = scheduler[0] if scheduler else stage["status"]
+            if scheduler:
+                location_key = (
+                    "nodes" if scheduler[0] in {"running", "completing"} else "reason"
+                )
+                location = (
+                    f" {location_key}={scheduler[1]}" if scheduler[1] else ""
+                )
+                detail = f"job={job_id}{location}"
+            elif job_id:
+                detail = f"job={job_id}"
+            else:
+                detail = stage.get("message") or ""
             artifact_paths = [Path(path) for path in stage.get("artifacts", [])]
             artifact_count = sum(path.exists() for path in artifact_paths)
             artifact_detail = (
@@ -141,9 +249,13 @@ def cmd_status(args: argparse.Namespace) -> None:
                 if artifact_paths else ""
             )
             print(
-                f"  {stage['name']:10s} {stage['status']:10s} "
+                f"  {stage['name']:10s} {display_status:10s} "
                 f"attempt={stage['attempt']:<2d}{artifact_detail} {detail}"
             )
+            if stage["name"] == "bo":
+                checkpoint = _bo_checkpoint_summary(stage.get("output_dir"))
+                if checkpoint:
+                    print(f"  {'':10s} {'':10s} {checkpoint}")
         print(f"\nUse 'ffopt results {project.path} --run-id {args.run_id}' for exact paths.")
         return
     for label, path in artifacts:
@@ -185,20 +297,17 @@ def cmd_logs(args: argparse.Namespace) -> None:
 
 
 def cmd_run(args: argparse.Namespace) -> None:
-    project, machine, config_path = _common(args)
+    project, machine = _common(args)
     from .pipeline import PipelineRunner
 
     run_id = args.run_id
     if args.new and run_id == "default":
         run_id = _timestamp()
-    auto_resume = project.runtime_config is not None and not args.new
-
     runner = PipelineRunner(
         project=project,
         machine=machine,
-        config_path=config_path,
         run_id=run_id,
-        resume=args.resume or auto_resume,
+        resume=not args.new,
         dry_run=args.dry_run,
         watch=args.watch,
         poll_seconds=args.poll_seconds,
@@ -207,27 +316,57 @@ def cmd_run(args: argparse.Namespace) -> None:
     )
     outcome = runner.run()
     if outcome == "waiting":
-        if project.runtime_config is not None:
-            print("A SLURM stage is active. Run the same command again to continue, or add --watch.")
-        else:
-            print(
-                "A SLURM stage is active. Run the same command with --resume to "
-                "continue, or add --watch to advance automatically."
-            )
+        print("A SLURM stage is active. Run the same command again to continue, or add --watch.")
     elif outcome == "completed":
         print(f"Pipeline completed: {runner.root}")
 
 
 def cmd_doctor(args: argparse.Namespace) -> None:
-    project, machine, config_path = _common(args)
+    project, machine = _common(args)
     config = compose_config(project, machine)
     checks: list[tuple[str, bool, str]] = []
+    warnings: list[tuple[str, str]] = []
+    checks.append(("FFOpt version", True, __version__))
     checks.append(("Python >= 3.10", sys.version_info >= (3, 10), sys.version.split()[0]))
-    for module in (
-        "yaml", "numpy", "pandas", "torch", "sklearn", "botorch", "gpytorch",
-    ):
+    if site.ENABLE_USER_SITE:
+        warnings.append((
+            "Python user-site",
+            f"enabled ({site.getusersitepackages()}); set PYTHONNOUSERSITE=1 for isolation",
+        ))
+    required_modules = ["yaml", "numpy", "pandas"]
+    stages = set(project.data.get("pipeline", {}).get("stages", []))
+    if "bo" in stages:
+        required_modules.extend(["scipy", "sklearn", "torch", "botorch", "gpytorch"])
+    elif stages & {"nn", "al"}:
+        required_modules.extend(["scipy", "sklearn", "torch"])
+    for module in required_modules:
         installed = importlib.util.find_spec(module) is not None
         checks.append((f"Python module: {module}", installed, "installed" if installed else "missing"))
+    optional_modules: list[tuple[str, str]] = []
+    if str(config.get("optimization", {}).get("method", "auto")).lower() == "saasbo":
+        optional_modules.append(("pyro", "explicit SAASBO"))
+    if str(config.get("nn", {}).get("model", "mlp_ensemble")).lower() == "xgboost":
+        optional_modules.append(("xgboost", "NN method xgboost"))
+    for module, reason in optional_modules:
+        installed = importlib.util.find_spec(module) is not None
+        checks.append((
+            f"Optional module: {module}",
+            installed,
+            f"installed ({reason})" if installed else f"missing; required by {reason}",
+        ))
+    if "bo" in stages:
+        configured_bo, effective_bo, bo_note = _planned_bo_method(
+            config,
+            project.compilation.dimensions,
+        )
+        checks.append((
+            "BO method",
+            True,
+            f"{configured_bo} -> {effective_bo} "
+            f"({project.compilation.dimensions} dimensions)",
+        ))
+        if bo_note:
+            warnings.append(("BO method fallback", bo_note))
 
     backend = _execution_backend(project, machine)
 
@@ -299,7 +438,8 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     if property_requested("adsorption"):
         visit_files(config["adsorption"], "adsorption")
 
-    if backend == "local":
+    needs_torch = bool(stages & {"bo", "nn", "al"})
+    if backend == "local" and needs_torch:
         try:
             import torch
             gpu = bool(torch.cuda.is_available())
@@ -317,16 +457,25 @@ def cmd_doctor(args: argparse.Namespace) -> None:
             ))
         except (ImportError, OSError, RuntimeError) as exc:
             checks.append(("PyTorch device", False, str(exc)))
-    else:
-        gpu_request = int(config.get("cluster", {}).get("nn", {}).get("gpu", 0))
-        detail = f"gpu={gpu_request}" if gpu_request else "CPU profile; no GPU requested"
+    elif backend == "slurm" and stages & {"nn", "al"}:
+        nn_resources = config.get("cluster", {}).get("nn", {})
+        gpu_request = int(nn_resources.get("gpu", 0))
+        slots = int(nn_resources.get("tasks", 1))
+        ranks = int(config.get("parallel", {}).get("cores_per_worker", 1))
+        device = f"gpu={gpu_request}" if gpu_request else "CPU; no GPU requested"
+        detail = f"{device}; LAMMPS validation slots={slots} x {ranks} MPI ranks"
         checks.append(("SLURM NN resources", True, detail))
 
     failed = False
-    print(f"Doctor: {project.name} [{machine}]\nConfig: {config_path}\n")
+    print(
+        f"Doctor: {project.name} [{machine}]\n"
+        "Runtime config: validated in memory; an immutable snapshot is saved on run\n"
+    )
     for label, ok, detail in checks:
         failed |= not ok
         print(f"[{'OK' if ok else 'FAIL'}] {label:24s} {detail}")
+    for label, detail in warnings:
+        print(f"[WARN] {label:24s} {detail}")
     if failed:
         raise SystemExit(1)
 
@@ -358,13 +507,27 @@ def cmd_machine(args: argparse.Namespace) -> None:
         return
     if args.action == "list":
         names = available_machine_profiles()
-        print("\n".join(names) if names else "No user machine profiles configured.")
+        if "local" in names:
+            print("local [user override]")
+        else:
+            print("local [built-in, serial]")
+        for name in names:
+            if name != "local":
+                print(f"{name} [user]")
         return
     if args.action == "test":
         from .machine import execute_machine_test
+        from .defaults import machine_defaults
+
         profile = load_machine_profile(args.name)
         if profile is None:
-            raise SystemExit(f"Machine profile not found: {machine_path(args.name)}")
+            if args.name == "local":
+                profile = machine_defaults(args.name)
+            else:
+                raise SystemExit(
+                    f"Machine profile {args.name!r} is not configured in "
+                    f"{machine_path(args.name)}"
+                )
         result = execute_machine_test(
             args.name, profile, dry_run=args.dry_run, wait=not args.no_wait
         )
@@ -383,9 +546,17 @@ def cmd_machine(args: argparse.Namespace) -> None:
             raise SystemExit(2)
         return
     if args.action == "show":
+        from .defaults import machine_defaults
+
         profile = load_machine_profile(args.name)
         if profile is None:
-            raise SystemExit(f"Machine profile not found: {machine_path(args.name)}")
+            if args.name == "local":
+                profile = machine_defaults(args.name)
+            else:
+                raise SystemExit(
+                    f"Machine profile {args.name!r} is not configured in "
+                    f"{machine_path(args.name)}"
+                )
         print(json.dumps(
             {key: value for key, value in profile.items() if not key.startswith("_")},
             indent=2,
@@ -567,28 +738,121 @@ def cmd_explain(args: argparse.Namespace) -> None:
             )
             print(
                 f"    target {target_name}={target.value:g} "
-                f"{target.unit} weight={target.weight:g}"
+                f"{target.unit} weight={target.weight:g} "
+                f"tolerance={target.tolerance if target.tolerance is not None else '-'}"
             )
     sample = project.data.get("stages", {}).get("sample", {})
-    if "sample" in project.data["pipeline"]["stages"]:
+    stages = set(project.data["pipeline"]["stages"])
+    if "bo" in stages:
+        optimization = config["optimization"]
+        early_stop = optimization.get("early_stop", {})
+        audit = optimization.get("stability_audit", {})
+        warm_start_count = int(
+            any(
+                isinstance(spec, dict) and "init" in spec
+                for atom_type in config.get("atom_types", [])
+                for spec in atom_type.get("params", {}).values()
+            )
+            or bool(optimization.get("seed_params"))
+        )
+        initial_lhs = int(optimization.get("n_initial", 0))
+        rounds = int(optimization.get("n_bo_iterations", 0))
+        batch_size = int(optimization.get("batch_size", 0))
+        total_evaluations = initial_lhs + warm_start_count + rounds * batch_size
+        stability_top_k = int(audit.get("top_k", 0))
+        stability_seeds = list(audit.get("seeds", []))
+        stability_evaluations = (
+            stability_top_k * len(stability_seeds)
+            if audit.get("enabled")
+            else 0
+        )
+        configured_bo, effective_bo, bo_note = _planned_bo_method(
+            config,
+            compilation.dimensions,
+        )
+        method_display = (
+            configured_bo
+            if configured_bo == effective_bo
+            else f"{configured_bo}->{effective_bo}"
+        )
+        print(
+            "\nBO                    : "
+            f"method={method_display} "
+            f"lhs={initial_lhs} "
+            f"warm_start={warm_start_count} "
+            f"initial_total={initial_lhs + warm_start_count} "
+            f"rounds={rounds} "
+            f"batch={batch_size} "
+            f"search_evaluations={total_evaluations} "
+            f"seed={optimization.get('random_seed')}"
+        )
+        if bo_note:
+            print(f"BO method note         : {bo_note}")
+        print(
+            "BO stopping/audit      : "
+            f"patience={early_stop.get('patience')} "
+            f"min_improvement={early_stop.get('min_improvement')} "
+            f"audit={'on' if audit.get('enabled') else 'off'} "
+            f"top_k={stability_top_k} seeds={stability_seeds} "
+            f"audit_max_evaluations={stability_evaluations} "
+            f"stage_max_evaluations={total_evaluations + stability_evaluations}"
+        )
+    if "sample" in stages:
         seeds = sample.get("seeds", [])
         points = int(sample.get("n_points", 0))
-        print(f"\nSampling              : {points} points x {len(seeds)} seeds")
+        print(
+            f"Sampling              : {points} points x {len(seeds)} seeds; "
+            f"centers={sample.get('elite_centers')} radii={sample.get('radii')}"
+        )
+    if "nn" in stages:
+        nn = config["nn"]
+        print(
+            "ANN                   : "
+            f"method={nn.get('model')} ensemble={nn.get('ensemble_size')} "
+            f"layers={nn.get('hidden_layers')} epochs={nn.get('max_epochs')}"
+        )
+    if "al" in stages:
+        active_learning = config["active_learning"]
+        print(
+            "Active learning       : "
+            f"rounds={active_learning.get('n_rounds')} "
+            f"LAMMPS candidates/round={active_learning.get('n_candidates_per_round')} "
+            f"domain={active_learning.get('sampling_domain')}"
+        )
+    if "audit" in stages:
+        final_audit = project.data.get("pipeline", {}).get("audit", {})
+        final_seeds = final_audit.get("seeds", [])
+        print(
+            "Final robust audit    : "
+            f"top_k={final_audit.get('top_k')} x {len(final_seeds)} seeds; "
+            "rank=mean+std"
+        )
+    if "validate" in stages:
+        validation = config["validation"]
+        print(
+            "Final acceptance      : "
+            f"tolerances={'required' if validation.get('require_tolerances') else 'reported'} "
+            f"objective_max={validation.get('objective_max', '-')} "
+            f"max_error_percent={validation.get('max_error_percent', '-')}"
+        )
 
 
 def cmd_plugins(args: argparse.Namespace) -> None:
     from engine.property_evaluators import PROPERTY_EVALUATORS
 
     descriptions = PROPERTY_EVALUATORS.describe()
+    for item in descriptions:
+        item["ffopt_input"] = item["name"] in PROPERTY_NAMES
     if args.json:
         print(json.dumps(descriptions, indent=2))
         return
-    print("Property evaluators:")
+    print("Property evaluators (ffopt.in indicates public input support):")
     for item in descriptions:
         dependencies = ",".join(item["dependencies"]) or "-"
         provides = ",".join(item["provides"]) or "dynamic"
         print(
-            f"  {item['name']:14s} dependencies={dependencies:12s} "
+            f"  {item['name']:14s} ffopt.in={'yes' if item['ffopt_input'] else 'no ':3s} "
+            f"dependencies={dependencies:12s} "
             f"provides={provides}"
         )
         print(f"  {'':14s} source={item['source']}  class={item['class']}")
@@ -627,14 +891,24 @@ def cmd_init(args: argparse.Namespace) -> None:
     print(f"Project file    : {result.project_file}")
     print(f"Atom types      : {result.atom_types}")
     print(f"Free dimensions : {result.dimensions}")
-    print(f"Targets         : {', '.join(result.targets)}")
+    public_targets = {
+        "esub_proxy": "sublimation_enthalpy",
+        "ead": "adsorption_energy",
+        "gamma_ang": "gamma",
+    }
+    print(
+        "Targets         : "
+        + ", ".join(public_targets.get(name, name) for name in result.targets)
+    )
     for warning in result.warnings:
         print(f"WARNING: {warning}")
     print("\nNext:")
     print(f"  cd {result.root}")
     print("  ffopt check ffopt.in")
     print("  ffopt explain ffopt.in")
-    print("  ffopt run ffopt.in --dry-run")
+    print("  ffopt doctor ffopt.in --machine local")
+    print("  ffopt run ffopt.in --machine local --dry-run")
+    print("  ffopt run ffopt.in --machine local")
 
 
 def cmd_self_test(args: argparse.Namespace) -> None:
@@ -656,13 +930,13 @@ def cmd_self_test(args: argparse.Namespace) -> None:
     project = load_project(prepared.input_file)
     profile = load_machine_profile(args.machine)
     if profile is None:
-        try:
+        if args.machine == "local":
             profile = machine_defaults(args.machine)
-        except ValueError as exc:
+        else:
             raise SystemExit(
                 f"Machine profile {args.machine!r} is not configured. Run "
                 "'ffopt machine configure' first."
-            ) from exc
+            )
 
     print(f"Self-test project : {prepared.root}")
     print(f"Machine profile   : {args.machine}")
@@ -683,11 +957,9 @@ def cmd_self_test(args: argparse.Namespace) -> None:
                 print(detail[-4000:])
             raise SystemExit(2)
 
-    config_path = write_generated_config(project, args.machine)
     runner = PipelineRunner(
         project=project,
         machine=args.machine,
-        config_path=config_path,
         run_id=args.run_id,
         resume=True,
         dry_run=args.dry_run,
@@ -707,7 +979,14 @@ def cmd_self_test(args: argparse.Namespace) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ffopt",
-        description="One command for BO, sampling, surrogate training and active learning.",
+        description=(
+            "One restartable command for force-field optimization and physical validation."
+        ),
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
     )
     sub = parser.add_subparsers(dest="command", required=True)
     init = sub.add_parser(
@@ -715,9 +994,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init.add_argument("name", help="Project and system name.")
     init.add_argument(
-        "--data-file", "--bulk-data", dest="data_file",
+        "--bulk-data", dest="data_file",
         help="Bulk molecular-crystal data file.",
     )
+    init.add_argument("--data-file", dest="data_file", help=argparse.SUPPRESS)
     init.add_argument(
         "--project-type",
         choices=["auto", "molecular-crystal", "adsorption", "crystal-adsorption"],
@@ -731,7 +1011,10 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--destination", help="Output directory; defaults to NAME.")
     init.add_argument(
         "--target", action="append", default=[],
-        help="Repeat NAME=VALUE[,WEIGHT[,UNIT]], e.g. a=4.24,1.0,A.",
+        help=(
+            "Repeat NAME=VALUE[,WEIGHT[,UNIT[,TOLERANCE]]], "
+            "e.g. density=1.25,1.0,g/cm3,0.03."
+        ),
     )
     init.add_argument("--complex-data", help="Adsorbate+slab LAMMPS data file.")
     init.add_argument("--slab-data", help="Clean slab LAMMPS data file.")
@@ -740,69 +1023,141 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument(
         "--mode", choices=["full", "fix_sigma", "charge_only", "lj_only"],
         default="full",
+        help=(
+            "Free parameter families: all; epsilon+charge; charge only; or "
+            "epsilon+sigma (default: full)."
+        ),
     )
     init.add_argument(
         "--cells", type=int, nargs=3, metavar=("NX", "NY", "NZ"),
         default=[1, 1, 1],
-        help="Primitive-cell repeats already present in the bulk data file.",
+        help=(
+            "Primitive-cell repeats already present in the bulk data file "
+            "(default: 1 1 1)."
+        ),
     )
     init.add_argument(
-        "--mixing-rule", choices=["geometric", "arithmetic"], default="geometric"
+        "--mixing-rule", choices=["geometric", "arithmetic"], default="geometric",
+        help=(
+            "LAMMPS unlike-pair mixing rule; epsilon remains geometric while "
+            "this choice controls sigma (default: geometric)."
+        ),
     )
     init.add_argument(
         "--derive-charge", default="auto",
-        help="auto, none, or atom type ID used to enforce total neutrality.",
+        help=(
+            "auto, none, or one atom-type ID/label whose charge is recovered "
+            "from exact total neutrality (default: auto)."
+        ),
     )
-    init.add_argument("--epsilon-scale", type=float, nargs=2, default=[0.5, 2.0])
-    init.add_argument("--sigma-scale", type=float, nargs=2, default=[0.85, 1.15])
-    init.add_argument("--charge-window", type=float, default=0.30)
-    init.add_argument("--charge-limit", type=float, default=2.0)
-    init.add_argument("--force", action="store_true")
+    init.add_argument(
+        "--epsilon-scale", type=float, nargs=2, default=[0.5, 2.0],
+        metavar=("LOW", "HIGH"),
+        help=(
+            "Multipliers around each initial epsilon for free epsilon parameters "
+            "(default: 0.5 2.0)."
+        ),
+    )
+    init.add_argument(
+        "--sigma-scale", type=float, nargs=2, default=[0.85, 1.15],
+        metavar=("LOW", "HIGH"),
+        help=(
+            "Multipliers around each initial sigma for free sigma parameters "
+            "(default: 0.85 1.15)."
+        ),
+    )
+    init.add_argument(
+        "--charge-window", type=float, default=0.30, metavar="DELTA",
+        help=(
+            "Symmetric +/- charge search window around each initial charge "
+            "(default: 0.30)."
+        ),
+    )
+    init.add_argument(
+        "--charge-limit", type=float, default=2.0, metavar="ABS_MAX",
+        help="Absolute safety limit applied to every resolved charge (default: 2.0).",
+    )
+    init.add_argument(
+        "--force", action="store_true",
+        help="Allow generated files in an existing destination to be replaced.",
+    )
     init.set_defaults(function=cmd_init)
 
     self_test = sub.add_parser(
         "self-test",
         help="Run the packaged BTAH machine and scientific acceptance test.",
     )
-    self_test.add_argument("--machine", default="local")
-    self_test.add_argument("--workdir")
-    self_test.add_argument("--run-id", default="acceptance")
-    self_test.add_argument("--watch", action="store_true")
-    self_test.add_argument("--poll-seconds", type=int, default=60)
-    self_test.add_argument("--prepare-only", action="store_true")
-    self_test.add_argument("--skip-machine-test", action="store_true")
-    self_test.add_argument("--dry-run", action="store_true")
+    self_test.add_argument(
+        "--machine", default="local",
+        help="Machine profile to test (default: built-in local).",
+    )
+    self_test.add_argument(
+        "--workdir",
+        help="Acceptance project directory; an identical existing project resumes.",
+    )
+    self_test.add_argument(
+        "--run-id", default="acceptance",
+        help="Pipeline identifier below the work directory (default: acceptance).",
+    )
+    self_test.add_argument(
+        "--watch", action="store_true",
+        help="Poll SLURM and submit subsequent stages until acceptance finishes.",
+    )
+    self_test.add_argument(
+        "--poll-seconds", type=int, default=60,
+        help="SLURM polling interval used with --watch (default: 60).",
+    )
+    self_test.add_argument(
+        "--prepare-only", action="store_true",
+        help="Install and verify the packaged project without executing it.",
+    )
+    self_test.add_argument(
+        "--skip-machine-test", action="store_true",
+        help="Skip the fast LAMMPS/MPI preflight when it has already passed.",
+    )
+    self_test.add_argument(
+        "--dry-run", action="store_true",
+        help="Print the scientific stage commands without submitting jobs.",
+    )
     self_test.set_defaults(function=cmd_self_test)
 
     inspect = sub.add_parser("inspect", help="Inspect atom types and parameters in a LAMMPS data file.")
-    inspect.add_argument("data_file")
+    inspect.add_argument("data_file", help="LAMMPS data file to inspect.")
     inspect.add_argument("--json", action="store_true", help="Emit a machine-readable summary.")
     inspect.set_defaults(function=cmd_inspect)
     data = sub.add_parser(
         "data", help="Validate LAMMPS data files and cross-file compatibility."
     )
-    data.add_argument("action", choices=["check"])
-    data.add_argument("--bulk")
-    data.add_argument("--single")
-    data.add_argument("--complex")
-    data.add_argument("--slab")
-    data.add_argument("--molecule")
+    data.add_argument("action", choices=["check"], help="Data operation to perform.")
+    data.add_argument("--bulk", help="Periodic molecular-crystal data file.")
+    data.add_argument("--single", help="Isolated molecule used with --bulk.")
+    data.add_argument("--complex", help="Adsorbate+slab data file.")
+    data.add_argument("--slab", help="Clean slab data file.")
+    data.add_argument("--molecule", help="Isolated adsorbate data file.")
     data.add_argument("--strict", action="store_true", help="Treat warnings as failures.")
-    data.add_argument("--json", action="store_true")
+    data.add_argument("--json", action="store_true", help="Emit a machine-readable report.")
     data.set_defaults(function=cmd_data)
     check = sub.add_parser("check", help="Validate one ffopt.in file without running LAMMPS.")
-    check.add_argument("input")
+    check.add_argument("input", help="FFOpt command input to validate.")
     check.set_defaults(function=cmd_check)
     explain = sub.add_parser("explain", help="Explain parameters, properties, and workflow in ffopt.in.")
-    explain.add_argument("input")
+    explain.add_argument("input", help="FFOpt command input to expand and explain.")
     explain.set_defaults(function=cmd_explain)
     plugins = sub.add_parser("plugins", help="List built-in and installed property evaluators.")
-    plugins.add_argument("--json", action="store_true")
+    plugins.add_argument("--json", action="store_true", help="Emit machine-readable metadata.")
     plugins.set_defaults(function=cmd_plugins)
     machine = sub.add_parser("machine", help="Configure reusable local or SLURM execution profiles.")
-    machine.add_argument("action", choices=["configure", "show", "list", "probe", "test"])
-    machine.add_argument("--name", default="local")
-    machine.add_argument("--backend", choices=["local", "slurm"])
+    machine.add_argument(
+        "action", choices=["configure", "show", "list", "probe", "test"],
+        help="Configure, inspect, discover, or test a reusable machine profile.",
+    )
+    machine.add_argument(
+        "--name", default="local", help="Profile name (default: local)."
+    )
+    machine.add_argument(
+        "--backend", choices=["local", "slurm"],
+        help="Execution backend when configuring a profile.",
+    )
     machine.add_argument("--lammps", help="LAMMPS executable; auto-detected when omitted.")
     machine.add_argument("--mpi", help="MPI launcher; auto-detected when omitted.")
     machine.add_argument(
@@ -811,9 +1166,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Concurrent, independent LAMMPS evaluations across the allocation.",
     )
     machine.add_argument(
-        "--ranks", "--mpi-ranks", dest="ranks", type=int,
+        "--mpi-ranks", dest="ranks", type=int,
         help="MPI ranks used by each independent LAMMPS evaluation.",
     )
+    machine.add_argument("--ranks", dest="ranks", type=int, help=argparse.SUPPRESS)
     machine.add_argument(
         "--omp-threads", type=int,
         help="OpenMP threads used by each MPI rank (normally 1).",
@@ -822,12 +1178,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--timeout", type=int, default=21600,
         help="Per-evaluation timeout in seconds (default: 21600).",
     )
-    machine.add_argument("--partition")
-    machine.add_argument("--qos")
+    machine.add_argument("--partition", help="SLURM partition name.")
+    machine.add_argument("--qos", help="Optional SLURM quality-of-service name.")
     machine.add_argument(
-        "--cores", "--total-cores", dest="cores", type=int,
+        "--total-cores", dest="cores", type=int,
         help="Total CPU cores requested across all SLURM nodes.",
     )
+    machine.add_argument("--cores", dest="cores", type=int, help=argparse.SUPPRESS)
     machine.add_argument(
         "--nodes", type=int, default=1,
         help="SLURM nodes used by parallel LAMMPS stages (default: 1).",
@@ -836,7 +1193,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--gpus", type=int, default=0,
         help="GPUs requested by NN/AL stages (default: 0).",
     )
-    machine.add_argument("--walltime", default="24:00:00")
+    machine.add_argument(
+        "--walltime", default="24:00:00",
+        help="SLURM time limit, for example 06:00:00 or 14-00:00:00.",
+    )
     machine.add_argument(
         "--memory-per-node",
         help=(
@@ -844,14 +1204,23 @@ def build_parser() -> argparse.ArgumentParser:
             "When omitted, the cluster default is used."
         ),
     )
-    machine.add_argument("--force", action="store_true")
+    machine.add_argument(
+        "--force", action="store_true",
+        help="Replace the named profile; other profiles are preserved.",
+    )
     machine.add_argument(
         "--auto", action="store_true",
         help="Configure conservative defaults from the current host and sinfo.",
     )
-    machine.add_argument("--json", action="store_true")
-    machine.add_argument("--dry-run", action="store_true")
-    machine.add_argument("--no-wait", action="store_true")
+    machine.add_argument("--json", action="store_true", help="Emit machine details as JSON.")
+    machine.add_argument(
+        "--dry-run", action="store_true",
+        help="Prepare and print a machine test without submitting or running it.",
+    )
+    machine.add_argument(
+        "--no-wait", action="store_true",
+        help="Submit a SLURM machine test and return without waiting for completion.",
+    )
     machine.set_defaults(function=cmd_machine)
     for name, function, help_text in (
         ("status", cmd_status, "Show resumable pipeline state and artifacts."),
@@ -869,49 +1238,90 @@ def build_parser() -> argparse.ArgumentParser:
     results = sub.add_parser(
         "results", help="Show exact outputs and expected artifacts for one pipeline run."
     )
-    results.add_argument("input", nargs="?", default=DEFAULT_PROJECT)
-    results.add_argument("--run-id", default="default")
-    results.add_argument("--json", action="store_true")
+    results.add_argument(
+        "input", nargs="?", default=DEFAULT_PROJECT,
+        help="FFOpt command input (default: ffopt.in).",
+    )
+    results.add_argument(
+        "--run-id", default="default", help="Pipeline identifier (default: default)."
+    )
+    results.add_argument("--json", action="store_true", help="Emit machine-readable paths.")
     results.set_defaults(function=cmd_results)
 
     logs = sub.add_parser(
         "logs", help="Show the latest SLURM stdout/stderr for a pipeline stage."
     )
-    logs.add_argument("input", nargs="?", default=DEFAULT_PROJECT)
-    logs.add_argument("--run-id", default="default")
     logs.add_argument(
-        "--stage", choices=["bo", "sample", "nn", "al", "audit", "finalize", "validate"]
+        "input", nargs="?", default=DEFAULT_PROJECT,
+        help="FFOpt command input (default: ffopt.in).",
     )
-    logs.add_argument("--lines", type=int, default=80)
+    logs.add_argument(
+        "--run-id", default="default", help="Pipeline identifier (default: default)."
+    )
+    logs.add_argument(
+        "--stage", choices=["bo", "sample", "nn", "al", "audit", "finalize", "validate"],
+        help="Stage to inspect; defaults to the most recent logged stage.",
+    )
+    logs.add_argument(
+        "--lines", type=int, default=80, help="Lines read from each log (default: 80)."
+    )
     logs.add_argument("--paths", action="store_true", help="List log paths without file content.")
     logs.set_defaults(function=cmd_logs)
 
     run = sub.add_parser(
-        "run", help="Run the restartable BO -> sampling -> NN -> AL pipeline."
+        "run",
+        help=(
+            "Run the restartable BO -> sampling -> ANN -> AL -> audit -> "
+            "finalize -> validation pipeline."
+        ),
     )
     _add_context(run)
-    run.add_argument("--run-id", default="default")
-    run.add_argument("--resume", action="store_true")
+    run.add_argument(
+        "--run-id", default="default", help="Pipeline identifier (default: default)."
+    )
+    run.add_argument("--resume", action="store_true", help=argparse.SUPPRESS)
     run.add_argument(
         "--new", action="store_true",
         help="Start an independent timestamped run instead of auto-resuming.",
     )
-    run.add_argument("--dry-run", action="store_true")
+    run.add_argument(
+        "--dry-run", action="store_true",
+        help="Compile and print stage commands without executing or submitting them.",
+    )
     run.add_argument(
         "--watch", action="store_true",
         help="On SLURM, keep polling and submit each next stage automatically.",
     )
-    run.add_argument("--poll-seconds", type=int, default=60)
+    run.add_argument(
+        "--poll-seconds", type=int, default=60,
+        help="SLURM polling interval used with --watch (default: 60).",
+    )
     run.add_argument("--from-stage", choices=[
         "bo", "sample", "nn", "al", "audit", "finalize", "validate"
-    ])
+    ], help="Begin at a previously reached stage; completed upstream artifacts are required.")
     run.add_argument("--until", choices=[
         "bo", "sample", "nn", "al", "audit", "finalize", "validate"
-    ])
+    ], help="Stop after this stage while retaining the configured full workflow.")
     run.set_defaults(function=cmd_run)
     return parser
 
 
 def main() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)
+        except (AttributeError, ValueError):
+            pass
     args = build_parser().parse_args()
-    args.function(args)
+    try:
+        args.function(args)
+    except BrokenPipeError:
+        # Commands are routinely piped to head/tail on login nodes.  Replace
+        # stdout before interpreter shutdown so its final flush stays quiet.
+        try:
+            descriptor = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(descriptor, sys.stdout.fileno())
+            os.close(descriptor)
+        except (AttributeError, OSError, ValueError):
+            pass
+        raise SystemExit(0) from None
