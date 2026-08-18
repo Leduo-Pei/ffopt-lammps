@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ffopt-lammps"
-version = "0.2.0a3"
+version = "0.3.0a1"
 description = "Restartable force-field parameter optimization with LAMMPS, Bayesian optimization, surrogate models, and active learning."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -52,11 +52,14 @@ ffopt = "ffopt.cli:main"
 [project.entry-points."ffopt.property_evaluators"]
 
 [project.urls]
+Homepage = "https://github.com/Leduo-Pei/ffopt-lammps"
+Documentation = "https://github.com/Leduo-Pei/ffopt-lammps/tree/main/docs"
 Repository = "https://github.com/Leduo-Pei/ffopt-lammps"
 Issues = "https://github.com/Leduo-Pei/ffopt-lammps/issues"
+Changelog = "https://github.com/Leduo-Pei/ffopt-lammps/blob/main/CHANGELOG.md"
 
 [tool.setuptools]
-packages = ["ffopt", "engine", "workflow", "utils", "viz", "slurm"]
+packages = ["ffopt", "engine", "workflow", "utils", "viz"]
 
 [tool.setuptools.package-dir]
 ffopt = "src/ffopt"
@@ -64,13 +67,22 @@ engine = "engine"
 workflow = "workflow"
 utils = "utils"
 viz = "viz"
-slurm = "slurm"
 
 [tool.setuptools.data-files]
 "share/ffopt/lammps/inputs/bulk" = ["lammps/inputs/bulk/*"]
 "share/ffopt/lammps/inputs/molecule" = ["lammps/inputs/molecule/*"]
 "share/ffopt/lammps/inputs/adsorption" = ["lammps/inputs/adsorption/*"]
+"share/ffopt/examples/btah" = ["examples/btah/*.in"]
+"share/ffopt/data/bulk" = ["data/bulk/BTAH_822_bulk.data"]
+"share/ffopt/data/molecule" = ["data/molecule/BTAH_822_single.data"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = [".", "src"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

@@ -1,4 +1,3 @@
-import json
 import sys
 
 from workflow.slurm_pool import SlurmCommandPool

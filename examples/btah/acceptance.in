@@ -1,0 +1,96 @@
+# BTAH scientific acceptance benchmark for comparing machine profiles.
+# The validated charge-only solution is the warm-start centre.  BO, sampling,
+# ANN and AL still execute, while final validation must recover an accurate
+# force field.  This is a software acceptance test, not an independent fit.
+ffopt 1
+project btah_acceptance
+workflow bo sample nn al validate
+
+parameters
+    range epsilon factor 0.50 2.00
+    range sigma   factor 0.85 1.15
+    range charge  delta  0.03
+    charge_limit 1.0
+    neutrality derive bhN1
+    mixing epsilon geometric
+    mixing sigma geometric
+    fix epsilon sigma
+
+    # id  label  epsilon(kcal/mol)  sigma(A)     charge(e)
+    type  1  bhN1  0.2000000142  3.2963252376  -0.9012316383
+    type  2  bhHn  0.0473512033  0.3980865645   0.5391380023
+    type  3  bhN2  0.2000000142  3.2963252376   0.0474533252
+    type  4  bhN3  0.2000000142  3.2963252376  -0.6392813436
+    type  5  bhC2  0.0989999944  3.3141432470  -0.2655846054
+    type  6  bhH2  0.0300001052  2.4200365710   0.2561418237
+    type  7  bhC1  0.0989999944  3.3141432470  -0.1267915797
+    type  8  bhH1  0.0300001052  2.4200365710  -0.1832292326
+    type  9  bhC6  0.0989999944  3.3141432470  -0.1874864130
+    type 10  bhH6  0.0300001052  2.4200365710   0.1128844712
+    type 11  bhC5  0.0989999944  3.3141432470   0.0387066982
+    type 12  bhH5  0.0300001052  2.4200365710   0.2490517205
+    type 13  bhC4  0.0699999881  3.5500532624   0.4178526456
+    type 14  bhC3  0.0699999881  3.5500532624   0.6423761257
+end
+
+property bulk
+    data ../../data/bulk/BTAH_822_bulk.data
+    cells_in_data 8 2 2
+    temperature 300 K
+    pressure 1 atm
+    equilibration 20000
+    production 40000
+    target a         4.2422 A      weight 1.0 tolerance 0.15
+    target b        17.8270 A      weight 1.0 tolerance 0.30
+    target c        20.6850 A      weight 1.0 tolerance 0.30
+    target alpha    72.6300 degree weight 0.5 tolerance 1.50
+    target beta     87.1500 degree weight 0.5 tolerance 1.50
+    target gamma    86.2300 degree weight 0.5 tolerance 2.00
+    target density   1.3285 g/cm3  weight 1.0 tolerance 0.03
+end
+
+property sublimation
+    bulk ../../data/bulk/BTAH_822_bulk.data
+    single ../../data/molecule/BTAH_822_single.data
+    temperature 298.15 K
+    target 98.5 kJ/mol weight 0.3 tolerance 5.0
+end
+
+bo
+    method turbo
+    initial_points 24
+    batch_size 24
+    max_rounds 1
+    stability_audit off
+    early_stop patience 1
+end
+
+sample
+    points 48
+    centers 4
+    center_selection diverse
+    radii 0.010 0.025
+    global_fraction 0.0
+    seeds 101
+end
+
+nn
+    method ann
+    ensemble 2
+    epochs 80
+    batch_size 32
+end
+
+al
+    acquisition uncertainty
+    rounds 1
+    candidates 4
+    candidate_pool 512
+end
+
+validate
+    trajectory final
+    require_tolerances yes
+    objective_max 0.03
+    max_error_percent 3.0
+end

@@ -27,7 +27,6 @@ All functions save:
 
 from pathlib import Path
 from typing import Union
-import warnings
 
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
@@ -202,7 +201,7 @@ def _pair_plot(df:       pd.DataFrame,
                         alpha=0.7, edgecolor="none")
                 ax.set_yticks([])
             else:
-                sc = ax.scatter(
+                ax.scatter(
                     df[params[col]].values, df[params[row]].values,
                     c=objs, cmap=cmap, vmin=vmin, vmax=vmax,
                     s=12, alpha=0.65, linewidths=0,
@@ -250,7 +249,6 @@ def _marginals_and_corr(df:       pd.DataFrame,
                              figure=fig,
                              hspace=0.55, wspace=0.45)
 
-    objs   = df["objective"].values
     corrs  = df[params].corrwith(df["objective"]).abs()
 
     for i, p in enumerate(params):

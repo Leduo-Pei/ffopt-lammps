@@ -21,6 +21,18 @@ DEFAULT_UNITS = {
     "density": "g/cm3", "esub_proxy": "kJ/mol", "ead": "kcal/mol",
     "surf_energy": "J/m2",
 }
+SUPPORTED_TARGET_UNITS = {
+    "a": {"a": "A", "angstrom": "A", "angstroms": "A"},
+    "b": {"a": "A", "angstrom": "A", "angstroms": "A"},
+    "c": {"a": "A", "angstrom": "A", "angstroms": "A"},
+    "alpha": {"degree": "degree", "degrees": "degree", "deg": "degree"},
+    "beta": {"degree": "degree", "degrees": "degree", "deg": "degree"},
+    "gamma_ang": {"degree": "degree", "degrees": "degree", "deg": "degree"},
+    "density": {"g/cm3": "g/cm3", "g/cm^3": "g/cm3"},
+    "esub_proxy": {"kj/mol": "kJ/mol", "kjmol": "kJ/mol"},
+    "ead": {"kcal/mol": "kcal/mol", "kcalmol": "kcal/mol"},
+    "surf_energy": {"j/m2": "J/m2", "j/m^2": "J/m2"},
+}
 PROPERTY_OUTPUT_UNITS = {
     "bulk": {
         "a_0K": "A", "a": "A", "b": "A", "c": "A",
@@ -166,13 +178,23 @@ def _target_document(document: FFOptInput, prop: PropertySpec) -> dict[str, dict
             )
         if name in result:
             raise InputFileError(document.path, target.line, f"duplicate target {name!r}")
+        unit = target.unit or DEFAULT_UNITS[name]
+        normalized_unit = SUPPORTED_TARGET_UNITS[name].get(unit.lower())
+        if normalized_unit is None:
+            accepted = ", ".join(sorted(set(SUPPORTED_TARGET_UNITS[name].values())))
+            raise InputFileError(
+                document.path,
+                target.line,
+                f"target {target.name!r} unit must be {accepted}; "
+                f"automatic unit conversion is not implemented",
+            )
         tolerance = target.tolerance
         if tolerance is None:
             tolerance = 10.0 if name == "esub_proxy" else max(abs(target.value) * 0.03, 1.0e-6)
         result[name] = {
             "value": target.value,
             "weight": target.weight,
-            "unit": target.unit or DEFAULT_UNITS[name],
+            "unit": normalized_unit,
             "tolerance": tolerance,
         }
     return result
@@ -296,12 +318,13 @@ def _compile_adsorption(document: FFOptInput, prop: PropertySpec, config: dict[s
 def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: dict[str, Any]) -> None:
     bo_map = {
         "method": "method", "initial_points": "n_initial", "rounds": "n_bo_iterations",
-        "max_rounds": "n_bo_iterations", "random_seed": "random_seed",
+        "max_rounds": "n_bo_iterations", "batch_size": "batch_size",
+        "random_seed": "random_seed",
     }
     sample_map = {
         "points": "n_points", "centers": "elite_centers", "elite_centers": "elite_centers",
         "seeds": "seeds", "radii": "radii", "global_fraction": "global_fraction",
-        "design_seed": "design_seed", "max_workers": "max_workers",
+        "design_seed": "design_seed",
         "center_selection": "center_selection",
     }
     nn_map = {
@@ -322,10 +345,26 @@ def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: 
     }
     for stage, settings in document.stage_settings.items():
         if stage == "validate":
-            allowed = {"trajectory"}
+            allowed = {
+                "trajectory", "require_tolerances", "objective_max",
+                "max_error_percent",
+            }
             unknown = set(settings) - allowed
             if unknown:
                 raise InputFileError(document.path, 1, f"unknown validate setting(s): {sorted(unknown)}")
+            if "trajectory" in settings and str(settings["trajectory"]).lower() != "final":
+                raise InputFileError(document.path, 1, "validate trajectory currently supports final")
+            if "require_tolerances" in settings and not isinstance(
+                settings["require_tolerances"], bool
+            ):
+                raise InputFileError(
+                    document.path, 1,
+                    "validate require_tolerances must be yes or no",
+                )
+            for key in ("objective_max", "max_error_percent"):
+                if key in settings and float(settings[key]) <= 0.0:
+                    raise InputFileError(document.path, 1, f"validate {key} must be positive")
+            config["validation"].update(settings)
             continue
         mapping = maps[stage]
         destination = destinations[stage]
@@ -357,6 +396,67 @@ def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: 
             if stage == "nn" and mapped == "model" and str(value).lower() == "ann":
                 value = "mlp_ensemble"
             destination[mapped] = value
+
+    optimization = config["optimization"]
+    method = str(optimization.get("method", "auto")).lower()
+    if method not in {"auto", "gp", "turbo", "saasbo"}:
+        raise InputFileError(
+            document.path, 1,
+            "BO method must be auto, gp, turbo, or saasbo",
+        )
+    for key in ("n_initial", "n_bo_iterations", "batch_size"):
+        value = optimization.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise InputFileError(document.path, 1, f"BO {key} must be a positive integer")
+    early_stop = optimization.get("early_stop", {})
+    unknown_early = set(early_stop) - {"enabled", "patience", "min_improvement"}
+    if unknown_early:
+        raise InputFileError(
+            document.path, 1,
+            f"unknown BO early_stop setting(s): {sorted(unknown_early)}",
+        )
+    if not isinstance(early_stop.get("enabled", True), bool):
+        raise InputFileError(document.path, 1, "BO early_stop enabled must be on or off")
+    if int(early_stop.get("patience", 1)) < 1:
+        raise InputFileError(document.path, 1, "BO early_stop patience must be positive")
+    if float(early_stop.get("min_improvement", 0.0)) < 0.0:
+        raise InputFileError(document.path, 1, "BO early_stop min_improvement cannot be negative")
+
+    sample = stages.setdefault("sample", {})
+    for key in ("n_points", "elite_centers"):
+        if int(sample.get(key, 0)) < 1:
+            raise InputFileError(document.path, 1, f"sample {key} must be positive")
+    if int(sample["elite_centers"]) > int(sample["n_points"]):
+        raise InputFileError(document.path, 1, "sample centers cannot exceed points")
+    if not sample.get("seeds"):
+        raise InputFileError(document.path, 1, "sample seeds cannot be empty")
+    radii = [float(value) for value in sample.get("radii", [])]
+    if not radii or any(value <= 0.0 or value > 1.0 for value in radii):
+        raise InputFileError(document.path, 1, "sample radii must be in (0, 1]")
+    global_fraction = float(sample.get("global_fraction", 0.0))
+    if not 0.0 <= global_fraction <= 1.0:
+        raise InputFileError(document.path, 1, "sample global_fraction must be in [0, 1]")
+    if str(sample.get("center_selection", "diverse")) not in {"top", "diverse"}:
+        raise InputFileError(document.path, 1, "sample center_selection must be top or diverse")
+
+    nn = config["nn"]
+    for key in ("ensemble_size", "max_epochs", "batch_size"):
+        if int(nn.get(key, 0)) < 1:
+            raise InputFileError(document.path, 1, f"NN {key} must be positive")
+    val_fraction = float(nn.get("val_fraction", 0.0))
+    test_fraction = float(nn.get("test_fraction", 0.0))
+    if val_fraction < 0.0 or test_fraction < 0.0 or val_fraction + test_fraction >= 1.0:
+        raise InputFileError(
+            document.path, 1,
+            "NN validation_fraction and test_fraction must be non-negative and sum to < 1",
+        )
+
+    active_learning = config["active_learning"]
+    for key in ("n_rounds", "n_candidates_per_round", "n_candidate_pool"):
+        if int(active_learning.get(key, 0)) < 1:
+            raise InputFileError(document.path, 1, f"AL {key} must be positive")
+    if int(active_learning["n_candidate_pool"]) < int(active_learning["n_candidates_per_round"]):
+        raise InputFileError(document.path, 1, "AL candidate_pool cannot be smaller than candidates")
 
 
 def compile_input(document: FFOptInput) -> CompiledInput:

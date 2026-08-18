@@ -346,6 +346,8 @@ bo
     # auto selects a BO method from the number of free dimensions.
     method auto
     initial_points 48
+    # Scientific candidates per BO round; independent of machine workers.
+    batch_size 48
     max_rounds 200
     early_stop patience 30
 end
@@ -398,6 +400,7 @@ end
 {optimization_blocks}
 validate
     trajectory final
+    require_tolerances {"yes" if target_list else "no"}
 end
 """
     input_path = root / "ffopt.in"

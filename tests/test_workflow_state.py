@@ -1,4 +1,3 @@
-from pathlib import Path
 
 from workflow.state import WorkflowState, canonical_hash
 

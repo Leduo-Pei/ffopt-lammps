@@ -125,3 +125,49 @@ def test_single_sample_seed_is_normalized_to_a_list():
         parse_input_file(ROOT / "examples" / "btah" / "cluster_smoke.in")
     )
     assert compiled.project_data["stages"]["sample"]["seeds"] == [101]
+
+
+def test_bo_batch_size_is_scientific_input_not_machine_parallelism():
+    compiled = compile_input(
+        parse_input_file(ROOT / "examples" / "btah" / "charge_only.in")
+    )
+    assert compiled.config["optimization"]["batch_size"] == 48
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+        ("temperature 300 K", "temperature 300 C", "temperature unit"),
+        ("cells_in_data 8 2 2", "replicate 8 2 2", "unknown bulk property"),
+        ("temperature 298.15 K", "bulk_protocol npt", "unknown sublimation"),
+    ],
+)
+def test_rejects_ambiguous_or_unused_property_settings(tmp_path, old, new, message):
+    source = (ROOT / "examples" / "btah" / "charge_only.in").read_text()
+    source = source.replace(old, new, 1)
+    source = source.replace("../../data/", (ROOT / "data").as_posix() + "/")
+    path = tmp_path / "bad_setting.in"
+    path.write_text(source, encoding="utf-8")
+    with pytest.raises(InputFileError, match=message):
+        parse_input_file(path)
+
+
+def test_rejects_duplicate_property_setting(tmp_path):
+    source = (ROOT / "examples" / "btah" / "charge_only.in").read_text()
+    source = source.replace("    pressure 1 atm\n", "    pressure 1 atm\n    pressure 2 atm\n")
+    source = source.replace("../../data/", (ROOT / "data").as_posix() + "/")
+    path = tmp_path / "duplicate.in"
+    path.write_text(source, encoding="utf-8")
+    with pytest.raises(InputFileError, match="duplicate 'pressure' setting"):
+        parse_input_file(path)
+
+
+def test_rejects_target_units_without_implemented_conversion(tmp_path):
+    source = (ROOT / "examples" / "btah" / "charge_only.in").read_text()
+    source = source.replace("target 98.5 kJ/mol", "target 1.02 eV")
+    source = source.replace("../../data/", (ROOT / "data").as_posix() + "/")
+    path = tmp_path / "bad_target_unit.in"
+    path.write_text(source, encoding="utf-8")
+
+    with pytest.raises(InputFileError, match="automatic unit conversion is not implemented"):
+        compile_input(parse_input_file(path))

@@ -103,6 +103,24 @@ class ProjectConfigTests(unittest.TestCase):
         self.assertNotIn("gpu", profile["cluster"]["nn"])
         self.assertEqual(profile["cluster"]["validate"]["tasks"], 1)
 
+    def test_machine_worker_count_does_not_change_bo_batch_size(self) -> None:
+        one = build_machine_profile(
+            name="one-node", backend="slurm", workers=12, ranks=4,
+            nodes=1, cores=48, partition="CPU",
+        )
+        two = build_machine_profile(
+            name="two-node", backend="slurm", workers=24, ranks=4,
+            nodes=2, cores=96, partition="CPU",
+        )
+        save_machine_profile("one-node", one)
+        save_machine_profile("two-node", two)
+        one_config = compose_config(self.project, "one-node")
+        two_config = compose_config(self.project, "two-node")
+        self.assertEqual(one_config["optimization"]["batch_size"], 48)
+        self.assertEqual(two_config["optimization"]["batch_size"], 48)
+        self.assertEqual(one_config["parallel"]["max_workers"], 12)
+        self.assertEqual(two_config["parallel"]["max_workers"], 24)
+
     def test_generated_json_config_is_reloadable(self) -> None:
         path = write_generated_config(self.project, "local")
         self.assertTrue(path.exists())

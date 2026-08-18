@@ -30,7 +30,6 @@ import os
 import sys
 import time
 import warnings
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -42,7 +41,14 @@ import torch.nn as nn
 import torch.optim as optim
 from scipy.optimize import differential_evolution, minimize
 from scipy.stats import qmc
+
 from .config_loader import load_config as load_expanded_config, save_config_snapshot
+from .lammps_interface import LAMMPSRunner
+from .optimizer import ForceFieldOptimizer
+from utils.objective_rescoring import (
+    active_targets,
+    validate_objective_provenance,
+)
 
 # `python -m engine.nn_surrogate` executes this file as __main__. Register its
 # canonical name so custom sklearn/PyTorch wrappers are pickled with a stable
@@ -51,15 +57,6 @@ if __name__ == "__main__":
     sys.modules["engine.nn_surrogate"] = sys.modules[__name__]
 
 warnings.filterwarnings("ignore", category=UserWarning, module="torch")
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from .lammps_interface import LAMMPSRunner
-from .optimizer import ForceFieldOptimizer
-from utils.objective_rescoring import (
-    active_targets,
-    validate_objective_provenance,
-)
 
 
 # ============================================================================
@@ -325,7 +322,8 @@ class EnsembleMLP:
 
     def load_state_dicts(self, sds: List[dict]):
         for m, sd in zip(self.members, sds):
-            m.load_state_dict(sd); m.eval()
+            m.load_state_dict(sd)
+            m.eval()
 
 
 class MultiTaskMLP(nn.Module):
@@ -852,7 +850,8 @@ class NNSurrogate:
         N = X_raw.shape[0]
         print(f"  Valid evaluations : {N}")
         if N < 10:
-            print("  ERROR: fewer than 10 valid points."); sys.exit(1)
+            print("  ERROR: fewer than 10 valid points.")
+            sys.exit(1)
 
         # Step 2: physics features
         print("\nStep 2/5 - Building features")
@@ -884,7 +883,8 @@ class NNSurrogate:
         tr_idx, val_idx, test_idx = self._compute_split_indices(N, Y_props)
         print(f"  Train:{len(tr_idx)}  Val:{len(val_idx)}  Test:{len(test_idx)}")
 
-        X_tr   = X_feat[tr_idx];   X_val  = X_feat[val_idx];   X_test = X_feat[test_idx]
+        X_val = X_feat[val_idx]
+        X_test = X_feat[test_idx]
         X_test_raw = X_raw[test_idx]
         input_dim = X_feat.shape[1]
 
@@ -1026,12 +1026,15 @@ class NNSurrogate:
             Y_test_ = Y_all[test_idx]
             X_mean = X_prop_tr.mean(axis=0)
             X_std = X_prop_tr.std(axis=0) + 1e-8
-            Y_mean = float(Y_tr.mean()); Y_std = float(Y_tr.std()) + 1e-8
+            Y_mean = float(Y_tr.mean())
+            Y_std = float(Y_tr.std()) + 1e-8
             if prop_kind == "mlp_ensemble":
                 ens = EnsembleMLP(input_dim, self.hidden_layers, self.activation,
                                   self.ensemble_size, self.device)
-                ens.X_mean = X_mean;  ens.X_std = X_std
-                ens.Y_mean = Y_mean;  ens.Y_std = Y_std
+                ens.X_mean = X_mean
+                ens.X_std = X_std
+                ens.Y_mean = Y_mean
+                ens.Y_std = Y_std
                 hist = self._train_ensemble(ens, X_prop_tr, Y_tr, X_val, Y_val_,
                                             X_mean, X_std, Y_mean, Y_std,
                                             seed_offset=self.target_names.index(prop)*100)
@@ -1135,7 +1138,8 @@ class NNSurrogate:
                 csv_path = found[0]
                 print(f"  Auto-discovered: {csv_path}")
             else:
-                print("  ERROR: no stable_results.csv or all_results.csv found."); sys.exit(1)
+                print("  ERROR: no stable_results.csv or all_results.csv found.")
+                sys.exit(1)
 
         df = pd.read_csv(csv_path)
         validate_objective_provenance(
@@ -1147,7 +1151,8 @@ class NNSurrogate:
         if "objective" in df.columns:
             df = df[np.isfinite(df["objective"].values)].copy()
         if df.empty:
-            print("  ERROR: no valid rows."); sys.exit(1)
+            print("  ERROR: no valid rows.")
+            sys.exit(1)
 
         # Truncate to the BEST fraction of points (by objective) so the surrogate
         # is accurate in the region that matters, instead of being spread thin
@@ -1335,7 +1340,9 @@ class NNSurrogate:
         n_val  = max(1, int(N * self.val_fraction))
         n_tr   = N - n_val - n_test
         if n_tr < 5:
-            n_test = max(1, N // 10); n_val = max(1, N // 10); n_tr = N - n_val - n_test
+            n_test = max(1, N // 10)
+            n_val = max(1, N // 10)
+            n_tr = N - n_val - n_test
 
         first_prop = list(Y_props.values())[0]
         sorted_idx = np.argsort(first_prop)
@@ -1406,12 +1413,16 @@ class NNSurrogate:
                 opt, mode="min", factor=0.5,
                 patience=max(1, self.patience // 3), min_lr=1e-6)
 
-            best_val = float("inf"); best_sd = None; no_imp = 0
-            tr_losses: List[float] = []; val_losses: List[float] = []
+            best_val = float("inf")
+            best_sd = None
+            no_imp = 0
+            tr_losses: List[float] = []
+            val_losses: List[float] = []
 
             for epoch in range(self.max_epochs):
                 perm = torch.randperm(n_tr, device=self.device)
-                ep_l = 0.0; nb = 0
+                ep_l = 0.0
+                nb = 0
                 model.train()
                 for start in range(0, n_tr, self.batch_size_nn):
                     idx = perm[start:start + self.batch_size_nn]
@@ -1420,13 +1431,15 @@ class NNSurrogate:
                     loss.backward()
                     nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                     opt.step()
-                    ep_l += loss.item(); nb += 1
+                    ep_l += loss.item()
+                    nb += 1
                 ep_l /= max(nb, 1)
 
                 model.eval()
                 with torch.no_grad():
                     vl = loss_fn(model(Xt_val), Yt_val).item()
-                tr_losses.append(ep_l); val_losses.append(vl)
+                tr_losses.append(ep_l)
+                val_losses.append(vl)
                 sched.step(vl)
                 if vl < best_val - 1e-7:
                     best_val = vl
@@ -1796,7 +1809,8 @@ def main():
         training_cfg["core_weight"] = args.core_weight
 
     if not config.get("nn", {}).get("enabled", True):
-        print("nn.enabled: false - skipping."); sys.exit(0)
+        print("nn.enabled: false - skipping.")
+        sys.exit(0)
 
     bo_dir = args.bo_dir
     if bo_dir is None:

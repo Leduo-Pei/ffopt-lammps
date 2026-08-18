@@ -70,6 +70,7 @@ end
 bo
     method turbo
     initial_points 24
+    batch_size 24
     max_rounds 1
     stability_audit off
     early_stop patience 1
@@ -96,4 +97,9 @@ al
     rounds 1
     candidates 4
     candidate_pool 128
+end
+
+validate
+    trajectory final
+    require_tolerances no
 end

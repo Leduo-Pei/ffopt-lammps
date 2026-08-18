@@ -67,6 +67,7 @@ end
 bo
     method turbo
     initial_points 48
+    batch_size 48
     max_rounds 300
     early_stop patience 20
 end
@@ -89,4 +90,9 @@ al
     acquisition uncertainty
     rounds 2
     candidates 20
+end
+
+validate
+    trajectory final
+    require_tolerances yes
 end

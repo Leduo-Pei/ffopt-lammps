@@ -193,8 +193,11 @@ class ForceFieldOptimizer:
 
         self.n_initial      = opt_cfg["n_initial"]
         self.n_bo_iters     = opt_cfg["n_bo_iterations"]
-        # batch_size = number of LAMMPS calls per BO round = max parallel workers
-        self.batch_size     = config["parallel"]["max_workers"]
+        # ``batch_size`` is part of the scientific optimization protocol.
+        # ``max_workers`` only controls how many of those candidates run at
+        # once.  Keeping them separate makes one- and two-node runs evaluate
+        # the same candidates and differ only in elapsed time.
+        self.batch_size     = max(1, int(opt_cfg.get("batch_size", 48)))
         self.objective_type = opt_cfg.get("objective", "weighted_rmse")
 
         # TuRBO
@@ -248,7 +251,7 @@ class ForceFieldOptimizer:
         self.stability_top_k = int(stab_cfg.get("top_k", 0))
         self.stability_seeds = [int(s) for s in stab_cfg.get("seeds", [])]
         self.stability_max_workers = int(
-            stab_cfg.get("max_workers", self.batch_size))
+            stab_cfg.get("max_workers", config["parallel"]["max_workers"]))
         self.stability_max_obj_std = float(
             stab_cfg.get("max_objective_std", float("inf")))
         self.stability_max_prop_rel_std = float(
@@ -620,7 +623,8 @@ class ForceFieldOptimizer:
             if seed is None:
                 seed_path = self.config["optimization"].get("seed_params")
                 if seed_path and os.path.exists(seed_path):
-                    seed = self._parse_seed_params(seed_path); src = seed_path
+                    seed = self._parse_seed_params(seed_path)
+                    src = seed_path
             if seed:
                 initial_points = [seed] + initial_points
                 print(f"  Warm-start: seeded initial batch from {src}")
@@ -644,7 +648,7 @@ class ForceFieldOptimizer:
                 self._save_checkpoint()
         else:
             print(f"\n{'='*60}")
-            print(f"Resumed from checkpoint: skipping Phase 1")
+            print("Resumed from checkpoint: skipping Phase 1")
             print(f"  {len(self.all_results)} evaluations loaded, "
                   f"best={self._best_valid_obj:.6f}, resuming at round "
                   f"{self.current_round + 1}")
@@ -798,7 +802,7 @@ class ForceFieldOptimizer:
             model = ModelListGP(gp_s, gp_e)
             mll   = SumMarginalLogLikelihood(model.likelihood, model)
             fit_gpytorch_mll(mll)
-        except Exception as e:
+        except Exception:
         # GP-BO
             return self._propose_batch_gp()
 
@@ -817,7 +821,7 @@ class ForceFieldOptimizer:
                 acq_function=acq, bounds=unit_bounds,
                 q=self.batch_size, num_restarts=10, raw_samples=512,
             )
-        except Exception as e:
+        except Exception:
         # GP-BO
             return self._propose_batch_gp()
 
@@ -1631,7 +1635,7 @@ class ForceFieldOptimizer:
         # Verify param_names match (catches config changes between runs)
         ckpt_names = ckpt.get("param_names", [])
         if ckpt_names and ckpt_names != self.param_names:
-            print(f"  WARNING: checkpoint param_names differ from current config!")
+            print("  WARNING: checkpoint param_names differ from current config!")
             print(f"    checkpoint : {ckpt_names}")
             print(f"    current    : {self.param_names}")
 
@@ -1660,7 +1664,7 @@ class ForceFieldOptimizer:
             best_idx = -1
 
         print(f"\n{'='*60}")
-        print(f"BO Complete")
+        print("BO Complete")
         print(f"{'='*60}")
         print(f"Total time  : {elapsed/60:.1f} min ({elapsed/3600:.2f} hr)")
         print(f"Evaluations : {len(self.all_results)} total, {len(valid)} valid")
@@ -1671,12 +1675,12 @@ class ForceFieldOptimizer:
               f"label '{best.get('label','?')}'")
         print(f"  Evaluation #{best_idx+1} / {len(self.all_results)}")
 
-        print(f"\nBest parameters:")
+        print("\nBest parameters:")
         for name, lo, hi in self.param_space:
             val = best.get(name, float("nan"))
             print(f"  {name:<28} = {val:.6f}  [{lo}, {hi}]")
 
-        print(f"\nTarget comparison:")
+        print("\nTarget comparison:")
         hdr = f"  {'Property':<14} {'Calculated':>12} {'Target':>10} {'Error%':>8}"
         print(hdr)
         print(f"  {'-'*46}")
@@ -1698,7 +1702,7 @@ class ForceFieldOptimizer:
                 print(f"  {r['obj_structural']:>16.6f}  "
                       f"{r['obj_surface']:>12.2f}%  {k}")
             if knee:
-                print(f"\nKnee point (auto-selected):")
+                print("\nKnee point (auto-selected):")
                 for name in self.param_names:
                     print(f"  {name:<28} = {knee.get(name, float('nan')):.6f}")
 
@@ -1717,7 +1721,7 @@ class ForceFieldOptimizer:
         # best_parameters.txt (read by run.py --dry-run auto-loader)
         param_path = os.path.join(self.work_dir, "best_parameters.txt")
         with open(param_path, "w") as f:
-            f.write(f"# Force Field Optimizer v8\n")
+            f.write("# Force Field Optimizer v8\n")
             f.write(f"# System    : {self.config['manifest']['system_name']}\n")
             f.write(f"# Method    : {self.bo_method.upper()}\n")
             f.write(f"# Objective : {best['objective']:.6f}\n")
@@ -1732,7 +1736,7 @@ class ForceFieldOptimizer:
         n_t = len(self.all_feasible)
         report_path = os.path.join(self.work_dir, "optimization_report.txt")
         with open(report_path, "w") as f:
-            f.write(f"Force Field Optimization Report (v8)\n")
+            f.write("Force Field Optimization Report (v8)\n")
             f.write(f"System      : {self.config['manifest']['system_name']}\n")
             f.write(f"Date        : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"BO method   : {self.bo_method.upper()}\n")
@@ -1744,11 +1748,11 @@ class ForceFieldOptimizer:
             f.write(f"Feasibility : {n_f}/{n_t} ({n_f/n_t*100:.0f}%)\n")
             f.write(f"Rounds      : {self.current_round}\n\n")
             f.write(f"Best objective : {best['objective']:.6f}\n\n")
-            f.write(f"Parameters:\n")
+            f.write("Parameters:\n")
             for name, lo, hi in self.param_space:
                 val = best.get(name, float("nan"))
                 f.write(f"  {name:<28} = {val:.6f}  [{lo}, {hi}]\n")
-            f.write(f"\nProperties:\n")
+            f.write("\nProperties:\n")
             for prop, info in self.config["targets"].items():
                 if (prop == "surf_energy" and
                         not self.config["lammps"]["compute_surface"]):
@@ -1766,7 +1770,7 @@ class ForceFieldOptimizer:
         else:
             pd.DataFrame().to_csv(pareto_path, index=False)
 
-        print(f"\nFiles saved:")
+        print("\nFiles saved:")
         print(f"  {csv_path}")
         print(f"  {param_path}")
         print(f"  {report_path}")
@@ -1778,7 +1782,7 @@ class ForceFieldOptimizer:
 
     def _print_header(self):
         print(f"\n{'#'*60}")
-        print(f"# Force Field Bayesian Optimizer v8")
+        print("# Force Field Bayesian Optimizer v8")
         print(f"# {self.bo_method.upper()} | Pareto active={self.pareto_active}")
         print(f"# {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"{'#'*60}")
@@ -1802,7 +1806,7 @@ class ForceFieldOptimizer:
             status = "" if active else "  [DISABLED]"
             print(f"  {prop:<14} = {info['value']}  (weight={w}){status}")
 
-        print(f"\nBO settings:")
+        print("\nBO settings:")
         budget = self.n_initial + self.n_bo_iters * self.batch_size
         print(f"  Method         : {self.bo_method.upper()}")
         print(f"  accuracy_prior : {self.config['optimization'].get('accuracy_priority', True)}")

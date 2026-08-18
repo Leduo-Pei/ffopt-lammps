@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use FFOpt-LAMMPS, please cite this software release."
+title: "FFOpt-LAMMPS"
+type: software
+version: 0.3.0a1
+date-released: 2026-08-18
+authors:
+  - family-names: "Pei"
+    given-names: "Leduo"
+repository-code: "https://github.com/Leduo-Pei/ffopt-lammps"
+url: "https://github.com/Leduo-Pei/ffopt-lammps"
+license: MIT

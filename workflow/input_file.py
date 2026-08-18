@@ -11,7 +11,7 @@ from typing import Any
 PARAMETER_NAMES = {"epsilon", "sigma", "charge"}
 PIPELINE_STAGE_ORDER = ("bo", "sample", "nn", "al", "audit", "finalize", "validate")
 PIPELINE_STAGES = set(PIPELINE_STAGE_ORDER)
-PROPERTY_NAMES = {"bulk", "sublimation", "adsorption", "surface"}
+PROPERTY_NAMES = {"bulk", "sublimation", "adsorption"}
 
 
 class InputFileError(ValueError):
@@ -81,6 +81,7 @@ class PropertySpec:
     data_files: dict[str, str] = field(default_factory=dict)
     targets: list[TargetSpec] = field(default_factory=list)
     settings: dict[str, Any] = field(default_factory=dict)
+    setting_lines: dict[str, int] = field(default_factory=dict)
 
     @property
     def fitted(self) -> bool:
@@ -306,7 +307,13 @@ def _parse_parameter_line(document: FFOptInput, line: int, tokens: list[str]) ->
                 raise InputFileError(
                     path, line, "mixing rule must be geometric or arithmetic"
                 )
-            setattr(params, f"mixing_{args[0].lower()}", rule)
+            parameter = args[0].lower()
+            if parameter == "epsilon" and rule != "geometric":
+                raise InputFileError(
+                    path, line,
+                    "the current LAMMPS backend requires geometric epsilon mixing",
+                )
+            setattr(params, f"mixing_{parameter}", rule)
         else:
             raise InputFileError(
                 path,
@@ -320,6 +327,8 @@ def _parse_parameter_line(document: FFOptInput, line: int, tokens: list[str]) ->
         if len(args) == 2 and args[1].lower() != "e":
             raise InputFileError(path, line, "charge_limit optional unit must be e")
         params.charge_abs_max = _float(path, line, args[0], "charge limit")
+        if params.charge_abs_max <= 0.0:
+            raise InputFileError(path, line, "charge_limit must be positive")
         return
     raise InputFileError(path, line, f"unknown parameters command {tokens[0]!r}")
 
@@ -335,7 +344,6 @@ def _parse_property_line(document: FFOptInput, prop: PropertySpec, line: int, to
         "bulk": {"data", "bulk"},
         "sublimation": {"bulk", "single"},
         "adsorption": {"complex", "slab", "molecule", "mol"},
-        "surface": {"complete", "split"},
     }[prop.name]
     if command == "data":
         if prop.name == "bulk" and len(args) == 1:
@@ -345,27 +353,69 @@ def _parse_property_line(document: FFOptInput, prop: PropertySpec, line: int, to
         else:
             raise InputFileError(path, line, "data requires PATH or ROLE PATH")
         role = "molecule" if role == "mol" else role
+        valid_roles = {"bulk" if item == "data" else item for item in data_roles}
+        valid_roles.discard("mol")
+        if role not in valid_roles:
+            raise InputFileError(
+                path, line,
+                f"property {prop.name!r} does not accept data role {role!r}",
+            )
+        if role in prop.data_files:
+            raise InputFileError(path, line, f"duplicate data role {role!r}")
         prop.data_files[role] = value
         return
     if command in data_roles and len(args) == 1:
         role = "molecule" if command == "mol" else command
+        role = "bulk" if role == "data" else role
+        if role in prop.data_files:
+            raise InputFileError(path, line, f"duplicate data role {role!r}")
         prop.data_files[role] = args[0]
         return
     if not args:
         raise InputFileError(path, line, f"{command} requires a value")
-    if command in {"cells", "cells_in_data", "replicate"}:
+
+    def set_setting(key: str, value: Any) -> None:
+        if key in prop.settings:
+            previous = prop.setting_lines[key]
+            raise InputFileError(
+                path, line, f"duplicate {key!r} setting (first set on line {previous})"
+            )
+        prop.settings[key] = value
+        prop.setting_lines[key] = line
+
+    if command == "cells_in_data":
         if len(args) != 3:
-            raise InputFileError(path, line, f"{command} requires NX NY NZ")
-        prop.settings["cells"] = tuple(_int(path, line, value, command) for value in args)
+            raise InputFileError(path, line, "cells_in_data requires NX NY NZ")
+        set_setting(
+            "cells",
+            tuple(_int(path, line, value, command) for value in args),
+        )
         return
     if command in {"temperature", "pressure", "timestep", "cutoff"}:
-        prop.settings[command] = _float(path, line, args[0], command)
+        units = {
+            "temperature": {"k"},
+            "pressure": {"atm"},
+            "timestep": {"fs"},
+            "cutoff": {"a", "angstrom", "angstroms"},
+        }[command]
+        if len(args) not in {1, 2}:
+            raise InputFileError(path, line, f"{command} requires VALUE [UNIT]")
+        if len(args) == 2 and args[1].lower() not in units:
+            expected = "/".join(sorted(units))
+            raise InputFileError(
+                path, line, f"{command} unit must be {expected}, got {args[1]!r}"
+            )
+        set_setting(command, _float(path, line, args[0], command))
         return
     if command in {"equilibration", "production", "seed", "molecule_atoms"}:
-        prop.settings[command] = _int(path, line, args[0], command)
+        if len(args) != 1:
+            raise InputFileError(path, line, f"{command} requires one integer value")
+        set_setting(command, _int(path, line, args[0], command))
         return
-    if command in {"protocol", "bulk_protocol", "single_protocol", "metal"}:
-        prop.settings[command] = args[0].lower() if command != "metal" else args[0]
+    if command in {"protocol", "metal"}:
+        if len(args) != 1:
+            raise InputFileError(path, line, f"{command} requires one value")
+        set_setting(command, args[0].lower() if command != "metal" else args[0])
         return
     raise InputFileError(path, line, f"unknown {prop.name} property command {tokens[0]!r}")
 
@@ -379,8 +429,14 @@ def _parse_stage_line(document: FFOptInput, stage: str, line: int, tokens: list[
     if key == "early_stop":
         if len(tokens) != 3:
             raise InputFileError(document.path, line, "early_stop requires KEY VALUE")
-        settings.setdefault("early_stop", {})[tokens[1].lower()] = _scalar(tokens[2])
+        child = tokens[1].lower()
+        early_stop = settings.setdefault("early_stop", {})
+        if child in early_stop:
+            raise InputFileError(document.path, line, f"duplicate early_stop {child!r}")
+        early_stop[child] = _scalar(tokens[2])
         return
+    if key in settings:
+        raise InputFileError(document.path, line, f"duplicate {stage} setting {key!r}")
     settings[key] = values[0] if len(values) == 1 else values
 
 
@@ -400,6 +456,18 @@ def _validate(document: FFOptInput) -> None:
         raise InputFileError(path, 1, "atom type labels must be unique")
     if min(ids) < 1:
         raise InputFileError(path, 1, "atom type IDs must be positive")
+    for item in document.parameters.atom_types:
+        if item.epsilon <= 0.0:
+            raise InputFileError(path, item.line, "initial epsilon must be positive")
+        if item.sigma <= 0.0:
+            raise InputFileError(path, item.line, "initial sigma must be positive")
+        if abs(item.charge) > document.parameters.charge_abs_max:
+            raise InputFileError(
+                path,
+                item.line,
+                f"initial charge {item.charge:g} exceeds charge_limit "
+                f"{document.parameters.charge_abs_max:g}",
+            )
     if document.parameters.derive_charge not in {None, *labels}:
         raise InputFileError(path, 1, f"neutrality label {document.parameters.derive_charge!r} is unknown")
     for name in PARAMETER_NAMES - document.parameters.fixed:
@@ -422,6 +490,27 @@ def _validate(document: FFOptInput) -> None:
         and not any(prop.fitted for prop in document.properties)
     ):
         raise InputFileError(path, 1, "optimization workflow requires at least one target")
+    unused_blocks = set(document.stage_settings) - set(document.workflow)
+    if unused_blocks:
+        raise InputFileError(
+            path, 1,
+            "method block(s) are not present in workflow: "
+            + ", ".join(sorted(unused_blocks)),
+        )
+    required = {
+        "sample": {"bo"},
+        "nn": {"bo"},
+        "al": {"bo", "nn"},
+        "audit": {"bo"},
+        "finalize": {"audit"},
+    }
+    active = set(document.workflow)
+    for stage, dependencies in required.items():
+        if stage in active and not dependencies <= active:
+            missing = sorted(dependencies - active)
+            raise InputFileError(
+                path, 1, f"workflow stage {stage!r} requires {missing}"
+            )
 
 
 def parse_input_file(value: str | Path) -> FFOptInput:
@@ -431,6 +520,7 @@ def parse_input_file(value: str | Path) -> FFOptInput:
         raise FileNotFoundError(f"FFOpt input file not found: {path}")
     document = FFOptInput(path=path)
     block: tuple[str, Any] | None = None
+    seen_top_level: set[str] = set()
     for line_number, raw in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1):
         tokens = _tokens(path, line_number, raw)
         if not tokens:
@@ -451,16 +541,25 @@ def parse_input_file(value: str | Path) -> FFOptInput:
                 _parse_stage_line(document, payload, line_number, tokens)
             continue
         if command == "ffopt":
+            if command in seen_top_level:
+                raise InputFileError(path, line_number, "duplicate ffopt declaration")
+            seen_top_level.add(command)
             if len(tokens) != 2:
                 raise InputFileError(path, line_number, "ffopt requires schema version 1")
             document.version = _int(path, line_number, tokens[1], "schema version")
             if document.version != 1:
                 raise InputFileError(path, line_number, f"unsupported schema version {document.version}")
         elif command == "project":
+            if command in seen_top_level:
+                raise InputFileError(path, line_number, "duplicate project declaration")
+            seen_top_level.add(command)
             if len(tokens) != 2 or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]*", tokens[1]):
                 raise InputFileError(path, line_number, "project requires a portable NAME")
             document.project = tokens[1]
         elif command == "workflow":
+            if command in seen_top_level:
+                raise InputFileError(path, line_number, "duplicate workflow declaration")
+            seen_top_level.add(command)
             if len(tokens) < 2:
                 raise InputFileError(path, line_number, "workflow requires at least one stage")
             stages = [stage.lower() for stage in tokens[1:]]
@@ -478,6 +577,9 @@ def parse_input_file(value: str | Path) -> FFOptInput:
                 )
             document.workflow = stages
         elif command == "parameters":
+            if command in seen_top_level:
+                raise InputFileError(path, line_number, "duplicate parameters block")
+            seen_top_level.add(command)
             if len(tokens) != 1:
                 raise InputFileError(path, line_number, "parameters takes no arguments")
             block = ("parameters", None)
@@ -488,6 +590,9 @@ def parse_input_file(value: str | Path) -> FFOptInput:
             document.properties.append(prop)
             block = ("property", prop)
         elif command in {"bo", "sample", "nn", "al", "validate"}:
+            if command in seen_top_level:
+                raise InputFileError(path, line_number, f"duplicate {command} block")
+            seen_top_level.add(command)
             if len(tokens) != 1:
                 raise InputFileError(path, line_number, f"{command} block takes no arguments")
             block = ("stage", command)

@@ -9,7 +9,7 @@ Public API
 """
 
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import List, Optional, Union
 
 import matplotlib.pyplot as plt
 import pandas as pd

@@ -1,0 +1,40 @@
+name: Bug report
+description: Report reproducible FFOpt software behavior
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: "Do not upload credentials or proprietary simulation data."
+  - type: input
+    id: version
+    attributes:
+      label: FFOpt version
+      placeholder: "0.3.0a1"
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python, LAMMPS, MPI, scheduler, CPU/GPU, and installation method.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command and minimal input
+      description: Include the exact command and a reduced ffopt.in when possible.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and observed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      render: shell

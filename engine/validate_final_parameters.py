@@ -84,6 +84,65 @@ def _initial_parameters(config: dict) -> dict[str, float]:
     return values
 
 
+def _assess_acceptance(
+    config: dict,
+    *,
+    objective: float | None,
+    properties: dict[str, float],
+    percent_errors: dict[str, float],
+) -> dict:
+    """Evaluate optional final-validation thresholds without running LAMMPS."""
+    validation = config.get("validation", {})
+    tolerance_checks: dict[str, dict[str, float | bool]] = {}
+    for name, target in config.get("targets", {}).items():
+        if name not in properties or target.get("tolerance") is None:
+            continue
+        absolute_error = abs(float(properties[name]) - float(target["value"]))
+        tolerance = float(target["tolerance"])
+        tolerance_checks[name] = {
+            "absolute_error": absolute_error,
+            "tolerance": tolerance,
+            "passed": absolute_error <= tolerance,
+        }
+
+    reasons: list[str] = []
+    require_tolerances = bool(validation.get("require_tolerances", False))
+    if require_tolerances:
+        failed = [name for name, item in tolerance_checks.items() if not item["passed"]]
+        if failed:
+            reasons.append("target tolerance exceeded: " + ", ".join(failed))
+
+    objective_max = validation.get("objective_max")
+    if objective_max is not None and (
+        objective is None or objective > float(objective_max)
+    ):
+        reasons.append(f"objective {objective} exceeds {float(objective_max):g}")
+
+    max_error_percent = validation.get("max_error_percent")
+    finite_percent_errors = [
+        float(value) for value in percent_errors.values() if value is not None
+    ]
+    observed_max_error = max(finite_percent_errors, default=None)
+    if (
+        max_error_percent is not None
+        and observed_max_error is not None
+        and observed_max_error > float(max_error_percent)
+    ):
+        reasons.append(
+            f"maximum percent error {observed_max_error:.6g} exceeds "
+            f"{float(max_error_percent):g}"
+        )
+    return {
+        "passed": not reasons,
+        "require_tolerances": require_tolerances,
+        "objective_max": objective_max,
+        "max_error_percent": max_error_percent,
+        "observed_max_error_percent": observed_max_error,
+        "tolerances": tolerance_checks,
+        "reasons": reasons,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -136,6 +195,15 @@ def main() -> None:
     for name, value in result.properties.items():
         target = config.get("targets", {}).get(name, {})
         reference = target.get("value")
+        tolerance = target.get("tolerance")
+        absolute_error = (
+            abs(float(value) - float(reference))
+            if reference is not None else None
+        )
+        within_tolerance = (
+            absolute_error <= float(tolerance)
+            if absolute_error is not None and tolerance is not None else None
+        )
         rows.append({
             "property": name,
             "value": float(value),
@@ -144,11 +212,21 @@ def main() -> None:
                 "unit", validation.get("property_units", {}).get(name, "")
             ),
             "error_percent": result.per_property_error.get(name),
+            "absolute_error": absolute_error,
+            "tolerance": tolerance,
+            "within_tolerance": within_tolerance,
         })
     pd.DataFrame(rows).to_csv(
         args.output_dir / "computed_properties.csv", index=False
     )
     objective = float(result.objective) if config.get("targets") else None
+    acceptance = _assess_acceptance(
+        config,
+        objective=objective,
+        properties=result.properties,
+        percent_errors=result.per_property_error,
+    )
+    accepted = bool(acceptance["passed"])
     summary = {
         "success": True,
         "objective": objective,
@@ -156,6 +234,7 @@ def main() -> None:
         "parameters": parameter_source,
         "properties": result.properties,
         "per_property_error": result.per_property_error,
+        "acceptance": acceptance,
     }
     with open(args.output_dir / "validation_summary.json", "w", encoding="utf-8") as fh:
         json.dump(summary, fh, indent=2)
@@ -168,6 +247,11 @@ def main() -> None:
             f"{row['unit']}"
         )
     print(f"output    : {args.output_dir.resolve()}")
+    print(f"acceptance: {'PASS' if accepted else 'FAIL'}")
+    if not accepted:
+        for reason in acceptance["reasons"]:
+            print(f"  - {reason}")
+        raise RuntimeError("Final validation did not meet the configured acceptance criteria")
 
 
 if __name__ == "__main__":

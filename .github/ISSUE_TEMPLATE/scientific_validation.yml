@@ -1,0 +1,32 @@
+name: Scientific validation
+description: Report a material, protocol, unit, or reproducibility concern
+title: "[Science]: "
+labels: ["scientific-validation"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: FFOpt and LAMMPS versions
+    validations:
+      required: true
+  - type: textarea
+    id: system
+    attributes:
+      label: System and force-field scope
+      description: Material, topology source, fitted parameters, properties, and target provenance.
+    validations:
+      required: true
+  - type: textarea
+    id: issue
+    attributes:
+      label: Scientific concern
+      description: State the expected equation/protocol and the observed result with units.
+    validations:
+      required: true
+  - type: textarea
+    id: reproducibility
+    attributes:
+      label: Reproducibility evidence
+      description: Seeds, replicate statistics, relevant ffopt.in blocks, and validation outputs.
+    validations:
+      required: true

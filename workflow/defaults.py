@@ -64,6 +64,9 @@ METHOD_DEFAULTS: dict[str, Any] = {
     "optimization": {
         "seed_params": "",
         "method": "auto",
+        # Scientific BO batch size.  This must not depend on the number of
+        # workers available on a particular machine.
+        "batch_size": 48,
         "accuracy_priority": False,
         "n_initial": 48,
         "n_bo_iterations": 200,

@@ -25,6 +25,7 @@ Outputs (active_learning_output/):
 import argparse
 import glob as _glob
 import json
+import math
 import os
 import shutil
 import sys
@@ -39,15 +40,10 @@ from scipy.stats import qmc
 from sklearn.ensemble import ExtraTreesRegressor
 from .config_loader import load_config as load_expanded_config, save_config_snapshot
 
-# Same directory as active_learning.py -> lammps_interface, optimizer, nn_surrogate
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 from .lammps_interface import LAMMPSRunner
-from .nn_surrogate import (EnsembleMLP, NNSurrogate, PhysicsFeatureBuilder,
-                           load_ensemble_from_file)
+from .nn_surrogate import (NNSurrogate, load_ensemble_from_file)
 
 # Type alias for per-property ensemble dict returned by load_ensemble_from_file
-from typing import Dict as _Dict
 from .optimizer import ForceFieldOptimizer
 from utils.objective_rescoring import (
     active_targets,
@@ -246,7 +242,6 @@ class ActiveLearner:
     def run(self):
         t0 = time.time()
         mf  = self.config["manifest"]
-        al  = self.config["active_learning"]
 
         print()
         print("=" * 70)
@@ -327,7 +322,7 @@ class ActiveLearner:
 
         # Verify param_names match (catches config changes)
         if param_names != self.param_names:
-            print(f"  WARNING: loaded model param_names differ from config!")
+            print("  WARNING: loaded model param_names differ from config!")
             print(f"    model  : {param_names}")
             print(f"    config : {self.param_names}")
 
@@ -1303,16 +1298,9 @@ class ActiveLearner:
         print(f"    {self.output_dir}/nn_round_final/nn_optimize_result.json")
         print(f"    {self.output_dir}/active_learning_history.json")
         print()
-        print("  Next steps:")
-        print("    ffopt validate               # validate best params")
-        print("    ffopt plot                   # generate all figures")
+        print("  Next step:")
+        print("    Continue the pipeline with the same 'ffopt run' command")
         print("=" * 70)
-
-
-# ============================================================================
-# math import (needed by _sample_candidates for Sobol power-of-2 rounding)
-# ============================================================================
-import math
 
 
 # ============================================================================

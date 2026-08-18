@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import importlib.util
 import json
-import math
 import os
 import shutil
-import subprocess
 import sys
 from collections.abc import Iterable
 from datetime import datetime, timezone
@@ -24,7 +21,6 @@ from .machine import (
     save_machine_profile,
 )
 from .project import (
-    SOURCE_ROOT,
     Project,
     compose_config,
     load_project,
@@ -39,56 +35,12 @@ def _timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
-def _run(command: list[object]) -> None:
-    command = [str(item) for item in command]
-    print("\n> " + subprocess.list2cmdline(command))
-    completed = subprocess.run(command, cwd=Path.cwd(), check=False)
-    if completed.returncode:
-        raise SystemExit(completed.returncode)
-
-
-def _preview(command: list[object]) -> None:
-    print("DRY RUN - command not executed:\n> " + subprocess.list2cmdline([str(item) for item in command]))
-
-
-def _python(script: str, *args: object) -> list[object]:
-    return [sys.executable, SOURCE_ROOT / script, *args]
-
-
-def _module(module: str, *args: object) -> list[object]:
-    return [sys.executable, "-m", module, *args]
-
-
 def _newest(patterns: Iterable[str]) -> Path | None:
     matches: list[Path] = []
     for pattern in patterns:
         matches.extend(Path.cwd().glob(pattern))
     matches = [path for path in matches if path.exists()]
     return max(matches, key=lambda path: path.stat().st_mtime) if matches else None
-
-
-def _latest_bo(project: Project, stable: bool = True) -> Path | None:
-    names = ["stable_results.csv", "all_results.csv"] if stable else ["all_results.csv"]
-    patterns: list[str] = []
-    for name in names:
-        patterns.extend([
-            f"runs/{project.name}/bo_*/{name}",
-            f"runs/{project.name}/legacy/**/{name}",
-            f"bo_*/{name}",
-        ])
-    result = _newest(patterns)
-    return result.parent if result else None
-
-
-def _latest_nn(project: Project) -> Path | None:
-    result = _newest([
-        f"runs/{project.name}/nn_*/forward_nn.pt",
-        f"runs/{project.name}/nn_*/hybrid_manifest.json",
-        f"runs/{project.name}/legacy/**/forward_nn.pt",
-        f"runs/{project.name}/legacy/**/hybrid_manifest.json",
-        "nn_output_*/forward_nn.pt",
-    ])
-    return result.parent if result else None
 
 
 def _latest_sample(project: Project) -> Path | None:
@@ -102,114 +54,6 @@ def _latest_sample(project: Project) -> Path | None:
 
 def _stage_defaults(project: Project, stage: str) -> dict:
     return dict(project.data.get("stages", {}).get(stage, {}))
-
-
-def _validate_nn_inputs(config: dict, bo_dir: Path, core_files: list[Path]) -> None:
-    """Fail before SLURM submission when the NN data contract is invalid."""
-    raw_path = bo_dir / "all_results.csv"
-    if not raw_path.exists():
-        raise SystemExit(f"NN preflight failed: missing {raw_path}")
-    paths = [raw_path]
-    stable_path = bo_dir / "stable_results.csv"
-    if stable_path.exists():
-        paths.append(stable_path)
-    paths.extend(core_files)
-
-    targets = {}
-    for name, info in config.get("targets", {}).items():
-        if float(info.get("weight", 1.0)) <= 0.0:
-            continue
-        if name == "ead" and not config.get("adsorption", {}).get("enabled", False):
-            continue
-        if name == "esub_proxy" and not config.get("sublimation", {}).get("enabled", False):
-            continue
-        targets[name] = info
-
-    rows_by_path: dict[Path, list[dict[str, str]]] = {}
-    headers_by_path: dict[Path, set[str]] = {}
-    for path in paths:
-        if not path.exists():
-            raise SystemExit(f"NN preflight failed: missing {path}")
-        with path.open(encoding="utf-8-sig", newline="") as handle:
-            reader = csv.DictReader(handle)
-            headers_by_path[path] = set(reader.fieldnames or [])
-            rows = list(reader)
-            rows_by_path[path] = rows
-        if not rows:
-            raise SystemExit(f"NN preflight failed: empty CSV {path}")
-        provenance_rows = rows[:200]
-        for name, info in targets.items():
-            for kind, expected in (
-                ("target", float(info["value"])),
-                ("weight", float(info.get("weight", 1.0))),
-            ):
-                column = f"_objective_{kind}_{name}"
-                values = {
-                    float(row[column])
-                    for row in provenance_rows
-                    if row.get(column) not in (None, "")
-                }
-                if values and any(abs(value - expected) > 1.0e-10 for value in values):
-                    raise SystemExit(
-                        f"NN preflight failed: {path} declares {column}={sorted(values)}, "
-                        f"but config requires {expected}. Rescore the CSV first."
-                    )
-
-    training_cfg = config.get("nn", {}).get("training_data", {})
-    if training_cfg.get("mode", "legacy") == "core_buffer":
-        required_properties = {f"calc_{name}" for name in targets}
-        for path in paths:
-            missing = required_properties - headers_by_path[path]
-            if missing:
-                raise SystemExit(
-                    f"NN preflight failed: {path} is missing {sorted(missing)}"
-                )
-
-        def successful_objectives(selected_paths: list[Path]) -> list[float]:
-            values: list[float] = []
-            for selected_path in selected_paths:
-                for row in rows_by_path[selected_path]:
-                    if str(row.get("success", "true")).lower() not in ("true", "1"):
-                        continue
-                    try:
-                        objective = float(row["objective"])
-                    except (KeyError, TypeError, ValueError):
-                        continue
-                    if math.isfinite(objective):
-                        values.append(objective)
-            return values
-
-        core_paths = ([stable_path] if stable_path.exists() else []) + core_files
-        if not core_paths:
-            core_paths = [raw_path]
-        core_max = float(training_cfg.get("core_objective_max", float("inf")))
-        buffer_max = float(training_cfg.get("buffer_objective_max", float("inf")))
-        core_values = successful_objectives(core_paths)
-        raw_values = successful_objectives([raw_path])
-        n_core = sum(value <= core_max for value in core_values)
-        n_buffer = sum(value <= buffer_max for value in raw_values)
-        best_core = min(core_values, default=float("nan"))
-        best_raw = min(raw_values, default=float("nan"))
-        print(
-            "NN preflight selection: "
-            f"core={n_core} (max={core_max:g}, best={best_core:g}) "
-            f"buffer={n_buffer} (max={buffer_max:g}, best={best_raw:g})"
-        )
-        if n_core < 10:
-            raise SystemExit(
-                "NN preflight failed: fewer than 10 stable core rows survive "
-                f"objective<={core_max:g}; best available objective is "
-                f"{best_core:g}. Set project-specific nn.training_data "
-                "cutoffs appropriate for this parameter regime."
-            )
-        if n_buffer < 10:
-            raise SystemExit(
-                "NN preflight failed: fewer than 10 raw buffer rows survive "
-                f"objective<={buffer_max:g}; best available objective is "
-                f"{best_raw:g}."
-            )
-
-    print(f"NN preflight: {len(paths)} CSV files passed all checks")
 
 
 def _common(args: argparse.Namespace) -> tuple[Project, str, Path]:
@@ -229,7 +73,7 @@ def _execution_backend(project: Project, machine: str) -> str:
 
 
 def _free_parameter_count(config: dict) -> int:
-    """Count free dimensions without importing the heavy ML runtime."""
+    """Count independent force-field dimensions in an expanded config."""
     charge_cfg = config["charge"]
     neutrality = charge_cfg.get("neutrality_constraint", {})
     derived_type = neutrality.get("derive_from_type")
@@ -255,27 +99,6 @@ def _free_parameter_count(config: dict) -> int:
     if config["pair_params"].get("mixing_rule") == "none":
         count += 2 * len(config["pair_params"].get("explicit_pairs", []))
     return count
-
-
-def cmd_show(args: argparse.Namespace) -> None:
-    project, machine, config_path = _common(args)
-    config = compose_config(project, machine)
-    active = config.get("workflow", {}).get("active_properties", list(config.get("targets", {})))
-    print(f"Project       : {project.name}")
-    print(f"Project file  : {project.path}")
-    print(f"Machine       : {machine}")
-    print(f"Backend       : {_execution_backend(project, machine)}")
-    print(f"Generated cfg : {config_path}")
-    print(f"Run root      : {project.run_root}")
-    print(f"Dimensions    : {_free_parameter_count(config)}")
-    print(f"Properties    : {', '.join(active)}")
-    print(f"BO / NN       : {config['optimization']['method']} / {config['nn']['model']}")
-    print(f"AL domain     : {config['active_learning'].get('sampling_domain', 'global')}")
-
-
-def cmd_config(args: argparse.Namespace) -> None:
-    _, _, config_path = _common(args)
-    print(config_path)
 
 
 def cmd_status(args: argparse.Namespace) -> None:
@@ -407,11 +230,24 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         checks.append((f"Python module: {module}", installed, "installed" if installed else "missing"))
 
     backend = _execution_backend(project, machine)
+
+    def executable_location(value: object) -> str | None:
+        text = str(value)
+        path = Path(text).expanduser()
+        if path.exists():
+            return str(path.resolve())
+        return shutil.which(text)
+
     if backend == "local":
-        executable = Path(config["lammps"]["executable"])
-        mpiexec = Path(config["lammps"].get("mpiexec", ""))
-        checks.append(("LAMMPS executable", executable.exists(), str(executable)))
-        checks.append(("MPI launcher", mpiexec.exists(), str(mpiexec)))
+        executable = executable_location(config["lammps"]["executable"])
+        checks.append((
+            "LAMMPS executable", executable is not None,
+            executable or str(config["lammps"]["executable"]),
+        ))
+        if bool(config.get("parallel", {}).get("use_mpi", False)):
+            mpi_value = config["lammps"].get("mpiexec", "mpiexec")
+            mpiexec = executable_location(mpi_value)
+            checks.append(("MPI launcher", mpiexec is not None, mpiexec or str(mpi_value)))
     else:
         sbatch = shutil.which("sbatch")
         checks.append(("SLURM sbatch", sbatch is not None, sbatch or "not on this host"))
@@ -467,10 +303,20 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         try:
             import torch
             gpu = bool(torch.cuda.is_available())
-            detail = torch.cuda.get_device_name(0) if gpu else f"torch {torch.__version__}, CUDA unavailable"
-            checks.append(("PyTorch CUDA", gpu, detail))
+            requested = str(
+                config.get("machine_learning", {}).get("device", "auto")
+            ).lower()
+            detail = (
+                torch.cuda.get_device_name(0)
+                if gpu else f"torch {torch.__version__}; CPU fallback"
+            )
+            checks.append((
+                "PyTorch device",
+                gpu or requested not in {"cuda", "gpu"},
+                detail,
+            ))
         except (ImportError, OSError, RuntimeError) as exc:
-            checks.append(("PyTorch CUDA", False, str(exc)))
+            checks.append(("PyTorch device", False, str(exc)))
     else:
         gpu_request = int(config.get("cluster", {}).get("nn", {}).get("gpu", 0))
         detail = f"gpu={gpu_request}" if gpu_request else "CPU profile; no GPU requested"
@@ -485,287 +331,23 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
-def cmd_bo(args: argparse.Namespace) -> None:
-    project, machine, config_path = _common(args)
-    is_slurm = _execution_backend(project, machine) == "slurm"
-    if is_slurm:
-        command = _python("slurm/submit.py", "bo", "--config", config_path)
-    else:
-        command = _module("engine.run", "--config", config_path)
-    if args.resume:
-        command.append("--resume")
-    if args.output_dir:
-        command.extend(["--output-dir", resolve_path(args.output_dir)])
-    if args.smoke:
-        if is_slurm:
-            raise SystemExit("Cluster BO already performs a pre-flight check; --smoke is local-only.")
-        command.append("--dry-run")
-    if args.save_traj and args.smoke:
-        command.append("--save-traj")
-    if args.dry_run:
-        if is_slurm:
-            command.append("--dry-run")
-            _run(command)
-        else:
-            _preview(command)
-        return
-    _run(command)
-
-
-def _sampling_args(project: Project, args: argparse.Namespace) -> tuple[Path, Path, dict]:
-    defaults = _stage_defaults(project, "sample")
-    source_arg = args.source or defaults.get("source", "auto")
-    source = _latest_bo(project) if source_arg == "auto" else resolve_path(source_arg)
-    if source is None:
-        raise SystemExit("No BO result found. Pass --source explicitly.")
-    if source.is_dir():
-        stable = source / "stable_results.csv"
-        source = stable if stable.exists() else source / "all_results.csv"
-    if args.output_dir:
-        output = resolve_path(args.output_dir)
-    elif defaults.get("output_dir"):
-        output = resolve_path(defaults["output_dir"])
-    else:
-        output = project.run_root / f"sample_{_timestamp()}"
-    return source, output, defaults
-
-
-def cmd_sample(args: argparse.Namespace) -> None:
-    project, machine, config_path = _common(args)
-    source, output, defaults = _sampling_args(project, args)
-    n_points = args.n_points or defaults.get("n_points", 1200)
-    elite_centers = args.elite_centers or defaults.get("elite_centers", 8)
-    center_selection = args.center_selection or defaults.get(
-        "center_selection", "top"
-    )
-    center_pool_multiplier = (
-        args.center_pool_multiplier
-        if args.center_pool_multiplier is not None
-        else defaults.get("center_pool_multiplier", 5)
-    )
-    radii = args.radii or defaults.get("radii", [0.005, 0.015, 0.04])
-    global_fraction = args.global_fraction if args.global_fraction is not None else defaults.get("global_fraction", 0.1)
-    seeds = args.seeds or defaults.get("seeds", [101])
-    design_seed = args.design_seed or defaults.get("design_seed")
-    is_slurm = _execution_backend(project, machine) == "slurm"
-    if is_slurm:
-        command = _python(
-            "slurm/submit_local_sampling.py", "--config", config_path,
-            "--source", source, "--output-dir", output,
-            "--n-points", n_points, "--elite-centers", elite_centers,
-            "--center-selection", center_selection,
-            "--center-pool-multiplier", center_pool_multiplier,
-            "--radii", *radii, "--global-fraction", global_fraction,
-            "--seeds", *seeds,
+def _add_context(parser: argparse.ArgumentParser, *, positional: bool = True) -> None:
+    if positional:
+        parser.add_argument(
+            "input",
+            nargs="?",
+            help="FFOpt command input (default: ffopt.in).",
         )
-    else:
-        command = _module(
-            "engine.local_sampling", "--config", config_path,
-            "--source", source, "--output-dir", output,
-            "--n-points", n_points, "--elite-centers", elite_centers,
-            "--center-selection", center_selection,
-            "--center-pool-multiplier", center_pool_multiplier,
-            "--radii", *radii, "--global-fraction", global_fraction,
-            "--seeds", *seeds,
-        )
-    if args.max_workers:
-        command.extend(["--max-workers", args.max_workers])
-    if design_seed:
-        command.extend(["--design-seed", design_seed])
-    if is_slurm and args.dependency:
-        command.extend(["--dependency", args.dependency])
-    if args.dry_run and is_slurm:
-        command.append("--dry-run")
-    elif args.dry_run:
-        _preview(command)
-        return
-    _run(command)
-
-
-def cmd_nn(args: argparse.Namespace) -> None:
-    project, machine, config_path = _common(args)
-    defaults = _stage_defaults(project, "nn")
-    preferred_bo = args.bo_dir or defaults.get("bo_dir")
-    bo_dir = resolve_path(preferred_bo) if preferred_bo else _latest_bo(project)
-    if bo_dir is None:
-        raise SystemExit("No BO result found. Pass --bo-dir explicitly.")
-    configured_core_files = list(
-        args.additional_core_file or defaults.get("additional_core_files", [])
-    )
-    core_files = [
-        resolve_path(item)
-        for item in configured_core_files
-    ]
-    sample_defaults = _stage_defaults(project, "sample")
-    if not core_files and sample_defaults:
-        sample_file = _latest_sample(project)
-        if sample_file is not None:
-            core_files.append(sample_file)
-            print(f"NN auto-selected sampling data: {sample_file}")
-        elif not args.allow_bo_only:
-            raise SystemExit(
-                "NN preflight failed: this project defines a sample stage, but no "
-                "local_results.csv was found. Run 'ffopt sample "
-                f"--project {project.path} --machine {machine}' first, or pass "
-                "--allow-bo-only to deliberately train from BO data alone."
-            )
-        else:
-            print("WARNING: --allow-bo-only selected; NN will not use independent "
-                  "sampling data.")
-    config = compose_config(project, machine)
-    _validate_nn_inputs(config, bo_dir, core_files)
-    output = resolve_path(args.output_dir) if args.output_dir else project.run_root / f"nn_{_timestamp()}"
-    is_slurm = _execution_backend(project, machine) == "slurm"
-    if is_slurm:
-        command = _python(
-            "slurm/submit.py", "nn", "--config", config_path,
-            "--bo-dir", bo_dir, "--output-dir", output,
-        )
-    else:
-        command = _module(
-            "engine.nn_surrogate", "--config", config_path,
-            "--bo-dir", bo_dir, "--output-dir", output,
-        )
-    for path in core_files:
-        command.extend(["--additional-core-file", path])
-    if args.no_validate:
-        command.append("--no-validate")
-    if args.save_traj:
-        command.append("--save-traj")
-    if args.reuse_models_from:
-        if is_slurm:
-            raise SystemExit("--reuse-models-from is currently a local NN option")
-        command.extend([
-            "--reuse-models-from", resolve_path(args.reuse_models_from)
-        ])
-    if args.skip_optimize:
-        command.append("--skip-optimize")
-    if args.dry_run and is_slurm:
-        command.append("--dry-run")
-    elif args.dry_run:
-        _preview(command)
-        return
-    _run(command)
-
-
-def cmd_al(args: argparse.Namespace) -> None:
-    project, machine, config_path = _common(args)
-    al_defaults = _stage_defaults(project, "al")
-    nn_defaults = _stage_defaults(project, "nn")
-    preferred_bo = args.bo_dir or al_defaults.get("bo_dir") or nn_defaults.get("bo_dir")
-    bo_dir = resolve_path(preferred_bo) if preferred_bo else _latest_bo(project)
-    nn_dir = resolve_path(args.nn_dir) if args.nn_dir else _latest_nn(project)
-    if bo_dir is None or nn_dir is None:
-        raise SystemExit("AL needs BO and NN results. Pass --bo-dir/--nn-dir explicitly.")
-    output = resolve_path(args.output_dir) if args.output_dir else project.run_root / f"al_{_timestamp()}"
-    is_slurm = _execution_backend(project, machine) == "slurm"
-    if is_slurm:
-        command = _python(
-            "slurm/submit.py", "al", "--config", config_path,
-            "--bo-dir", bo_dir, "--nn-dir", nn_dir, "--output-dir", output,
-        )
-    else:
-        command = _module(
-            "engine.active_learning", "--config", config_path,
-            "--bo-dir", bo_dir, "--nn-dir", nn_dir, "--output-dir", output,
-        )
-    if args.no_validate:
-        command.append("--no-validate")
-    for path in args.additional_core_file or []:
-        command.extend(["--additional-core-file", resolve_path(path)])
-    if args.save_traj:
-        command.append("--save-traj")
-    if args.resume:
-        command.append("--resume")
-    if args.dry_run and is_slurm:
-        command.append("--dry-run")
-    elif args.dry_run:
-        _preview(command)
-        return
-    _run(command)
-
-
-def cmd_audit(args: argparse.Namespace) -> None:
-    project, _, config_path = _common(args)
-    source = resolve_path(args.source) if args.source else _latest_bo(project, stable=False)
-    if source is None:
-        raise SystemExit("No BO result found. Pass --source explicitly.")
-    if source.is_dir():
-        source = source / "all_results.csv"
-    output = resolve_path(args.output_dir) if args.output_dir else project.run_root / f"audit_{_timestamp()}"
-    command = _module(
-        "engine.stability_audit", "--config", config_path, "--source", source,
-        "--output-dir", output, "--top-k", args.top_k, "--seeds", *args.seeds,
-    )
-    if args.max_workers:
-        command.extend(["--max-workers", args.max_workers])
-    _run(command)
-
-
-def cmd_validate(args: argparse.Namespace) -> None:
-    project, _, config_path = _common(args)
-    output = resolve_path(args.output_dir) if args.output_dir else project.run_root / f"validation_{_timestamp()}"
-    command = _module(
-        "engine.validate_final_parameters", "--config", config_path,
-        "--output-dir", output,
-    )
-    if args.initial:
-        command.append("--initial")
-    else:
-        parameters = resolve_path(args.parameters) if args.parameters else _newest([
-            f"runs/{project.name}/**/final_summary.json",
-            f"runs/{project.name}/**/final_parameters.json",
-            f"runs/{project.name}/legacy/**/final_summary.json",
-            f"runs/{project.name}/legacy/**/final_parameters.json",
-        ])
-        if parameters is None:
-            raise SystemExit(
-                "No final parameter JSON found. Pass --parameters or --initial."
-            )
-        command.extend(["--parameters", parameters])
-    if args.overwrite:
-        command.append("--overwrite")
-    if args.dry_run:
-        _preview(command)
-        return
-    _run(command)
-
-
-def cmd_finalize(args: argparse.Namespace) -> None:
-    project, _, config_path = _common(args)
-    audits = [resolve_path(path) for path in args.audit]
-    output = (
-        resolve_path(args.output_dir)
-        if args.output_dir
-        else project.run_root / f"final_{_timestamp()}"
-    )
-    command = _module(
-        "engine.finalize_al", "--config", config_path,
-        "--output-dir", output,
-    )
-    for audit in audits:
-        command.extend(["--audit", audit])
-    _run(command)
-
-
-def cmd_plot(args: argparse.Namespace) -> None:
-    project, _, config_path = _common(args)
-    bo_dir = resolve_path(args.bo_dir) if args.bo_dir else _latest_bo(project)
-    if bo_dir is None:
-        raise SystemExit("No BO result found. Pass --bo-dir explicitly.")
-    command = _module("engine.run", "--config", config_path, "--plot", bo_dir)
-    if args.nn_dir:
-        command.extend(["--nn-dir", resolve_path(args.nn_dir)])
-    _run(command)
-
-
-def _add_context(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--project",
         default=DEFAULT_PROJECT,
-        help="FFOpt command input (default: ffopt.in).",
+        help=argparse.SUPPRESS,
     )
-    parser.add_argument("--machine", default=None, help="Project or user execution profile; defaults to the project setting.")
+    parser.add_argument(
+        "--machine",
+        default=None,
+        help="Reusable machine profile; defaults to the project setting.",
+    )
 
 
 def cmd_machine(args: argparse.Namespace) -> None:
@@ -1055,6 +637,73 @@ def cmd_init(args: argparse.Namespace) -> None:
     print("  ffopt run ffopt.in --dry-run")
 
 
+def cmd_self_test(args: argparse.Namespace) -> None:
+    """Prepare and run the packaged BTAH scientific acceptance workflow."""
+    from .defaults import machine_defaults
+    from .machine import execute_machine_test
+    from .pipeline import PipelineRunner
+    from .self_test import prepare_self_test_project
+
+    destination = (
+        Path(args.workdir).expanduser()
+        if args.workdir
+        else Path.cwd() / "ffopt-self-test" / args.machine
+    )
+    try:
+        prepared = prepare_self_test_project(destination)
+    except FileExistsError as exc:
+        raise SystemExit(str(exc)) from exc
+    project = load_project(prepared.input_file)
+    profile = load_machine_profile(args.machine)
+    if profile is None:
+        try:
+            profile = machine_defaults(args.machine)
+        except ValueError as exc:
+            raise SystemExit(
+                f"Machine profile {args.machine!r} is not configured. Run "
+                "'ffopt machine configure' first."
+            ) from exc
+
+    print(f"Self-test project : {prepared.root}")
+    print(f"Machine profile   : {args.machine}")
+    print("Acceptance        : objective <= 0.03 and every fitted error <= 3%")
+    if args.prepare_only:
+        print(f"Prepared only. Review {prepared.input_file}")
+        return
+
+    if not args.skip_machine_test and not args.dry_run:
+        print("\n[preflight] Running the LAMMPS/MPI machine test...")
+        result = execute_machine_test(args.machine, profile, wait=True)
+        print(f"Machine test      : {result['status']}")
+        if result["status"] != "passed":
+            detail = str(
+                result.get("output") or result.get("submission_output") or ""
+            )
+            if detail:
+                print(detail[-4000:])
+            raise SystemExit(2)
+
+    config_path = write_generated_config(project, args.machine)
+    runner = PipelineRunner(
+        project=project,
+        machine=args.machine,
+        config_path=config_path,
+        run_id=args.run_id,
+        resume=True,
+        dry_run=args.dry_run,
+        watch=args.watch,
+        poll_seconds=args.poll_seconds,
+    )
+    outcome = runner.run()
+    if outcome == "waiting":
+        print(
+            "A SLURM stage is active. Repeat this exact self-test command to "
+            "continue, or use --watch."
+        )
+    elif outcome == "completed":
+        print(f"Scientific acceptance PASS: {runner.root}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ffopt",
@@ -1111,6 +760,20 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--force", action="store_true")
     init.set_defaults(function=cmd_init)
 
+    self_test = sub.add_parser(
+        "self-test",
+        help="Run the packaged BTAH machine and scientific acceptance test.",
+    )
+    self_test.add_argument("--machine", default="local")
+    self_test.add_argument("--workdir")
+    self_test.add_argument("--run-id", default="acceptance")
+    self_test.add_argument("--watch", action="store_true")
+    self_test.add_argument("--poll-seconds", type=int, default=60)
+    self_test.add_argument("--prepare-only", action="store_true")
+    self_test.add_argument("--skip-machine-test", action="store_true")
+    self_test.add_argument("--dry-run", action="store_true")
+    self_test.set_defaults(function=cmd_self_test)
+
     inspect = sub.add_parser("inspect", help="Inspect atom types and parameters in a LAMMPS data file.")
     inspect.add_argument("data_file")
     inspect.add_argument("--json", action="store_true", help="Emit a machine-readable summary.")
@@ -1142,13 +805,29 @@ def build_parser() -> argparse.ArgumentParser:
     machine.add_argument("--backend", choices=["local", "slurm"])
     machine.add_argument("--lammps", help="LAMMPS executable; auto-detected when omitted.")
     machine.add_argument("--mpi", help="MPI launcher; auto-detected when omitted.")
-    machine.add_argument("--workers", type=int)
-    machine.add_argument("--ranks", type=int)
-    machine.add_argument("--omp-threads", type=int)
-    machine.add_argument("--timeout", type=int, default=21600)
+    machine.add_argument(
+        "--workers",
+        type=int,
+        help="Concurrent, independent LAMMPS evaluations across the allocation.",
+    )
+    machine.add_argument(
+        "--ranks", "--mpi-ranks", dest="ranks", type=int,
+        help="MPI ranks used by each independent LAMMPS evaluation.",
+    )
+    machine.add_argument(
+        "--omp-threads", type=int,
+        help="OpenMP threads used by each MPI rank (normally 1).",
+    )
+    machine.add_argument(
+        "--timeout", type=int, default=21600,
+        help="Per-evaluation timeout in seconds (default: 21600).",
+    )
     machine.add_argument("--partition")
     machine.add_argument("--qos")
-    machine.add_argument("--cores", type=int)
+    machine.add_argument(
+        "--cores", "--total-cores", dest="cores", type=int,
+        help="Total CPU cores requested across all SLURM nodes.",
+    )
     machine.add_argument(
         "--nodes", type=int, default=1,
         help="SLURM nodes used by parallel LAMMPS stages (default: 1).",
@@ -1174,13 +853,11 @@ def build_parser() -> argparse.ArgumentParser:
     machine.add_argument("--dry-run", action="store_true")
     machine.add_argument("--no-wait", action="store_true")
     machine.set_defaults(function=cmd_machine)
-    for name, function in (
-        ("show", cmd_show),
-        ("status", cmd_status),
-        ("config", cmd_config),
-        ("doctor", cmd_doctor),
+    for name, function, help_text in (
+        ("status", cmd_status, "Show resumable pipeline state and artifacts."),
+        ("doctor", cmd_doctor, "Check Python, LAMMPS, MPI, data, and device setup."),
     ):
-        child = sub.add_parser(name)
+        child = sub.add_parser(name, help=help_text)
         _add_context(child)
         if name == "status":
             child.add_argument(
@@ -1212,7 +889,6 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser(
         "run", help="Run the restartable BO -> sampling -> NN -> AL pipeline."
     )
-    run.add_argument("input", nargs="?", help="Public .in input file (recommended).")
     _add_context(run)
     run.add_argument("--run-id", default="default")
     run.add_argument("--resume", action="store_true")
@@ -1233,101 +909,6 @@ def build_parser() -> argparse.ArgumentParser:
         "bo", "sample", "nn", "al", "audit", "finalize", "validate"
     ])
     run.set_defaults(function=cmd_run)
-
-    bo = sub.add_parser("bo", help="Run or submit Bayesian optimization.")
-    _add_context(bo)
-    bo.add_argument("--resume", action="store_true")
-    bo.add_argument("--output-dir")
-    bo.add_argument("--dry-run", action="store_true", help="Preview only; never run or submit work.")
-    bo.add_argument("--smoke", action="store_true", help="Local-only: run one real LAMMPS pipeline evaluation.")
-    bo.add_argument("--save-traj", action="store_true", help="Save trajectories during --smoke.")
-    bo.set_defaults(function=cmd_bo)
-
-    sample = sub.add_parser("sample", help="Generate multi-centre local/global LAMMPS samples.")
-    _add_context(sample)
-    sample.add_argument("--source")
-    sample.add_argument("--output-dir")
-    sample.add_argument("--n-points", type=int)
-    sample.add_argument("--elite-centers", type=int)
-    sample.add_argument("--center-selection", choices=["top", "diverse"])
-    sample.add_argument("--center-pool-multiplier", type=int)
-    sample.add_argument("--radii", type=float, nargs="+")
-    sample.add_argument("--global-fraction", type=float)
-    sample.add_argument("--seeds", type=int, nargs="+")
-    sample.add_argument("--max-workers", type=int)
-    sample.add_argument("--design-seed", type=int)
-    sample.add_argument("--dependency")
-    sample.add_argument("--dry-run", action="store_true", help="Preview only; never run or submit work.")
-    sample.set_defaults(function=cmd_sample)
-
-    for name, function in (("nn", cmd_nn), ("al", cmd_al)):
-        child = sub.add_parser(name)
-        _add_context(child)
-        child.add_argument("--bo-dir")
-        child.add_argument("--output-dir")
-        child.add_argument("--no-validate", action="store_true")
-        child.add_argument("--save-traj", action="store_true")
-        child.add_argument("--dry-run", action="store_true", help="Preview only; never run or submit work.")
-        if name == "nn":
-            child.add_argument("--additional-core-file", action="append")
-            child.add_argument(
-                "--reuse-models-from",
-                help="Reuse unchanged property models from forward_nn.pt.",
-            )
-            child.add_argument(
-                "--skip-optimize",
-                action="store_true",
-                help="Train and score the surrogate without candidate search.",
-            )
-            child.add_argument(
-                "--allow-bo-only", action="store_true",
-                help="Deliberately train without the project's sampling stage.",
-            )
-        else:
-            child.add_argument("--nn-dir")
-            child.add_argument("--additional-core-file", action="append")
-            child.add_argument(
-                "--resume", action="store_true",
-                help="Continue after the last fully recorded AL round.",
-            )
-        child.set_defaults(function=function)
-
-    audit = sub.add_parser("audit", help="Re-evaluate top candidates with independent seeds.")
-    _add_context(audit)
-    audit.add_argument("--source")
-    audit.add_argument("--output-dir")
-    audit.add_argument("--top-k", type=int, default=20)
-    audit.add_argument("--seeds", type=int, nargs="+", default=[101, 202, 303])
-    audit.add_argument("--max-workers", type=int)
-    audit.set_defaults(function=cmd_audit)
-
-    finalize = sub.add_parser(
-        "finalize", help="Select the best robust audit result and export parameters."
-    )
-    _add_context(finalize)
-    finalize.add_argument("--audit", action="append", required=True)
-    finalize.add_argument("--output-dir")
-    finalize.set_defaults(function=cmd_finalize)
-
-    validate = sub.add_parser("validate", help="Run final trajectory-producing LAMMPS validation.")
-    _add_context(validate)
-    validation_source = validate.add_mutually_exclusive_group()
-    validation_source.add_argument("--parameters")
-    validation_source.add_argument(
-        "--initial",
-        action="store_true",
-        help="Use initial type values from ffopt.in.",
-    )
-    validate.add_argument("--output-dir")
-    validate.add_argument("--overwrite", action="store_true")
-    validate.add_argument("--dry-run", action="store_true")
-    validate.set_defaults(function=cmd_validate)
-
-    plot = sub.add_parser("plot", help="Generate BO/NN figures.")
-    _add_context(plot)
-    plot.add_argument("--bo-dir")
-    plot.add_argument("--nn-dir")
-    plot.set_defaults(function=cmd_plot)
     return parser
 
 

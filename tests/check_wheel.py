@@ -13,7 +13,17 @@ required_suffixes = (
     "share/ffopt/lammps/inputs/adsorption/in.complex",
     "share/ffopt/lammps/inputs/adsorption/in.slab",
     "share/ffopt/lammps/inputs/adsorption/in.mol",
+    "share/ffopt/examples/btah/acceptance.in",
+    "share/ffopt/data/bulk/BTAH_822_bulk.data",
+    "share/ffopt/data/molecule/BTAH_822_single.data",
 )
+forbidden_members = {
+    "slurm/__init__.py",
+    "slurm/submit.py",
+    "slurm/submit_local_sampling.py",
+    "utils/replicate_learnability.py",
+    "utils/sensitivity.py",
+}
 with zipfile.ZipFile(wheel) as archive:
     names = archive.namelist()
 missing = [
@@ -22,4 +32,7 @@ missing = [
 ]
 if missing:
     raise SystemExit(f"Wheel is missing FFOpt resources: {missing}")
+unexpected = sorted(forbidden_members.intersection(names))
+if unexpected:
+    raise SystemExit(f"Wheel contains removed legacy modules: {unexpected}")
 print(f"Wheel resources verified: {wheel}")

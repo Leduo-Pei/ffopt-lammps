@@ -317,8 +317,8 @@ def cmd_dry_run(config: dict,
             print(f"    {k:<28} = {v:.8f}")
 
         if missing_keys:
-            print(f"\n  WARNING: The following params were not found in the "
-                  f"loaded file and will use midpoint defaults:")
+            print("\n  WARNING: The following params were not found in the "
+                  "loaded file and will use midpoint defaults:")
             for k in missing_keys:
                 lo = next(p[1] for p in param_space if p[0] == k)
                 hi = next(p[2] for p in param_space if p[0] == k)
@@ -352,7 +352,7 @@ def cmd_dry_run(config: dict,
 
     print(f"  Work dir  : {work_dir}")
     print(f"  save_traj : {save_traj}")
-    print(f"  Running LAMMPS...")
+    print("  Running LAMMPS...")
     print()
 
     results = runner.evaluate_batch([ref], work_dir, save_traj=save_traj)

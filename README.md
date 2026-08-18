@@ -1,199 +1,188 @@
 # FFOpt-LAMMPS
 
-FFOpt-LAMMPS fits molecular force-field parameters to experimental properties
-with LAMMPS, Bayesian optimization, stability-aware sampling, ANN surrogates,
-active learning, and final trajectory-producing validation.
+[![tests](https://github.com/Leduo-Pei/ffopt-lammps/actions/workflows/ci.yml/badge.svg)](https://github.com/Leduo-Pei/ffopt-lammps/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/Leduo-Pei/ffopt-lammps?include_prereleases)](https://github.com/Leduo-Pei/ffopt-lammps/releases)
+[![Python](https://img.shields.io/badge/Python-3.10--3.12-3776AB)](https://www.python.org/)
+[![License](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
 
-The public interface is one command file. A calculation project contains only
-the input and its LAMMPS data files:
+FFOpt-LAMMPS is a restartable workflow for fitting molecular force-field
+parameters to experimental properties with LAMMPS, Bayesian optimization,
+focused sampling, ANN surrogate models, active learning, and final physical
+validation.
+
+> **Alpha scope:** the first public release supports molecular crystals,
+> isolated molecules, and molecular adsorption models. BTAH is the packaged
+> regression and machine-acceptance system. Elemental, alloy, reactive, and
+> polymorph workflows are not yet claimed as supported.
+
+## One input, one run
+
+```mermaid
+flowchart LR
+    I["ffopt.in + LAMMPS data"] --> C["check"]
+    C --> B["Bayesian optimization"]
+    B --> S["focused sampling"]
+    S --> N["ANN surrogate"]
+    N --> A["active learning"]
+    A --> V["LAMMPS validation"]
+    V --> R["parameters + properties + trajectories"]
+```
+
+A user project is deliberately small:
 
 ```text
 my_project/
-|-- ffopt.in
-|-- data/
-`-- runs/                 # generated automatically
+|-- ffopt.in            # the only scientific control file
+|-- data/               # user-supplied LAMMPS data files
+`-- runs/               # generated automatically
 ```
+
+Machine paths, MPI, CPUs, GPUs, SLURM partitions, memory, and wall time are
+stored once in `~/.config/ffopt/machines.toml`. They never need to be copied
+into a scientific project.
 
 ## Install
 
-Install the current tagged alpha directly from GitHub:
+Create an isolated Python 3.11 environment, install a LAMMPS executable, then
+install the current prerelease:
 
 ```bash
 python -m pip install \
-  "ffopt-lammps[full] @ git+https://github.com/Leduo-Pei/ffopt-lammps.git@v0.2.0a3"
+  "ffopt-lammps[full] @ git+https://github.com/Leduo-Pei/ffopt-lammps.git@v0.3.0a1"
 ```
 
-For development, clone the repository and install it in editable mode:
+For development:
 
 ```bash
 git clone https://github.com/Leduo-Pei/ffopt-lammps.git
 cd ffopt-lammps
-python -m pip install -e ".[full]"
+python -m pip install -e ".[full,dev]"
+python -m pytest -q
 ```
 
-LAMMPS is an external dependency. Install a CUDA build of PyTorch separately
-when GPU ANN/AL training is required.
+LAMMPS is an external dependency. A CPU-only PyTorch installation is valid;
+`torch.cuda.is_available() == False` is not an error on a CPU machine profile.
 
-Once installed, `ffopt` can be called from any project directory. The program
-source and the user's calculation project do not need to be the same folder.
-
-## First molecular release
-
-The current alpha targets molecular force fields:
-
-- isolated molecules evaluated as part of sublimation or adsorption;
-- molecular crystals fitted to bulk and sublimation properties;
-- molecular adsorption fitted jointly with, or validated after, crystal fitting.
-
-BTAH is the regression system and exercises a difficult triclinic molecular
-crystal plus adsorption. Elemental solids, alloys, multicomponent crystals,
-polymorph searches, reactive potentials, and arbitrary LAMMPS styles are not
-yet claimed as supported. They can be added through the evaluator registry in
-later releases without changing the public workflow.
-
-## Configure the machine once
-
-Machine settings do not belong in the scientific input:
+## Configure and verify a machine
 
 ```bash
-ffopt machine probe
-ffopt machine configure --auto --name local --backend local \
-  --lammps /path/to/lmp --force
-ffopt machine show --name local
-ffopt machine test --name local
+ffopt machine probe --partition CPU
+ffopt machine configure --auto --name cluster-1node \
+  --backend slurm --partition CPU --nodes 1 --force
+ffopt machine test --name cluster-1node
 ```
 
-Profiles are stored in `~/.config/ffopt/machines.toml`. The same `ffopt.in`
-can therefore run locally or with a named SLURM profile.
-
-For SLURM, `probe` reads `sinfo` and `--auto` writes a conservative starting
-profile. It cannot know a site's QOS, account, node-sharing, or memory policy;
-review the generated profile before production.
-
-## Check the data first
-
-FFOpt accepts ordinary text LAMMPS data files; they do not need to come from a
-particular builder. MSI2LMP output is supported when it satisfies the molecular
-data contract. Type labels must appear after `#` in `Masses` or `Pair Coeffs`,
-because labels provide stable cross-file mapping even when adsorption files use
-different numeric type IDs.
+Before fitting a new material, run the packaged scientific acceptance test:
 
 ```bash
-ffopt data check \
-  --bulk crystal.data --single molecule.data \
-  --complex complex.data --slab slab.data --molecule adsorbate.data
+ffopt self-test --machine cluster-1node --watch
 ```
 
-Structural incompatibilities are errors. Initial epsilon/sigma/charge
-differences between compatible files are warnings because `ffopt.in` overrides
-them during evaluation. Add `--strict` in CI when warnings should also fail.
+The test executes the complete BTAH workflow and fails unless final LAMMPS
+validation satisfies the packaged objective and property-error thresholds.
+Use the same input with one- and two-node profiles to compare performance; BO
+candidate batch size is independent of worker count, so the scientific budget
+does not change with the machine.
 
 ## Create a project
+
+Validate the data contract first:
+
+```bash
+ffopt data check --bulk crystal.data --single molecule.data
+```
+
+Then generate a reviewable starting input:
 
 ```bash
 ffopt init my_crystal \
   --bulk-data crystal.data \
   --single-data molecule.data \
   --cells 2 2 2 \
-  --mode full \
+  --mode charge_only \
   --target a=10.1,1.0,A \
   --target density=1.25,1.0,g/cm3 \
   --target sublimation=80.0,0.3,kJ/mol
 ```
 
-For a combined crystal and adsorption project, add `--complex-data`,
-`--slab-data`, and `--molecule-data`. `--project-type auto` is the default and
-infers the template from the files. Omitting all targets creates a
-validation-only input instead of inventing experimental values.
+`ffopt init` reads type labels, LJ values, and charges from the data file and
+writes them explicitly. It does not assume that the inferred values or ranges
+are chemically correct; review every `type`, `range`, `fix`, and `target` line.
 
-`ffopt init` writes every type, epsilon, sigma, charge, range, target, and
-workflow stage explicitly into `ffopt.in`. It does not create a tree of YAML
-recipes. The inferred values are a draft and must be reviewed by the user.
+## Check, run, resume
 
 ```bash
 cd my_crystal
 ffopt check ffopt.in
 ffopt explain ffopt.in
-ffopt run ffopt.in --dry-run
-ffopt run ffopt.in
-ffopt results ffopt.in
-ffopt logs ffopt.in --stage bo --lines 100
+ffopt doctor ffopt.in --machine cluster-1node
+ffopt run ffopt.in --machine cluster-1node --dry-run
+ffopt run ffopt.in --machine cluster-1node
 ```
 
-Running the same command again automatically resumes the latest compatible
-pipeline. If the scientific input changed, FFOpt refuses to mix checkpoints;
-start an independent run with `ffopt run ffopt.in --new`.
+Repeat the last command after logout, timeout, or node failure. FFOpt verifies
+stage artifacts and resumes the first incomplete stage. To stop after BO while
+keeping the full workflow in the input, use `--until bo`; later continue with
+`--from-stage sample`. Use `--new` only for an independent campaign.
 
-For a direct calculation at the user-entered type values, set
-`workflow validate`. No BO result is required; all requested properties are
-reported and trajectories are saved under the validation run directory.
-The equivalent one-off command is `ffopt validate --project ffopt.in --initial`.
+```bash
+ffopt status ffopt.in --machine cluster-1node
+ffopt logs ffopt.in --stage bo --lines 100
+ffopt results ffopt.in
+```
 
-## Parameters
+## Input at a glance
 
 ```text
+ffopt 1
+project example
+workflow bo sample nn al validate
+
 parameters
     range epsilon factor 0.50 2.00
     range sigma   factor 0.85 1.15
     range charge  delta  0.30
     charge_limit 1.0
-    neutrality derive bhN1
+    neutrality derive N1
     mixing epsilon geometric
     mixing sigma geometric
-
-    # Add this one line for charge-only optimization.
     fix epsilon sigma
-
-    # id label epsilon sigma charge
-    type 1 bhN1 0.2000 3.2963 -0.609
-    type 2 bhHn 0.0474 0.3981  0.430
+    type 1 N1 0.20 3.30 -0.50
+    type 2 H1 0.03 2.42  0.50
 end
 ```
 
-No `fix` command means all ranged epsilon, sigma, and charge values are free.
-Per-type ranges and fixes are also supported.
+No `fix` line optimizes epsilon, sigma, and charge. `fix epsilon sigma`
+produces charge-only optimization. The derived charge is removed from the
+independent search space and recovered from exact total neutrality.
 
-LAMMPS always mixes epsilon geometrically in this backend. Sigma may be
-geometric or arithmetic, selected independently as shown above.
+## Documentation
 
-## Properties and workflow
+- [Complete Chinese user manual](docs/zh_CN/USER_GUIDE.md)
+- [Five-minute tutorial](docs/tutorials/quickstart.md)
+- [FFOpt input reference](docs/reference/input-file.md)
+- [Machine profile reference](docs/reference/machine-profiles.md)
+- [Output and naming reference](docs/reference/outputs-and-naming.md)
+- [Workflow and accuracy model](docs/explanation/workflow-and-accuracy.md)
+- [BTAH examples and acceptance benchmark](examples/btah/README.md)
+- [Developer architecture](docs/explanation/architecture.md)
 
-A property with at least one `target` participates in BO, sampling, ANN, AL,
-and final validation. A property without a target is skipped during fitting and
-computed only by the `validate` stage. Final validation saves trajectories by
-default; optimization batches do not.
+## Scientific definition
+
+The bundled bulk protocol is fixed-box minimization followed by flexible-cell
+NPT equilibration and production. The current sublimation observable is a
+potential-energy estimate,
 
 ```text
-workflow bo sample nn al validate
-
-property bulk
-    data data/crystal.data
-    cells_in_data 2 2 2
-    target density 1.25 g/cm3 weight 1.0
-end
-
-property adsorption
-    data complex data/complex.data
-    data slab data/slab.data
-    data molecule data/molecule.data
-    protocol minimize
-end
+E_sub,estimate = E_single,min - <PE_bulk,NPT> / N_molecules
 ```
 
-The bulk evaluator always follows the validated standard sequence: 0 K
-minimization, then finite-temperature NPT equilibration and production. The
-current sublimation estimator uses the bulk NPT mean potential energy and a
-minimized isolated-molecule potential energy.
-
-See [the BTAH charge-only example](examples/btah/charge_only.in),
-[the full 41-dimensional example](examples/btah/full.in), and
-[the input reference](docs/INPUT_FILE.md). For a clean installation on a new
-CPU SLURM cluster, follow the [beginner server guide](docs/NEW_SERVER_GUIDE.md)
-and run the [small full-pipeline BTAH test](examples/btah/cluster_smoke.in)
-before submitting a production fit.
+fitted to a user-supplied experimental sublimation-enthalpy target. It does
+not include translational, rotational, vibrational, or standard-state thermal
+corrections and is reported with that provenance in validation outputs.
 
 ## Development status
 
-This is an alpha research package. BTAH remains the numerical regression
-system. Bulk, sublimation, adsorption, and surface evaluators use a plugin
-registry; see [property plugins](docs/PROPERTY_PLUGINS.md).
+FFOpt-LAMMPS follows semantic prerelease versions while its public input and
+supported-material contract are still evolving. See [CHANGELOG.md](CHANGELOG.md),
+[CONTRIBUTING.md](CONTRIBUTING.md), and [LICENSE](LICENSE).

@@ -103,7 +103,7 @@ run ID.
 
 ```bash
 ffopt run ffopt.in --machine PROFILE --run-id production
-ffopt status --project ffopt.in --machine PROFILE --run-id production
+ffopt status ffopt.in --machine PROFILE --run-id production
 ffopt results ffopt.in --run-id production
 ffopt logs ffopt.in --run-id production --stage sample --lines 100
 ```
