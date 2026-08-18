@@ -38,7 +38,7 @@ Install the tagged release:
 
 ```bash
 cd /storage/home/liguoling/peizy/BTAH-workflow
-git clone --branch v0.3.0a1 --depth 1 \
+git clone --branch v0.3.0a2 --depth 1 \
   https://github.com/Leduo-Pei/ffopt-lammps.git
 
 conda create -y -n ffopt -c conda-forge --solver libmamba \
@@ -46,7 +46,7 @@ conda create -y -n ffopt -c conda-forge --solver libmamba \
 conda activate ffopt
 python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 python -m pip install \
-  "ffopt-lammps[full] @ git+https://github.com/Leduo-Pei/ffopt-lammps.git@v0.3.0a1"
+  "ffopt-lammps[full] @ git+https://github.com/Leduo-Pei/ffopt-lammps.git@v0.3.0a2"
 ```
 
 Verify paths and versions:
@@ -60,7 +60,7 @@ python -c "import ffopt, torch; print(ffopt.__version__); print(torch.__version_
 lmp -help | head
 ```
 
-Expected: executable paths contain `/envs/ffopt/`, FFOpt reports `0.3.0a1`,
+Expected: executable paths contain `/envs/ffopt/`, FFOpt reports `0.3.0a2`,
 and CPU PyTorch reports CUDA `False`.
 
 ## Configure one- and two-node profiles

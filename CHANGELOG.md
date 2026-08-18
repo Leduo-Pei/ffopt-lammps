@@ -3,6 +3,13 @@
 All notable changes are recorded here. The format follows Keep a Changelog;
 versions use Semantic Versioning while the public API remains in alpha.
 
+## 0.3.0a2 - 2026-08-18
+
+### Changed
+
+- Move XGBoost to the explicit `xgboost`/`all-models` extras so the default
+  ANN/BO installation on CPU clusters does not download CUDA/NCCL packages.
+
 ## 0.3.0a1 - 2026-08-18
 
 ### Added

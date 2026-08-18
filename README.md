@@ -48,7 +48,7 @@ install the current prerelease:
 
 ```bash
 python -m pip install \
-  "ffopt-lammps[full] @ git+https://github.com/Leduo-Pei/ffopt-lammps.git@v0.3.0a1"
+  "ffopt-lammps[full] @ git+https://github.com/Leduo-Pei/ffopt-lammps.git@v0.3.0a2"
 ```
 
 For development:

@@ -51,7 +51,7 @@ conda activate ffopt
 conda install -c conda-forge lammps openmpi -y
 
 python -m pip install \
-  "ffopt-lammps[full] @ git+https://github.com/Leduo-Pei/ffopt-lammps.git@v0.3.0a1"
+  "ffopt-lammps[full] @ git+https://github.com/Leduo-Pei/ffopt-lammps.git@v0.3.0a2"
 ```
 
 检查安装来源：
@@ -76,7 +76,7 @@ CPU 环境中 `torch.cuda.is_available()` 显示 `False` 是正常现象，不�
 ```powershell
 conda create -n ffopt python=3.11 -y
 conda activate ffopt
-python -m pip install "ffopt-lammps[full] @ git+https://github.com/Leduo-Pei/ffopt-lammps.git@v0.3.0a1"
+python -m pip install "ffopt-lammps[full] @ git+https://github.com/Leduo-Pei/ffopt-lammps.git@v0.3.0a2"
 ```
 
 LAMMPS 和 MPI 可以由用户单独安装，随后在机器配置中填写绝对路径。路径含空格

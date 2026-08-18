@@ -12,7 +12,7 @@ conda create -n ffopt python=3.11 -y
 conda activate ffopt
 conda install -c conda-forge lammps openmpi -y
 python -m pip install \
-  "ffopt-lammps[full] @ git+https://github.com/Leduo-Pei/ffopt-lammps.git@v0.3.0a1"
+  "ffopt-lammps[full] @ git+https://github.com/Leduo-Pei/ffopt-lammps.git@v0.3.0a2"
 ```
 
 Confirm that all three executables come from the intended environment:

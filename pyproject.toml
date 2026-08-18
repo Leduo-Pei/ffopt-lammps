@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ffopt-lammps"
-version = "0.3.0a1"
+version = "0.3.0a2"
 description = "Restartable force-field parameter optimization with LAMMPS, Bayesian optimization, surrogate models, and active learning."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -35,8 +35,14 @@ dependencies = [
 
 [project.optional-dependencies]
 bo = ["torch>=2.2", "botorch>=0.11", "gpytorch>=1.11"]
-nn = ["torch>=2.2", "xgboost>=2.0"]
+nn = ["torch>=2.2"]
+xgboost = ["xgboost>=2.0"]
 full = [
+  "torch>=2.2",
+  "botorch>=0.11",
+  "gpytorch>=1.11",
+]
+all-models = [
   "torch>=2.2",
   "botorch>=0.11",
   "gpytorch>=1.11",

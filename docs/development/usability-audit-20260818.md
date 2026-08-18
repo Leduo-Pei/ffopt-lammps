@@ -46,5 +46,5 @@ software:
 ## Release decision
 
 These are user-visible additions and behavior corrections during initial
-development, so the next prerelease is `0.3.0a1`. The input schema remains
+development, so the current prerelease line is `0.3.0a2`. The input schema remains
 `ffopt 1`; removed keywords were never documented as supported public input.

@@ -339,8 +339,9 @@ per property; a single high aggregate score must not hide a poorly learned
 property.
 
 The backend also accepts `gp`, `random_forest`, and `xgboost` for controlled
-method comparisons. ANN remains the generated default and packaged acceptance
-path.
+method comparisons. XGBoost is intentionally optional; install it with
+`python -m pip install "ffopt-lammps[xgboost]"` before selecting that method.
+ANN remains the generated default and packaged acceptance path.
 
 ## Active-learning block
 
