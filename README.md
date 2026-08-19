@@ -25,18 +25,15 @@ validation.
 
 ## One input, one run
 
-```mermaid
-flowchart LR
-    I["ffopt.in + LAMMPS data"] --> C["check"]
-    C --> B["Bayesian optimization"]
-    B --> S["focused sampling"]
-    S --> N["ANN surrogate"]
-    N --> A["active learning"]
-    A --> U["multi-seed audit"]
-    U --> F["robust final selection"]
-    F --> V["LAMMPS validation"]
-    V --> R["parameters + properties + trajectories"]
-```
+<p align="center">
+  <a href="docs/assets/ffopt-workflow.svg">
+    <img src="docs/assets/ffopt-workflow.svg"
+         alt="FFOpt-LAMMPS workflow from one input through Bayesian optimization, focused sampling, ANN surrogate learning, active learning, robust selection, and physical validation"
+         width="100%">
+  </a>
+</p>
+
+<p align="center"><sub><a href="docs/assets/ffopt-workflow.vsdx">Editable Visio source</a></sub></p>
 
 A user project is deliberately small:
 
