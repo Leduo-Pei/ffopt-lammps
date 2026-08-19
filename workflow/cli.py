@@ -23,6 +23,7 @@ from .machine import (
     build_machine_profile,
     load_machine_profile,
     machine_path,
+    resolve_executable,
     save_machine_profile,
 )
 from .project import (
@@ -370,30 +371,27 @@ def cmd_doctor(args: argparse.Namespace) -> None:
 
     backend = _execution_backend(project, machine)
 
-    def executable_location(value: object) -> str | None:
-        text = str(value)
-        path = Path(text).expanduser()
-        if path.exists():
-            return str(path.resolve())
-        return shutil.which(text)
-
     if backend == "local":
-        executable = executable_location(config["lammps"]["executable"])
+        executable = resolve_executable(config["lammps"]["executable"])
         checks.append((
             "LAMMPS executable", executable is not None,
             executable or str(config["lammps"]["executable"]),
         ))
         if bool(config.get("parallel", {}).get("use_mpi", False)):
             mpi_value = config["lammps"].get("mpiexec", "mpiexec")
-            mpiexec = executable_location(mpi_value)
+            mpiexec = resolve_executable(mpi_value)
             checks.append(("MPI launcher", mpiexec is not None, mpiexec or str(mpi_value)))
     else:
         sbatch = shutil.which("sbatch")
         checks.append(("SLURM sbatch", sbatch is not None, sbatch or "not on this host"))
-        executable = Path(config["lammps"]["executable"])
-        checks.append(("LAMMPS executable", executable.exists(), str(executable)))
+        lammps_value = config["lammps"]["executable"]
+        executable = resolve_executable(lammps_value)
+        checks.append((
+            "LAMMPS executable", executable is not None,
+            executable or str(lammps_value),
+        ))
         mpi_name = str(config["lammps"].get("mpiexec", "mpiexec"))
-        mpi_launcher = shutil.which(mpi_name)
+        mpi_launcher = resolve_executable(mpi_name)
         checks.append(("MPI launcher", mpi_launcher is not None, mpi_launcher or mpi_name))
         step_name = str(config.get("parallel", {}).get("scheduler_launcher", "srun"))
         step_launcher = shutil.which(step_name)
@@ -437,6 +435,53 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         visit_files(config["sublimation"], "sublimation")
     if property_requested("adsorption"):
         visit_files(config["adsorption"], "adsorption")
+
+    from .data_contract import check_data_files
+
+    data_roles: dict[str, str] = {}
+    manifest_data = config.get("manifest", {}).get("data_files", {})
+    if property_requested("bulk") or property_requested("sublimation"):
+        bulk_data = manifest_data.get("bulk")
+        if bulk_data:
+            data_roles["bulk"] = str(bulk_data)
+    if property_requested("sublimation"):
+        single_data = (
+            config.get("sublimation", {}).get("data_files", {}).get("single")
+        )
+        if single_data:
+            data_roles["single"] = str(single_data)
+    if property_requested("adsorption"):
+        adsorption_data = config.get("adsorption", {}).get("data_files", {})
+        for source, role in (
+            ("complex", "complex"),
+            ("slab", "slab"),
+            ("mol", "molecule"),
+        ):
+            value = adsorption_data.get(source)
+            if value:
+                data_roles[role] = str(value)
+    if data_roles:
+        try:
+            data_report = check_data_files(**data_roles)
+        except (FileNotFoundError, OSError, TypeError, ValueError) as exc:
+            checks.append(("LAMMPS data contract", False, str(exc)))
+        else:
+            checks.append((
+                "LAMMPS data contract",
+                data_report.ok,
+                f"{len(data_report.files)} files; errors={len(data_report.errors)} "
+                f"warnings={len(data_report.warnings)}",
+            ))
+            grouped_findings: dict[tuple[str, str, str], set[str]] = {}
+            for finding in data_report.findings:
+                key = (finding.severity, finding.code, finding.message)
+                grouped_findings.setdefault(key, set()).update(finding.roles)
+            for (severity, code, message), roles in grouped_findings.items():
+                role_text = f"[{', '.join(sorted(roles))}] " if roles else ""
+                if severity == "ERROR":
+                    checks.append((f"Data: {code}", False, role_text + message))
+                else:
+                    warnings.append((f"Data: {code}", role_text + message))
 
     needs_torch = bool(stages & {"bo", "nn", "al"})
     if backend == "local" and needs_torch:
@@ -988,6 +1033,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="version",
         version=f"%(prog)s {__version__}",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show a full Python traceback for troubleshooting.",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     init = sub.add_parser(
         "init", help="Create a portable molecular project from a LAMMPS data file."
@@ -1325,3 +1375,22 @@ def main() -> None:
         except (AttributeError, OSError, ValueError):
             pass
         raise SystemExit(0) from None
+    except KeyboardInterrupt:
+        print(
+            "\nFFOpt interrupted. Repeat the same run command to resume from saved state.",
+            file=sys.stderr,
+        )
+        raise SystemExit(130) from None
+    except (
+        FileNotFoundError,
+        FileExistsError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        if getattr(args, "debug", False) or os.environ.get("FFOPT_DEBUG") == "1":
+            raise
+        print(f"FFOpt error: {exc}", file=sys.stderr)
+        print("Rerun with 'ffopt --debug ...' to show the full traceback.", file=sys.stderr)
+        raise SystemExit(2) from None

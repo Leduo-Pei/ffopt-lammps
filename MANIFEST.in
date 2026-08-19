@@ -5,6 +5,7 @@ include SECURITY.md
 include engine/README.md
 include examples/btah/README.md
 include docs/README.md
+recursive-include docs/assets *.svg *.vsdx
 recursive-include docs/tutorials *.md
 recursive-include docs/how-to *.md
 recursive-include docs/reference *.md

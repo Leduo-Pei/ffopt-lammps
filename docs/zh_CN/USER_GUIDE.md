@@ -705,6 +705,11 @@ ffopt run ffopt.in --machine cluster-1node --dry-run
 4. data 路径、LAMMPS、MPI、PyTorch 和 SLURM 全部为 OK。
 5. dry-run 中阶段顺序与 `workflow` 一致。
 
+`doctor` 不只检查路径是否存在，还会把启用性质涉及的 bulk、single、complex、slab
+和 molecule 文件作为一个整体检查 atom style、type 标签、质量、LJ 初值和电荷契约。
+普通输入错误默认只显示原因；排查软件内部问题时可改用
+`ffopt --debug doctor ...` 或 `ffopt --debug run ...` 查看完整 traceback。
+
 ## 8. 正式运行和自动续算
 
 本地：
@@ -729,6 +734,9 @@ ffopt run ffopt.in --machine cluster-1node --watch
 从第一个不完整阶段恢复。不要使用 `--new` 续算；`--new` 明确表示新建独立计算。
 同一个 run 已经产生阶段记录后，必须使用同一 FFOpt 版本续算；软件检测到版本变化
 会拒绝混用结果。此时应恢复原版本，或确认要重新开始后使用 `--new`。
+当 `squeue` 或 `sacct` 暂时超时、不可用或尚未收录新 job ID 时，FFOpt 会继续保留
+waiting 状态，不会据此重复提交昂贵计算；若此时全部阶段产物已经验证完整，则直接
+完成该阶段。只有明确的终止状态才进入失败续算流程。
 
 暂时只跑到 BO：
 

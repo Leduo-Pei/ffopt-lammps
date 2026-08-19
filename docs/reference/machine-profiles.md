@@ -77,3 +77,7 @@ env_setup = [
 
 Prefer absolute executable paths. Do not store passwords, tokens, or SSH keys
 in `machines.toml`.
+
+`ffopt machine configure` updates this file atomically and preserves all other
+named profiles. If the file is malformed, FFOpt stops with its exact path and
+asks you to repair or move it instead of silently replacing the configuration.

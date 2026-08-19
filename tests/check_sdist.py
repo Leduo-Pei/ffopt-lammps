@@ -20,6 +20,8 @@ required = {
     "CITATION.cff",
     "CONTRIBUTING.md",
     "SECURITY.md",
+    "docs/assets/ffopt-workflow.svg",
+    "docs/assets/ffopt-workflow.vsdx",
     "docs/zh_CN/USER_GUIDE.md",
     "docs/reference/input-file.md",
     "examples/btah/README.md",

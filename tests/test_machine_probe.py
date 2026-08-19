@@ -1,3 +1,8 @@
+import os
+import subprocess
+import sys
+from types import SimpleNamespace
+
 import pytest
 
 from workflow.cli import build_parser
@@ -5,7 +10,10 @@ from workflow.machine import (
     build_machine_profile,
     execute_machine_test,
     format_machine_probe,
+    load_machine_profile,
     prepare_machine_test,
+    probe_machine_environment,
+    save_machine_profile,
 )
 
 
@@ -49,6 +57,42 @@ def test_format_machine_probe_with_slurm_recommendation():
     assert "workers=12" in text
 
 
+def test_slurm_probe_timeout_becomes_a_warning(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False)),
+    )
+    monkeypatch.setattr("workflow.machine._detect_lammps", lambda: "/env/bin/lmp")
+    monkeypatch.setattr("workflow.machine._detect_mpi", lambda: "/env/bin/mpirun")
+    monkeypatch.setattr(
+        "workflow.machine.resolve_executable", lambda value: str(value)
+    )
+    monkeypatch.setattr("workflow.machine._version_line", lambda *_args: "test version")
+    commands = {
+        "sbatch": "/usr/bin/sbatch",
+        "sinfo": "/usr/bin/sinfo",
+        "srun": "/usr/bin/srun",
+    }
+    monkeypatch.setattr(
+        "workflow.machine.shutil.which", lambda value: commands.get(value)
+    )
+    original_run = subprocess.run
+
+    def timeout_sinfo(command, **kwargs):
+        if command[0] == "/usr/bin/sinfo":
+            raise subprocess.TimeoutExpired(command, 10)
+        return original_run(command, **kwargs)
+
+    monkeypatch.setattr("workflow.machine.subprocess.run", timeout_sinfo)
+
+    report = probe_machine_environment()
+    assert report["backend"] == "slurm"
+    assert report["slurm"]["partitions"] == []
+    assert "timed out" in report["slurm"]["probe_error"]
+    assert "SLURM probe warning" in format_machine_probe(report)
+
+
 def test_prepare_slurm_machine_test_uses_profile_resources(tmp_path, monkeypatch):
     monkeypatch.setenv("FFOPT_CONFIG_DIR", str(tmp_path / "config"))
     profile = build_machine_profile(
@@ -80,6 +124,54 @@ def test_missing_local_lammps_is_reported_as_failed(tmp_path, monkeypatch):
     result = execute_machine_test("missing", profile)
     assert result["status"] == "failed"
     assert result["output"]
+
+
+def test_missing_sbatch_is_reported_as_failed(tmp_path, monkeypatch):
+    monkeypatch.setenv("FFOPT_CONFIG_DIR", str(tmp_path / "config"))
+    profile = build_machine_profile(
+        name="cluster", backend="slurm", workers=1, ranks=1, cores=1,
+    )
+    monkeypatch.setattr(
+        "workflow.machine.subprocess.run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(FileNotFoundError("sbatch")),
+    )
+    result = execute_machine_test("cluster", profile)
+    assert result["status"] == "failed"
+    assert "sbatch" in result["output"]
+
+
+def test_machine_profile_write_is_atomic(tmp_path, monkeypatch):
+    monkeypatch.setenv("FFOPT_CONFIG_DIR", str(tmp_path / "config"))
+    original = build_machine_profile(
+        name="workstation", backend="local", workers=2,
+    )
+    path = save_machine_profile("workstation", original)
+    original_bytes = path.read_bytes()
+    updated = build_machine_profile(
+        name="workstation", backend="local", workers=8,
+    )
+
+    monkeypatch.setattr(
+        os,
+        "replace",
+        lambda *_args: (_ for _ in ()).throw(OSError("simulated interruption")),
+    )
+    with pytest.raises(OSError, match="simulated interruption"):
+        save_machine_profile("workstation", updated, overwrite=True)
+
+    assert path.read_bytes() == original_bytes
+    assert load_machine_profile("workstation")["parallel"]["max_workers"] == 2
+    assert not list(path.parent.glob(".machines.toml.*.tmp"))
+
+
+def test_malformed_machine_toml_has_recovery_hint(tmp_path, monkeypatch):
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "machines.toml").write_text("[machines.local\n", encoding="utf-8")
+    monkeypatch.setenv("FFOPT_CONFIG_DIR", str(config))
+
+    with pytest.raises(ValueError, match="Repair or move this file"):
+        load_machine_profile("local")
 
 
 def test_slurm_evaluation_timeout_must_fit_inside_walltime():

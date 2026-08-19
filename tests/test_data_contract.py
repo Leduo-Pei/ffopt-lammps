@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from workflow.data_contract import check_data_files, format_data_report
+from workflow.cli import build_parser
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -40,3 +41,20 @@ def test_bulk_single_type_id_mismatch_is_an_error(tmp_path):
     )
     assert not report.ok
     assert any(item.code == "mass_mismatch" for item in report.errors)
+
+
+def test_doctor_checks_the_complete_project_data_contract(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setenv("FFOPT_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.chdir(ROOT)
+    monkeypatch.setattr(
+        "workflow.cli.resolve_executable", lambda value: f"/resolved/{Path(value).name}"
+    )
+    args = build_parser().parse_args([
+        "doctor", str(ROOT / "examples/btah/charge_only.in"), "--machine", "local",
+    ])
+    args.function(args)
+    output = capsys.readouterr().out
+    assert "[OK] LAMMPS data contract" in output
+    assert "5 files; errors=0" in output

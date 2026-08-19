@@ -500,36 +500,78 @@ class PipelineRunner:
         return path
 
     @staticmethod
-    def _slurm_state(job_id: str) -> str:
-        queued = subprocess.run(
-            ["squeue", "-h", "-j", job_id, "-o", "%T"],
-            capture_output=True,
-            text=True,
-            check=False,
+    def _scheduler_query(command: list[str]) -> subprocess.CompletedProcess[str] | None:
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return completed if completed.returncode == 0 else None
+
+    @classmethod
+    def _slurm_state(cls, job_id: str) -> str:
+        successful_queries = 0
+        queued = cls._scheduler_query(
+            ["squeue", "-h", "-j", job_id, "-o", "%T"]
         )
-        state = queued.stdout.strip().splitlines()
-        if state:
-            return state[0].strip().upper()
-        accounting = subprocess.run(
-            ["sacct", "-n", "-X", "-j", job_id, "--format", "State", "-P"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        values = [line.split("|")[0].strip().upper() for line in accounting.stdout.splitlines() if line.strip()]
-        return values[0].split()[0].rstrip("+") if values else "UNKNOWN"
+        if queued is not None:
+            successful_queries += 1
+            state = queued.stdout.strip().splitlines()
+            if state:
+                return state[0].strip().upper()
+        accounting = cls._scheduler_query([
+            "sacct", "-n", "-X", "-j", job_id, "--format", "State", "-P",
+        ])
+        if accounting is not None:
+            successful_queries += 1
+            values = [
+                line.split("|")[0].strip().upper()
+                for line in accounting.stdout.splitlines()
+                if line.strip()
+            ]
+            if values:
+                return values[0].split()[0].rstrip("+")
+        return "UNKNOWN" if successful_queries else "QUERY_UNAVAILABLE"
 
     def _refresh_waiting(self, state: WorkflowState, record: StageRecord) -> str:
         if not record.job_id:
             state.transition(record.name, "failed", message="Missing SLURM job id")
             return "failed"
         scheduler_state = self._slurm_state(record.job_id)
-        active = {"PENDING", "RUNNING", "CONFIGURING", "COMPLETING", "SUSPENDED"}
+        active = {
+            "PENDING", "RUNNING", "CONFIGURING", "COMPLETING", "SUSPENDED",
+        }
+        indeterminate = {"UNKNOWN", "QUERY_UNAVAILABLE"}
         if scheduler_state in active:
             state.transition(
                 record.name,
                 "waiting",
                 message=f"SLURM {record.job_id}: {scheduler_state}",
+            )
+            return "waiting"
+        if scheduler_state in indeterminate:
+            if WorkflowState.artifacts_exist(record):
+                state.transition(
+                    record.name,
+                    "completed",
+                    message=(
+                        f"SLURM {record.job_id}: scheduler query inconclusive; "
+                        "all artifacts verified"
+                    ),
+                )
+                return "completed"
+            state.transition(
+                record.name,
+                "waiting",
+                message=(
+                    f"SLURM {record.job_id}: scheduler query inconclusive; "
+                    "preserving job state"
+                ),
             )
             return "waiting"
         if WorkflowState.artifacts_exist(record):
@@ -557,9 +599,17 @@ class PipelineRunner:
             spec.artifacts,
         )
         script = self._write_slurm_script(spec)
-        completed = subprocess.run(
-            ["sbatch", str(script)], capture_output=True, text=True, check=False
-        )
+        try:
+            completed = subprocess.run(
+                ["sbatch", "--parsable", str(script)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as exc:
+            message = f"Could not execute sbatch: {exc}"
+            state.transition(spec.name, "failed", message=message)
+            raise RuntimeError(message) from exc
         if completed.returncode:
             message = completed.stderr.strip() or completed.stdout.strip()
             state.transition(spec.name, "failed", message=message)

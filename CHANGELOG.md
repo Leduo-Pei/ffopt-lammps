@@ -6,6 +6,29 @@ expectations while the public API remains in alpha.
 
 ## Unreleased
 
+### Added
+
+- Make `ffopt doctor` validate all active bulk, isolated-molecule, adsorption
+  complex, slab, and adsorbate data files as one cross-file physical contract.
+- Add `ffopt --debug ...` and concise default CLI errors so input and machine
+  mistakes remain readable while full tracebacks are still available.
+
+### Fixed
+
+- Preserve active SLURM stages when `squeue` or `sacct` is temporarily
+  unavailable or has not yet indexed a job, preventing an inconclusive query
+  from triggering a duplicate expensive submission.
+- Bound scheduler status queries to ten seconds and fall back from `squeue` to
+  `sacct` without exposing command or timeout tracebacks to users.
+- Write `machines.toml` through a flushed temporary file and atomic replace so
+  an interrupted configure operation cannot truncate working profiles.
+- Report malformed machine TOML, unavailable `sbatch`, and failed `sinfo`
+  probes with actionable recovery messages.
+- Run installed-wheel smoke tests outside the source checkout so release CI
+  cannot accidentally import uninstalled repository modules.
+- Include the README workflow SVG and editable Visio source in source
+  distributions and enforce their presence during release verification.
+
 ## 0.3.0a3 - 2026-08-18
 
 ### Added

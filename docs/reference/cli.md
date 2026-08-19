@@ -21,6 +21,9 @@ resumes the compatible default campaign.
 | `ffopt doctor ffopt.in --machine NAME` | Check the complete runtime environment and report any automatic BO-method fallback. |
 
 Use `ffopt <command> --help` for every option.
+`doctor` also checks the cross-file LAMMPS data contract for every active
+property. Use `ffopt --debug COMMAND ...` to retain a full traceback while
+diagnosing an unexpected native-installation problem.
 
 ## Machine profiles
 

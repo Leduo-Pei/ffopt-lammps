@@ -312,6 +312,108 @@ def test_running_slurm_stage_is_not_completed_by_partial_artifacts(
         assert state.get(spec.name).status == "waiting"
 
 
+@pytest.mark.parametrize("scheduler_state", ["UNKNOWN", "QUERY_UNAVAILABLE"])
+def test_inconclusive_scheduler_query_never_resubmits(
+    tmp_path, monkeypatch, scheduler_state
+):
+    project = _project(tmp_path)
+    config = _config()
+    config["machine"]["backend"] = "slurm"
+    config["cluster"] = {"bo": {}}
+    monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: config)
+    runner = PipelineRunner(
+        project=project, machine="cluster", run_id="query-gap", resume=True,
+    )
+    spec = runner.build_specs()[0]
+    monkeypatch.setattr(runner, "_slurm_state", lambda _: scheduler_state)
+
+    with WorkflowState(runner.state_path) as state:
+        state.prepare(
+            spec.name, spec.signature, spec.command, spec.output_dir, spec.artifacts
+        )
+        record = state.transition(spec.name, "waiting", job_id="123")
+        assert runner._refresh_waiting(state, record) == "waiting"
+        refreshed = state.get(spec.name)
+        assert refreshed.status == "waiting"
+        assert "preserving job state" in refreshed.message
+
+
+def test_inconclusive_scheduler_query_accepts_complete_artifacts(
+    tmp_path, monkeypatch
+):
+    project = _project(tmp_path)
+    config = _config()
+    config["machine"]["backend"] = "slurm"
+    config["cluster"] = {"bo": {}}
+    monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: config)
+    runner = PipelineRunner(
+        project=project, machine="cluster", run_id="query-complete", resume=True,
+    )
+    spec = runner.build_specs()[0]
+    for artifact in spec.artifacts:
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text("complete\n", encoding="utf-8")
+    monkeypatch.setattr(runner, "_slurm_state", lambda _: "UNKNOWN")
+
+    with WorkflowState(runner.state_path) as state:
+        state.prepare(
+            spec.name, spec.signature, spec.command, spec.output_dir, spec.artifacts
+        )
+        record = state.transition(spec.name, "waiting", job_id="123")
+        assert runner._refresh_waiting(state, record) == "completed"
+        assert state.get(spec.name).status == "completed"
+        assert "all artifacts verified" in state.get(spec.name).message
+
+
+def test_scheduler_query_timeout_is_reported_as_unavailable(monkeypatch):
+    def timeout(command, **_kwargs):
+        raise __import__("subprocess").TimeoutExpired(command, 10)
+
+    monkeypatch.setattr("workflow.pipeline.subprocess.run", timeout)
+    assert PipelineRunner._slurm_state("123") == "QUERY_UNAVAILABLE"
+
+
+def test_scheduler_query_falls_back_to_accounting(monkeypatch):
+    responses = iter([
+        type("Result", (), {"returncode": 0, "stdout": ""})(),
+        type("Result", (), {"returncode": 0, "stdout": "COMPLETED|\n"})(),
+    ])
+
+    def completed(_command, **kwargs):
+        assert kwargs["timeout"] == 10
+        return next(responses)
+
+    monkeypatch.setattr("workflow.pipeline.subprocess.run", completed)
+    assert PipelineRunner._slurm_state("123") == "COMPLETED"
+
+
+def test_missing_sbatch_marks_stage_failed(tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    project.data["pipeline"]["stages"] = ["bo"]
+    config = _config()
+    config["machine"]["backend"] = "slurm"
+    config["cluster"] = {"bo": {}}
+    monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: config)
+    runner = PipelineRunner(
+        project=project, machine="cluster", run_id="missing-sbatch", resume=True,
+    )
+    spec = runner.build_specs()[0]
+    monkeypatch.setattr(
+        "workflow.pipeline.subprocess.run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(FileNotFoundError("sbatch")),
+    )
+
+    with WorkflowState(runner.state_path) as state:
+        state.prepare(
+            spec.name, spec.signature, spec.command, spec.output_dir, spec.artifacts
+        )
+        with pytest.raises(RuntimeError, match="Could not execute sbatch"):
+            runner._submit_slurm(state, spec)
+        record = state.get(spec.name)
+        assert record.status == "failed"
+        assert "sbatch" in record.message
+
+
 def test_watch_stops_after_terminal_slurm_failure(tmp_path, monkeypatch):
     project = _project(tmp_path)
     config = _config()

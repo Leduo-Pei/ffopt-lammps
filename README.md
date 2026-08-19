@@ -142,6 +142,11 @@ ffopt run ffopt.in --machine cluster-1node --dry-run
 ffopt run ffopt.in --machine cluster-1node --watch
 ```
 
+`doctor` checks the Python runtime, executables, scheduler, and compatibility
+of all active LAMMPS data files before an expensive run. Normal input errors
+are concise; prepend `ffopt --debug` only when a full Python traceback is
+needed for troubleshooting.
+
 Repeat the last command after logout, timeout, or node failure. FFOpt verifies
 stage artifacts and resumes the first incomplete stage. To stop after BO while
 keeping the full workflow in the input, use `--until bo`; later continue with

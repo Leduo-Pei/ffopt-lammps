@@ -10,6 +10,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -59,8 +60,14 @@ def _machine_document() -> dict[str, Any]:
     path = config_home() / "machines.toml"
     if not path.exists():
         return {"machines": {}}
-    with path.open("rb") as handle:
-        data = tomllib.load(handle)
+    try:
+        with path.open("rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, ValueError) as exc:
+        raise ValueError(
+            f"Cannot read FFOpt machine configuration {path}: {exc}. "
+            "Repair or move this file, then rerun 'ffopt machine configure'."
+        ) from exc
     if not isinstance(data, dict) or not isinstance(data.get("machines", {}), dict):
         raise TypeError(f"Invalid FFOpt machine configuration: {path}")
     data.setdefault("machines", {})
@@ -116,8 +123,22 @@ def _detect_mpi() -> str:
     return "mpiexec"
 
 
+def resolve_executable(value: str | os.PathLike[str]) -> str | None:
+    """Resolve an executable name or path without accepting directories."""
+    text = str(value).strip()
+    if not text:
+        return None
+    found = shutil.which(text)
+    if found:
+        return str(Path(found).resolve())
+    path = Path(text).expanduser()
+    if path.is_file() and (os.name == "nt" or os.access(path, os.X_OK)):
+        return str(path.resolve())
+    return None
+
+
 def _version_line(command: str, arguments: list[str]) -> str:
-    executable = shutil.which(command) or command
+    executable = resolve_executable(command) or command
     try:
         completed = subprocess.run(
             [executable, *arguments], capture_output=True, text=True,
@@ -133,18 +154,33 @@ def probe_machine_environment(partition: str | None = None) -> dict[str, Any]:
     """Inspect executables and scheduler resources without changing config."""
     lammps = _detect_lammps()
     mpi = _detect_mpi()
-    lammps_path = shutil.which(lammps) or (str(Path(lammps).resolve()) if Path(lammps).exists() else None)
-    mpi_path = shutil.which(mpi) or (str(Path(mpi).resolve()) if Path(mpi).exists() else None)
+    lammps_path = resolve_executable(lammps)
+    mpi_path = resolve_executable(mpi)
     sbatch = shutil.which("sbatch")
     sinfo = shutil.which("sinfo")
     backend = "slurm" if sbatch and sinfo else "local"
     partitions: list[dict[str, Any]] = []
+    scheduler_error = None
     if sinfo:
-        completed = subprocess.run(
-            [sinfo, "-h", "-o", "%P|%c|%m|%a|%l|%D|%t"],
-            capture_output=True, text=True, check=False,
+        try:
+            completed = subprocess.run(
+                [sinfo, "-h", "-o", "%P|%c|%m|%a|%l|%D|%t"],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            completed = None
+            scheduler_error = str(exc)
+        if completed is not None and completed.returncode != 0:
+            scheduler_error = (
+                completed.stderr.strip() or completed.stdout.strip()
+                or f"sinfo exited with status {completed.returncode}"
+            )
+        output = (
+            completed.stdout
+            if completed is not None and completed.returncode == 0
+            else ""
         )
-        for raw in completed.stdout.splitlines():
+        for raw in output.splitlines():
             columns = [item.strip() for item in raw.split("|")]
             if len(columns) != 7:
                 continue
@@ -216,6 +252,7 @@ def probe_machine_environment(partition: str | None = None) -> dict[str, Any]:
             "srun": shutil.which("srun"),
             "sinfo": sinfo,
             "partitions": partitions,
+            "probe_error": scheduler_error,
         },
         "torch_cuda": {"available": gpu_available, "device": gpu_name},
         "recommendation": recommendation,
@@ -245,6 +282,9 @@ def format_machine_probe(report: dict[str, Any]) -> str:
         f"{report['torch_cuda']['device'] or ''}".rstrip(),
     ]
     partitions = report["slurm"]["partitions"]
+    scheduler_error = report["slurm"].get("probe_error")
+    if scheduler_error:
+        lines.extend(["", f"SLURM probe warning: {scheduler_error}"])
     if partitions:
         lines.extend(["", "SLURM partitions:"])
         for item in partitions:
@@ -408,9 +448,18 @@ def execute_machine_test(
     if wait:
         submission.append("--wait")
     submission.append(str(prepared["script"]))
-    completed = subprocess.run(
-        submission, capture_output=True, text=True, check=False,
-    )
+    try:
+        completed = subprocess.run(
+            submission, capture_output=True, text=True, check=False,
+        )
+    except OSError as exc:
+        return {
+            **prepared,
+            "status": "failed",
+            "job_id": None,
+            "submission_output": str(exc),
+            "output": str(exc),
+        }
     job_id = next((token for token in completed.stdout.split() if token.isdigit()), None)
     result = {
         **prepared,
@@ -605,6 +654,14 @@ def save_machine_profile(
         key: value for key, value in profile.items() if not key.startswith("_")
     }
     machines[name] = serializable
-    with path.open("wb") as handle:
-        handle.write(tomli_w.dumps(document).encode("utf-8"))
+    payload = tomli_w.dumps(document).encode("utf-8")
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
     return path

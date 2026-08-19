@@ -53,6 +53,38 @@ def test_cli_treats_a_closed_output_pipe_as_success(monkeypatch):
     assert exc.value.code == 0
 
 
+def test_cli_formats_expected_user_error_without_traceback(monkeypatch, capsys):
+    def invalid_input(_args):
+        raise ValueError("invalid ffopt.in setting")
+
+    parser = SimpleNamespace(
+        parse_args=lambda: SimpleNamespace(function=invalid_input, debug=False)
+    )
+    monkeypatch.setattr(cli, "build_parser", lambda: parser)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+
+    assert exc.value.code == 2
+    error = capsys.readouterr().err
+    assert "FFOpt error: invalid ffopt.in setting" in error
+    assert "ffopt --debug" in error
+    assert "Traceback" not in error
+
+
+def test_cli_debug_mode_preserves_traceback_exception(monkeypatch):
+    def invalid_input(_args):
+        raise ValueError("debug me")
+
+    parser = SimpleNamespace(
+        parse_args=lambda: SimpleNamespace(function=invalid_input, debug=True)
+    )
+    monkeypatch.setattr(cli, "build_parser", lambda: parser)
+
+    with pytest.raises(ValueError, match="debug me"):
+        cli.main()
+
+
 @pytest.mark.parametrize(
     "relative",
     [
