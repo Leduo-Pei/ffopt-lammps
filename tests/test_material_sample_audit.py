@@ -1,10 +1,19 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 import pandas as pd
+import pytest
 
-from engine.local_sampling import generate_design, sampling_allocation
+import engine.local_sampling as local_sampling
+import engine.stability_audit as stability_audit
+from engine.local_sampling import (
+    completed_candidate_ids,
+    generate_design,
+    read_candidate_source,
+    sampling_allocation,
+)
 from engine.stability_audit import load_audit_sources, unique_top
 
 
@@ -124,3 +133,108 @@ def test_audit_unions_sources_by_parameters_and_preserves_provenance(
     assert design.loc[0, "source_path"] == str(sample.resolve())
     assert int(design.loc[0, "source_candidate_id"]) == 2
     assert design["candidate_id"].tolist() == [1, 2, 3]
+
+
+def test_empty_candidate_archive_is_a_valid_empty_source(tmp_path: Path) -> None:
+    path = tmp_path / "empty.csv"
+    path.write_bytes(b"")
+    frame = read_candidate_source(path, ["x", "y"])
+    assert frame.empty
+    assert {"x", "y", "objective"}.issubset(frame.columns)
+
+
+def test_completed_candidates_require_the_exact_seed_set() -> None:
+    replicates = pd.DataFrame([
+        {"candidate_id": 1, "seed": 101},
+        {"candidate_id": 1, "seed": 202},
+        {"candidate_id": 2, "seed": 404},
+        {"candidate_id": 2, "seed": 505},
+    ])
+    assert completed_candidate_ids(replicates, [101, 202]) == {1}
+    assert completed_candidate_ids(replicates, [404, 505]) == {2}
+    assert completed_candidate_ids(replicates, [101, 303]) == set()
+
+
+def _patch_design_only_runtime(monkeypatch, module) -> None:
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda _path: {"targets": {}, "parallel": {"max_workers": 1}},
+    )
+    monkeypatch.setattr(module, "LAMMPSRunner", lambda _config: _FeasibleRunner())
+    monkeypatch.setattr(
+        module,
+        "build_parameter_space",
+        lambda _config: [("x", 0.0, 1.0), ("y", 0.0, 1.0)],
+    )
+
+
+def test_sampling_resume_rejects_changed_source_content(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _patch_design_only_runtime(monkeypatch, local_sampling)
+    config = tmp_path / "runtime.json"
+    config.write_text("{}", encoding="utf-8")
+    source = tmp_path / "feasible.csv"
+    boundary = tmp_path / "boundary.csv"
+    output = tmp_path / "sample"
+    _source([(0.25, 0.25, 0.01), (0.75, 0.75, 0.02)]).to_csv(
+        source, index=False
+    )
+    boundary_frame = _source([(0.05, 0.5, 0.03), (0.95, 0.5, 0.04)])
+    boundary_frame["anchor_class"] = "near_boundary"
+    boundary_frame.to_csv(boundary, index=False)
+    arguments = [
+        "local_sampling",
+        "--config", str(config),
+        "--source", str(source),
+        "--boundary-source", str(boundary),
+        "--output-dir", str(output),
+        "--n-points", "4",
+        "--elite-centers", "2",
+        "--radii", "0.02",
+        "--global-fraction", "0.25",
+        "--boundary-fraction", "0.25",
+        "--design-seed", "9",
+        "--design-only",
+    ]
+    monkeypatch.setattr(sys, "argv", arguments)
+    local_sampling.main()
+    local_sampling.main()
+
+    changed = pd.read_csv(source)
+    changed.loc[0, "objective"] = 0.009
+    changed.to_csv(source, index=False)
+    with pytest.raises(ValueError, match="does not match the current config"):
+        local_sampling.main()
+
+
+def test_audit_resume_allows_short_top_k_but_rejects_changed_sources(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _patch_design_only_runtime(monkeypatch, stability_audit)
+    config = tmp_path / "runtime.json"
+    config.write_text("{}", encoding="utf-8")
+    source = tmp_path / "source.csv"
+    output = tmp_path / "audit"
+    _source([(0.2, 0.3, 0.01), (0.8, 0.7, 0.02)]).to_csv(
+        source, index=False
+    )
+    arguments = [
+        "stability_audit",
+        "--config", str(config),
+        "--source", str(source),
+        "--output-dir", str(output),
+        "--top-k", "4",
+        "--design-only",
+    ]
+    monkeypatch.setattr(sys, "argv", arguments)
+    stability_audit.main()
+    stability_audit.main()
+    assert len(pd.read_csv(output / "design.csv")) == 2
+
+    changed = pd.read_csv(source)
+    changed.loc[0, "objective"] = 0.009
+    changed.to_csv(source, index=False)
+    with pytest.raises(ValueError, match="does not match the current config"):
+        stability_audit.main()

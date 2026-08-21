@@ -24,6 +24,7 @@ from .config_loader import load_config
 from .lammps_interface import LAMMPSRunner
 from .parameter_space import build_parameter_space
 from utils.objective_rescoring import objective_provenance
+from workflow.artifact_manifest import sha256_file
 
 
 def atomic_csv(frame: pd.DataFrame, path: Path) -> None:
@@ -46,15 +47,76 @@ def optional_int(value: object, default: int = 0) -> int:
 
 
 def valid_source_rows(frame: pd.DataFrame, param_names: list[str]) -> pd.DataFrame:
+    required = [*param_names, "objective"]
+    missing = [column for column in required if column not in frame.columns]
+    if missing:
+        if frame.empty:
+            frame = frame.copy()
+            for column in missing:
+                frame[column] = pd.Series(dtype=float)
+        else:
+            raise ValueError(
+                "Candidate source is missing required columns: "
+                + ", ".join(missing)
+            )
     if "success" in frame:
         frame = frame.loc[
             frame["success"].astype(str).str.lower().eq("true")
         ].copy()
-    needed = param_names + ["objective"]
-    finite = np.isfinite(frame[needed].to_numpy(dtype=float)).all(axis=1)
+    finite = np.isfinite(frame[required].to_numpy(dtype=float)).all(axis=1)
     return frame.loc[finite].sort_values(
         "objective", kind="stable"
     ).reset_index(drop=True)
+
+
+def read_candidate_source(path: Path, param_names: list[str]) -> pd.DataFrame:
+    """Read a candidate CSV while treating a zero-byte archive as empty."""
+    try:
+        frame = pd.read_csv(path)
+    except pd.errors.EmptyDataError:
+        frame = pd.DataFrame(columns=[*param_names, "objective", "success"])
+    return valid_source_rows(frame, param_names)
+
+
+def file_identity(path: Path) -> dict[str, object]:
+    digest = sha256_file(path)
+    return {
+        "path": str(path.resolve()),
+        "size_bytes": int(digest.size_bytes),
+        "sha256": digest.sha256,
+    }
+
+
+def atomic_json(document: dict[str, object], path: Path) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(document, indent=2, sort_keys=True), encoding="utf-8"
+    )
+    os.replace(temporary, path)
+
+
+def completed_candidate_ids(
+    replicates: pd.DataFrame, seeds: list[int]
+) -> set[int]:
+    """Return candidates evaluated for exactly the requested seed identity."""
+    if replicates.empty:
+        return set()
+    required = {"candidate_id", "seed"}
+    missing = required.difference(replicates.columns)
+    if missing:
+        raise ValueError(
+            "Replicate table is missing required columns: "
+            + ", ".join(sorted(missing))
+        )
+    requested = {int(seed) for seed in seeds}
+    completed: set[int] = set()
+    for candidate_id, group in replicates.groupby("candidate_id"):
+        observed = set(
+            pd.to_numeric(group["seed"], errors="coerce").dropna().astype(int)
+        )
+        if observed == requested:
+            completed.add(int(candidate_id))
+    return completed
 
 
 def _select_centers(
@@ -431,13 +493,11 @@ def main() -> None:
     replicate_path = args.output_dir / "local_replicates.csv"
     metadata_path = args.output_dir / "metadata.json"
 
-    source = valid_source_rows(pd.read_csv(args.source), param_names)
+    source = read_candidate_source(args.source, param_names)
     boundary_source = source.head(0).copy()
     boundary_source_fallback = None
     if args.boundary_source is not None:
-        raw_boundary = valid_source_rows(
-            pd.read_csv(args.boundary_source), param_names
-        )
+        raw_boundary = read_candidate_source(args.boundary_source, param_names)
         if "anchor_class" in raw_boundary.columns:
             near = raw_boundary.loc[
                 raw_boundary["anchor_class"].astype(str).eq("near_boundary")
@@ -453,12 +513,64 @@ def main() -> None:
     requested_allocation = sampling_allocation(
         args.n_points, args.global_fraction, args.boundary_fraction
     )
+    design_contract = {
+        "schema_version": 1,
+        "algorithm": "local_boundary_global_v1",
+        "config": file_identity(Path(args.config)),
+        "source": file_identity(args.source),
+        "boundary_source": (
+            file_identity(args.boundary_source)
+            if args.boundary_source is not None else None
+        ),
+        "parameter_space": [list(item) for item in param_space],
+        "n_points": int(args.n_points),
+        "elite_centers": int(args.elite_centers),
+        "center_selection": str(args.center_selection),
+        "center_pool_multiplier": int(args.center_pool_multiplier),
+        "radii": [float(value) for value in args.radii],
+        "global_fraction": float(args.global_fraction),
+        "boundary_fraction": float(args.boundary_fraction),
+        "design_seed": int(args.design_seed),
+    }
     if design_path.exists():
+        if not metadata_path.is_file():
+            raise ValueError(
+                f"Existing design {design_path} has no metadata.json; it cannot "
+                "be reused safely. Use a new output directory."
+            )
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"Cannot validate existing sampling metadata {metadata_path}: {exc}"
+            ) from exc
+        if metadata.get("design_contract") != design_contract:
+            raise ValueError(
+                "Existing sampling design does not match the current config, "
+                "sources, bounds, fractions, centers, or design seed. Use a new "
+                "output directory."
+            )
+        current_artifact = file_identity(design_path)
+        if metadata.get("design_artifact") != current_artifact:
+            raise ValueError(
+                f"Existing sampling design failed its content hash: {design_path}"
+            )
         design = pd.read_csv(design_path)
         if len(design) != args.n_points:
             raise ValueError(
                 f"Existing design has {len(design)} points, requested {args.n_points}."
             )
+        realized_allocation = {
+            mode: int(count)
+            for mode, count in design["sampling_mode"].value_counts().items()
+        }
+        if metadata.get("realized_allocation") != realized_allocation:
+            raise ValueError(
+                "Existing sampling design modes do not match metadata.json; "
+                "use a new output directory."
+            )
+        metadata["seeds"] = [int(seed) for seed in args.seeds]
+        atomic_json(metadata, metadata_path)
         print(f"Loaded existing deterministic design: {design_path}")
     else:
         design = generate_design(
@@ -485,7 +597,7 @@ def main() -> None:
             )
         if boundary_source_fallback:
             reallocations.append(boundary_source_fallback)
-        metadata_path.write_text(json.dumps({
+        metadata = {
             "config": args.config,
             "source": str(args.source),
             "boundary_source": (
@@ -506,7 +618,10 @@ def main() -> None:
             "design_seed": args.design_seed,
             "parameter_names": param_names,
             "target_names": target_names,
-        }, indent=2), encoding="utf-8")
+            "design_contract": design_contract,
+            "design_artifact": file_identity(design_path),
+        }
+        atomic_json(metadata, metadata_path)
         print(f"Generated deterministic design: {design_path}")
 
     if args.design_only:
@@ -521,19 +636,9 @@ def main() -> None:
         pd.read_csv(replicate_path).to_dict("records")
         if replicate_path.exists() else []
     )
-    requested_seeds = {int(seed) for seed in args.seeds}
     completed: set[int] = set()
     if replicates:
-        replicate_frame = pd.DataFrame(replicates)
-        for candidate_id, group in replicate_frame.groupby("candidate_id"):
-            observed = set(pd.to_numeric(group["seed"], errors="coerce").dropna().astype(int))
-            if requested_seeds.issubset(observed):
-                completed.add(int(candidate_id))
-    else:
-        completed = {
-            int(row["candidate_id"]) for row in summaries
-            if int(row.get("n_seeds", 0)) >= len(requested_seeds)
-        }
+        completed = completed_candidate_ids(pd.DataFrame(replicates), args.seeds)
     pending = [
         row for row in design.to_dict("records")
         if int(row["candidate_id"]) not in completed

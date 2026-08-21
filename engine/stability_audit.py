@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
 from pathlib import Path
 
 import numpy as np
@@ -12,7 +13,15 @@ import pandas as pd
 
 from .config_loader import load_config
 from .lammps_interface import LAMMPSRunner
-from .local_sampling import atomic_csv, evaluate_candidate, valid_source_rows
+from .local_sampling import (
+    atomic_csv,
+    atomic_json,
+    completed_candidate_ids,
+    evaluate_candidate,
+    file_identity,
+    read_candidate_source,
+    valid_source_rows,
+)
 from .parameter_space import build_parameter_space
 
 
@@ -38,7 +47,7 @@ def load_audit_sources(
     """Load an explicit, provenance-preserving union of measured candidates."""
     source_frames = []
     for source_index, source_path in enumerate(paths):
-        source_frame = pd.read_csv(source_path)
+        source_frame = read_candidate_source(source_path, names)
         if label is not None:
             if "label" not in source_frame.columns:
                 raise ValueError(
@@ -111,19 +120,65 @@ def main() -> None:
     work_root = args.output_dir / "work"
     work_root.mkdir(exist_ok=True)
     design_path = args.output_dir / "design.csv"
+    metadata_path = args.output_dir / "audit_metadata.json"
     result_path = args.output_dir / "stable_results.csv"
     replicate_path = args.output_dir / "stability_replicates.csv"
+    design_contract = {
+        "schema_version": 1,
+        "algorithm": "explicit_source_union_v1",
+        "config": file_identity(Path(args.config)),
+        "sources": [file_identity(path) for path in args.source],
+        "parameter_space": [list(item) for item in space],
+        "top_k": int(args.top_k),
+        "label": args.label,
+    }
 
     if design_path.exists():
-        design = pd.read_csv(design_path)
-        if len(design) != args.top_k:
+        if not metadata_path.is_file():
             raise ValueError(
-                f"Existing design has {len(design)} rows, requested {args.top_k}."
+                f"Existing audit design {design_path} has no audit_metadata.json; "
+                "it cannot be reused safely. Use a new output directory."
             )
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"Cannot validate existing audit metadata {metadata_path}: {exc}"
+            ) from exc
+        if metadata.get("design_contract") != design_contract:
+            raise ValueError(
+                "Existing audit design does not match the current config, "
+                "source contents, label, or top-k. Use a new output directory."
+            )
+        if metadata.get("design_artifact") != file_identity(design_path):
+            raise ValueError(
+                f"Existing audit design failed its content hash: {design_path}"
+            )
+        design = pd.read_csv(design_path)
+        selected_count = int(metadata.get("selected_count", -1))
+        if len(design) != selected_count or not 0 < selected_count <= args.top_k:
+            raise ValueError(
+                "Existing audit design row count does not match its metadata or "
+                f"top-k: rows={len(design)}, recorded={selected_count}, "
+                f"top_k={args.top_k}."
+            )
+        metadata["seeds"] = [int(seed) for seed in args.seeds]
+        atomic_json(metadata, metadata_path)
     else:
         source = load_audit_sources(args.source, names, args.label)
         design = unique_top(source, names, args.top_k)
+        if design.empty:
+            raise ValueError(
+                "The declared audit sources contain no successful finite "
+                "candidate with the required parameters and objective."
+            )
         atomic_csv(design, design_path)
+        atomic_json({
+            "design_contract": design_contract,
+            "design_artifact": file_identity(design_path),
+            "selected_count": int(len(design)),
+            "seeds": [int(seed) for seed in args.seeds],
+        }, metadata_path)
 
     if args.design_only:
         print(f"Design-only complete: {len(design)} candidates -> {design_path}")
@@ -135,9 +190,11 @@ def main() -> None:
     if result_path.exists():
         old = pd.read_csv(result_path)
         summaries = old.to_dict("records")
-        completed = set(old.loc[old["n_seeds"] == len(args.seeds), "candidate_id"])
     if replicate_path.exists():
         replicates = pd.read_csv(replicate_path).to_dict("records")
+        completed = completed_candidate_ids(
+            pd.DataFrame(replicates), args.seeds
+        )
 
     pending = [
         row for row in design.to_dict("records")

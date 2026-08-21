@@ -480,6 +480,28 @@ def material_stage_registry(base: StageRegistry | None = None) -> StageRegistry:
         ),
     ))
     registry.replace(StageDefinition(
+        "sample",
+        "sample",
+        (
+            "design.csv",
+            "metadata.json",
+            "local_results.csv",
+            "local_replicates.csv",
+        ),
+        requires=("bo",),
+    ))
+    registry.replace(StageDefinition(
+        "audit",
+        "audit",
+        (
+            "design.csv",
+            "audit_metadata.json",
+            "stable_results.csv",
+            "stability_replicates.csv",
+        ),
+        requires=("bo",),
+    ))
+    registry.replace(StageDefinition(
         "nn",
         "material-nn",
         (
