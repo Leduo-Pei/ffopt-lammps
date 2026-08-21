@@ -55,11 +55,15 @@ end
 property elasticity
     # Static and finite-temperature evidence have independent experimental
     # targets; no universal 0 K -> 300 K scale factor is assumed.
+    # Static: Rayne & Chandrasekhar, Phys. Rev. 122, 1714 (1961),
+    # DOI 10.1103/PhysRev.122.1714 (low-temperature extrapolation to 0 K).
     module static objective
     target static B       173.10 GPa
     target static Cprime   52.50 GPa
     target static C44     121.90 GPa
 
+    # Dynamic: Adams et al., J. Appl. Phys. 100, 113530 (2006),
+    # DOI 10.1063/1.2365714 (one internally consistent 300 K data set).
     module dynamic promotion
     target dynamic B       166.20 GPa
     target dynamic Cprime   48.15 GPa

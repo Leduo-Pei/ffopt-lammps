@@ -53,6 +53,10 @@ property surface
 end
 
 property elasticity
+    # The values retain the production references for wiring only:
+    # 0 K Rayne & Chandrasekhar (10.1103/PhysRev.122.1714) and
+    # 300 K Adams et al. (10.1063/1.2365714).  Canary gates are deliberately
+    # relaxed, so its numerical result is not scientific evidence.
     module static objective
     target static B       173.10 GPa
     target static Cprime   52.50 GPa
