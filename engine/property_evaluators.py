@@ -11,11 +11,24 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from importlib import metadata
 import inspect
-import re
 from threading import Lock
 from typing import Any, Iterable
 
 import numpy as np
+
+from .property_contracts import (
+    DEFAULT_PROPERTY_COST_CLASS,
+    DEFAULT_PROPERTY_FIDELITY,
+    DEFAULT_PROPERTY_ROLES,
+    PropertyContract,
+    PropertyCostClass,
+    PropertyRole,
+    coerce_cost_class,
+    coerce_property_role,
+    contract_from_evaluator,
+    validate_evaluator_name,
+    validate_fidelity,
+)
 
 
 KCAL_MOL_A2_TO_J_M2 = 0.69477
@@ -42,6 +55,12 @@ class PropertyStageResult:
 
 class PropertyEvaluator:
     name = "base"
+    # Legacy plugins only declare dependencies/provides.  These defaults keep
+    # that API valid while supplying a complete contract to newer workflows.
+    contract: PropertyContract | None = None
+    roles = DEFAULT_PROPERTY_ROLES
+    fidelity = DEFAULT_PROPERTY_FIDELITY
+    cost_class = DEFAULT_PROPERTY_COST_CLASS
     dependencies: tuple[str, ...] = ()
     provides: frozenset[str] = frozenset()
 
@@ -127,15 +146,19 @@ class SublimationEvaluator(PropertyEvaluator):
 
 class SurfaceEvaluator(PropertyEvaluator):
     name = "surface"
+    roles = frozenset({PropertyRole.CONSTRAINT, PropertyRole.VALIDATION})
+    fidelity = "structural"
+    cost_class = PropertyCostClass.LOW
     provides = frozenset({"surf_energy", "E_complete", "E_split", "A_xy"})
 
     def evaluate(self, runner, context, accumulated) -> PropertyStageResult:
         save_value = 1 if context.save_traj else 0
+        replicate_x, replicate_y, replicate_z = runner.surf_replicate
         variables = {
             "cutoff": runner.cutoff,
-            "npt_seed": runner.surf_npt_seed,
-            "equil_steps": runner.surf_equil,
-            "prod_steps": runner.surf_prod,
+            "replicate_x": replicate_x,
+            "replicate_y": replicate_y,
+            "replicate_z": replicate_z,
             "save_traj": save_value,
             **(
                 {"kspace_accuracy": runner.kspace_accuracy}
@@ -227,6 +250,7 @@ class PropertyEvaluatorRegistry:
 
     def __init__(self, evaluators: Iterable[PropertyEvaluator] = ()):
         self._evaluators: dict[str, PropertyEvaluator] = {}
+        self._contracts: dict[str, PropertyContract] = {}
         self._sources: dict[str, str] = {}
         self._discovered = False
         self._lock = Lock()
@@ -255,10 +279,13 @@ class PropertyEvaluatorRegistry:
         replace: bool = False,
     ) -> PropertyEvaluator:
         instance = self._materialize(evaluator)
-        name = str(instance.name).strip()
-        if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+        name = validate_evaluator_name(
+            instance.name, field="property evaluator name"
+        )
+        contract = contract_from_evaluator(instance)
+        if name in contract.dependencies:
             raise ValueError(
-                f"Invalid property evaluator name {name!r}; use snake_case"
+                f"Property evaluator {name!r} cannot depend on itself"
             )
         with self._lock:
             if name in self._evaluators and not replace:
@@ -267,6 +294,7 @@ class PropertyEvaluatorRegistry:
                     f"{self._sources[name]}"
                 )
             self._evaluators[name] = instance
+            self._contracts[name] = contract
             self._sources[name] = source
         return instance
 
@@ -298,18 +326,114 @@ class PropertyEvaluatorRegistry:
             self.discover()
         return dict(self._evaluators)
 
+    def contracts(self, *, discover: bool = True) -> dict[str, PropertyContract]:
+        """Return immutable contracts keyed by evaluator name."""
+
+        if discover:
+            self.discover()
+        return dict(self._contracts)
+
+    def contract(self, name: str, *, discover: bool = True) -> PropertyContract:
+        """Return one registered evaluator's validated contract."""
+
+        validate_evaluator_name(name, field="property evaluator name")
+        contracts = self.contracts(discover=discover)
+        if name not in contracts:
+            choices = ", ".join(sorted(contracts))
+            raise ValueError(
+                f"Unknown property evaluator {name!r}. Available: {choices}"
+            )
+        return contracts[name]
+
+    def select(
+        self,
+        *,
+        role: PropertyRole | str | None = None,
+        fidelity: str | None = None,
+        cost_class: PropertyCostClass | str | None = None,
+        discover: bool = True,
+    ) -> dict[str, PropertyEvaluator]:
+        """Select evaluators by contract metadata in registration order."""
+
+        selected_role = None if role is None else coerce_property_role(role)
+        selected_fidelity = (
+            None if fidelity is None else validate_fidelity(fidelity)
+        )
+        selected_cost = (
+            None if cost_class is None else coerce_cost_class(cost_class)
+        )
+        evaluators = self.evaluators(discover=discover)
+        contracts = self.contracts(discover=False)
+        return {
+            name: evaluator
+            for name, evaluator in evaluators.items()
+            if (
+                selected_role is None
+                or selected_role in contracts[name].roles
+            )
+            and (
+                selected_fidelity is None
+                or selected_fidelity == contracts[name].fidelity
+            )
+            and (
+                selected_cost is None
+                or selected_cost == contracts[name].cost_class
+            )
+        }
+
+    def build_plan(
+        self,
+        *,
+        role: PropertyRole | str | None = None,
+        fidelity: str | None = None,
+        cost_class: PropertyCostClass | str | None = None,
+        names: Iterable[str] | None = None,
+        discover: bool = True,
+    ) -> "PropertyExecutionPlan":
+        """Build a dependency-complete plan from names or metadata filters.
+
+        Dependencies are always added even when their own metadata does not
+        match the filter.  This lets, for example, a high-fidelity promotion
+        evaluator consume a lower-fidelity structural prerequisite safely.
+        """
+
+        available = self.evaluators(discover=discover)
+        contracts = self.contracts(discover=False)
+        if names is None:
+            selected = set(self.select(
+                role=role,
+                fidelity=fidelity,
+                cost_class=cost_class,
+                discover=False,
+            ))
+        else:
+            if role is not None or fidelity is not None or cost_class is not None:
+                raise ValueError(
+                    "Select a property plan by either explicit names or contract "
+                    "filters, not both"
+                )
+            if isinstance(names, (str, bytes)):
+                raise TypeError("Property evaluator names must be an iterable")
+            selected = {
+                validate_evaluator_name(name, field="property evaluator name")
+                for name in names
+            }
+        ordered_names = _topological_order(selected, available, contracts)
+        return PropertyExecutionPlan(available[name] for name in ordered_names)
+
     def describe(self, *, discover: bool = True) -> list[dict[str, Any]]:
         evaluators = self.evaluators(discover=discover)
-        return [
-            {
+        contracts = self.contracts(discover=False)
+        descriptions = []
+        for name, evaluator in evaluators.items():
+            description = {
                 "name": name,
                 "source": self._sources[name],
-                "dependencies": list(evaluator.dependencies),
-                "provides": sorted(evaluator.provides),
                 "class": f"{type(evaluator).__module__}.{type(evaluator).__qualname__}",
             }
-            for name, evaluator in evaluators.items()
-        ]
+            description.update(contracts[name].describe())
+            descriptions.append(description)
+        return descriptions
 
 
 PROPERTY_EVALUATORS = PropertyEvaluatorRegistry(DEFAULT_EVALUATORS.values())
@@ -347,7 +471,9 @@ class PropertyExecutionPlan:
 
 
 def _topological_order(
-    names: set[str], evaluators: dict[str, PropertyEvaluator]
+    names: set[str],
+    evaluators: dict[str, PropertyEvaluator],
+    contracts: dict[str, PropertyContract] | None = None,
 ) -> list[str]:
     ordered: list[str] = []
     visiting: set[str] = set()
@@ -369,7 +495,12 @@ def _topological_order(
                 f"Property evaluator dependency {name!r} is not registered"
             )
         visiting.add(name)
-        for dependency in evaluators[name].dependencies:
+        contract = (
+            contracts[name]
+            if contracts is not None
+            else contract_from_evaluator(evaluators[name])
+        )
+        for dependency in contract.dependencies:
             names.add(dependency)
             visit(dependency)
         visiting.remove(name)
@@ -383,6 +514,7 @@ def _topological_order(
 
 def build_property_plan(config: dict[str, Any], runner: Any) -> PropertyExecutionPlan:
     available = PROPERTY_EVALUATORS.evaluators()
+    contracts = PROPERTY_EVALUATORS.contracts(discover=False)
     selected = set()
     if runner.bulk_required:
         selected.add("bulk")
@@ -400,12 +532,12 @@ def build_property_plan(config: dict[str, Any], runner: Any) -> PropertyExecutio
         else:
             selected.discard(name)
 
-    ordered_names = _topological_order(selected, available)
+    ordered_names = _topological_order(selected, available, contracts)
     evaluators = [available[name] for name in ordered_names]
 
     provided = set()
     for evaluator in evaluators:
-        provided.update(evaluator.provides)
+        provided.update(contracts[evaluator.name].provides)
         if evaluator.name == "bulk":
             provided.update(runner.bulk_col_map)
             provided.update(runner.bulk_targets)

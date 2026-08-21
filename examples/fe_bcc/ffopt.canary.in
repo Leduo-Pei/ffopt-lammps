@@ -1,0 +1,146 @@
+# ============================================================================
+# NON_SCIENTIFIC_CANARY -- EXECUTION/RESUME TEST ONLY
+#
+# This deliberately uses short trajectories, small replicas, relaxed gates and
+# narrow ranges.  Its numbers MUST NOT be reported as a fitted Fe force field.
+# It exists only to exercise every real material-pipeline stage at low cost.
+# ============================================================================
+ffopt 1
+project fe_bcc_canary
+material elemental Fe
+crystal bcc
+workflow bo sample audit screen nn al finalists validate
+
+parameters
+    range epsilon absolute 5.5 6.5
+    range sigma   absolute 1.8 2.8
+    mixing default
+    tie epsilon all
+    difference sigma Fe_corner Fe_body max 0.75 A
+
+    # Warm start from the archived legacy best-effort result.  This is only a
+    # wiring aid that makes a structurally usable canary point likely.
+    type 1 Fe_corner 5.9464626141 2.0046831130
+    type 2 Fe_body   5.9464626141 2.6112575897
+end
+
+property bulk
+    data data/Fe_a_2type_555.data
+    cells_in_data 5 5 5
+    replicate 1 1 1
+    temperature 300 K
+    pressure 1 atm
+    tdamp 100 fs
+    pdamp 1000 fs
+    equilibration 1000
+    production 5000
+
+    target a        2.8665 A      weight 1.0 tolerance 0.28665
+    target b        2.8665 A      weight 1.0 tolerance 0.28665
+    target c        2.8665 A      weight 1.0 tolerance 0.28665
+    target alpha   90.0000 degree weight 1.0 tolerance 10.0
+    target beta    90.0000 degree weight 1.0 tolerance 10.0
+    target gamma   90.0000 degree weight 1.0 tolerance 10.0
+    target density  7.8740 g/cm3  weight 1.0 tolerance 0.7874
+end
+
+property surface
+    complete data/Fe_a_2type_555_complete.data
+    split    data/Fe_a_2type_555_split.data
+    facet 110
+    replicate 1 1 1
+    target 2.340 J/m2 weight 1.0 tolerance 1.170
+end
+
+property elasticity
+    module static objective
+    target static B       173.10 GPa
+    target static Cprime   52.50 GPa
+    target static C44     121.90 GPa
+
+    module dynamic promotion
+    target dynamic B       166.20 GPa
+    target dynamic Cprime   48.15 GPa
+    target dynamic C44     115.87 GPa
+
+    gate lattice 10 percent
+    gate angles 10 degree
+    gate density 10 percent
+    gate surface 50 percent
+    born off
+    r2 0.01
+    tier 100 percent
+
+    strain 0.004 0.008
+    replicate 1 1 1
+    temperature 300 K
+    timestep 1 fs
+    equilibration 1000
+    production 1000
+    seeds 101
+    validation_seeds 404
+end
+
+bo
+    method auto
+    objective feasible_coverage
+    stability_audit off
+    initial_points 4
+    batch_size 2
+    max_rounds 1
+    coverage archive 8 pool 256 feasible 0.50 boundary 0.25 uncertainty 0.15 global 0.10
+end
+
+sample
+    points 8
+    centers 2
+    center_selection diverse
+    radii 0.020 0.050
+    boundary_fraction 0.20
+    global_fraction 0.10
+    seeds 101
+    design_seed 20260821
+end
+
+audit
+    top_k 4
+    seeds 101
+    max_workers 4
+end
+
+screen
+    minimum 12
+    per_dimension 4
+    maximum 12
+    core_fraction 0.75
+    buffer_multiplier 1.50
+    elite_fraction 0.10
+end
+
+nn
+    method gp
+end
+
+al
+    acquisition constrained_minimax
+    rounds 2
+    candidates 4
+    static_candidates 2
+    candidate_pool 512
+    improvement_fraction 0.50
+    boundary_fraction 0.30
+    global_fraction 0.20
+    early_stop patience 2
+    early_stop improvement 0.5
+end
+
+finalists
+    minimum 1
+    maximum 2
+    window 1.0
+    diverse 0
+end
+
+validate
+    require_tolerances no
+end

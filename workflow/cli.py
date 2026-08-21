@@ -195,28 +195,6 @@ def _free_parameter_count(config: dict) -> int:
 def cmd_status(args: argparse.Namespace) -> None:
     project, machine = _common(args)
     run_root = project.run_root
-    nn_defaults = _stage_defaults(project, "nn")
-    preferred_bo = nn_defaults.get("bo_dir")
-    preferred_bo_path = resolve_path(preferred_bo) if preferred_bo else None
-    configured_stable = (
-        preferred_bo_path / "stable_results.csv"
-        if preferred_bo_path and (preferred_bo_path / "stable_results.csv").exists()
-        else None
-    )
-    configured_checkpoint = (
-        preferred_bo_path / "checkpoints" / "latest.json"
-        if preferred_bo_path
-        and (preferred_bo_path / "checkpoints" / "latest.json").exists()
-        else None
-    )
-    artifacts = [
-        ("BO stable", configured_stable or _newest([f"runs/{project.name}/bo_*/stable_results.csv", f"runs/{project.name}/legacy/**/stable_results.csv", "bo_*/stable_results.csv"])),
-        ("BO checkpoint", configured_checkpoint or _newest([f"runs/{project.name}/bo_*/checkpoints/latest.json", f"runs/{project.name}/legacy/**/checkpoints/latest.json", "bo_*/checkpoints/latest.json"])),
-        ("Sampling", _latest_sample(project)),
-        ("NN model", _newest([f"runs/{project.name}/nn_*/forward_nn.pt", f"runs/{project.name}/legacy/**/forward_nn.pt", "nn_output_*/forward_nn.pt"])),
-        ("AL history", _newest([f"runs/{project.name}/al_*/active_learning_history.json", f"runs/{project.name}/legacy/**/active_learning_history.json", "active_learning_output_*/active_learning_history.json"])),
-        ("Validation", _newest([f"runs/{project.name}/validation_*/validation_summary.json", "outputs/**/validation_summary.json"])),
-    ]
     from .pipeline import load_pipeline_status
 
     pipeline = load_pipeline_status(project, args.run_id)
@@ -259,6 +237,30 @@ def cmd_status(args: argparse.Namespace) -> None:
                     print(f"  {'':10s} {'':10s} {checkpoint}")
         print(f"\nUse 'ffopt results {project.path} --run-id {args.run_id}' for exact paths.")
         return
+    # Compatibility view for historical unmanaged runs.  Managed pipelines
+    # return above and therefore never mix their state with glob/mtime guesses.
+    nn_defaults = _stage_defaults(project, "nn")
+    preferred_bo = nn_defaults.get("bo_dir")
+    preferred_bo_path = resolve_path(preferred_bo) if preferred_bo else None
+    configured_stable = (
+        preferred_bo_path / "stable_results.csv"
+        if preferred_bo_path and (preferred_bo_path / "stable_results.csv").exists()
+        else None
+    )
+    configured_checkpoint = (
+        preferred_bo_path / "checkpoints" / "latest.json"
+        if preferred_bo_path
+        and (preferred_bo_path / "checkpoints" / "latest.json").exists()
+        else None
+    )
+    artifacts = [
+        ("BO stable", configured_stable or _newest([f"runs/{project.name}/bo_*/stable_results.csv", f"runs/{project.name}/legacy/**/stable_results.csv", "bo_*/stable_results.csv"])),
+        ("BO checkpoint", configured_checkpoint or _newest([f"runs/{project.name}/bo_*/checkpoints/latest.json", f"runs/{project.name}/legacy/**/checkpoints/latest.json", "bo_*/checkpoints/latest.json"])),
+        ("Sampling", _latest_sample(project)),
+        ("NN model", _newest([f"runs/{project.name}/nn_*/forward_nn.pt", f"runs/{project.name}/legacy/**/forward_nn.pt", "nn_output_*/forward_nn.pt"])),
+        ("AL history", _newest([f"runs/{project.name}/al_*/active_learning_history.json", f"runs/{project.name}/legacy/**/active_learning_history.json", "active_learning_output_*/active_learning_history.json"])),
+        ("Validation", _newest([f"runs/{project.name}/validation_*/validation_summary.json", "outputs/**/validation_summary.json"])),
+    ]
     for label, path in artifacts:
         print(f"{label:15s}: {path if path else '-'}")
 
@@ -271,10 +273,51 @@ def cmd_results(args: argparse.Namespace) -> None:
         report = collect_pipeline_results(project, args.run_id)
     except FileNotFoundError as exc:
         raise SystemExit(str(exc)) from exc
+    _include_material_top_results(report)
     print(
         json.dumps(report, indent=2, ensure_ascii=False)
         if args.json else format_pipeline_results(report)
     )
+
+
+def _include_material_top_results(report: dict) -> None:
+    """Expose manifest-declared Top-N products through ``ffopt results``.
+
+    Top-N products are conditional: validation-only and BO+validate workflows
+    do not create them, so they cannot be unconditional stage-registry
+    artifacts.  A full material validation records their exact paths in its
+    persisted summary.  Reading only that state-addressed file keeps results
+    discovery deterministic and avoids directory glob/mtime heuristics.
+    """
+
+    for stage in report.get("stages", []):
+        if stage.get("name") != "validate" or not stage.get("output_dir"):
+            continue
+        summary_path = Path(stage["output_dir"]) / "validation_summary.json"
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        top = summary.get("top_parameters_report", {})
+        if not isinstance(top, dict) or not top.get("enabled"):
+            continue
+        artifacts = stage.setdefault("artifacts", [])
+        recorded = {
+            str(item.get("path"))
+            for item in artifacts
+            if isinstance(item, dict) and item.get("path")
+        }
+        for key in ("csv", "json", "markdown", "manifest"):
+            raw_path = top.get(key)
+            if not raw_path or str(raw_path) in recorded:
+                continue
+            path = Path(raw_path)
+            artifacts.append({
+                "path": str(path),
+                "exists": path.is_file(),
+                "role": f"top_parameters_{key}",
+            })
+            recorded.add(str(path))
 
 
 def cmd_logs(args: argparse.Namespace) -> None:
@@ -297,6 +340,45 @@ def cmd_logs(args: argparse.Namespace) -> None:
                 print(content)
 
 
+def _resolve_run_stage_bound(
+    project: Project,
+    value: str | None,
+    *,
+    upper: bool,
+) -> str | None:
+    """Map concise public material stages to concrete executable nodes.
+
+    Material command files deliberately expose ``screen`` and ``al`` while the
+    recoverable runtime graph expands them to ``candidates``/``static`` and
+    numbered constrained-AL rounds.  CLI bounds must preserve that public
+    vocabulary: starting from a macro selects its first node and stopping at a
+    macro selects its last node.  Exact expanded names remain valid and are
+    checked by :class:`workflow.pipeline.PipelineRunner`.
+    """
+
+    if value is None:
+        return None
+    pipeline = project.data.get("pipeline", {})
+    stages = [str(stage) for stage in pipeline.get("stages", [])]
+    if value == "screen" and "screen" in stages:
+        return "static" if upper else "candidates"
+    if value == "al" and "constrained_al" in stages:
+        repetitions = pipeline.get("stage_repetitions", {})
+        count = int(repetitions.get("constrained_al", 1))
+        return f"constrained_al_{count if upper else 1:02d}"
+    return value
+
+
+def _public_workflow(project: Project) -> list[str]:
+    """Return the user-authored workflow rather than compiler-only tokens."""
+
+    compilation = project.compilation
+    document = getattr(compilation, "document", None)
+    if document is not None:
+        return [str(stage) for stage in document.workflow]
+    return [str(stage) for stage in project.data.get("pipeline", {}).get("stages", [])]
+
+
 def cmd_run(args: argparse.Namespace) -> None:
     project, machine = _common(args)
     from .pipeline import PipelineRunner
@@ -312,8 +394,8 @@ def cmd_run(args: argparse.Namespace) -> None:
         dry_run=args.dry_run,
         watch=args.watch,
         poll_seconds=args.poll_seconds,
-        from_stage=args.from_stage,
-        until=args.until,
+        from_stage=_resolve_run_stage_bound(project, args.from_stage, upper=False),
+        until=_resolve_run_stage_bound(project, args.until, upper=True),
     )
     outcome = runner.run()
     if outcome == "waiting":
@@ -729,7 +811,7 @@ def cmd_check(args: argparse.Namespace) -> None:
     print(f"Free dimensions       : {compilation.dimensions}")
     print(f"Fitted properties     : {', '.join(compilation.fitted_properties) or '-'}")
     print(f"Validation-only       : {', '.join(compilation.validation_properties) or '-'}")
-    print(f"Workflow              : {' -> '.join(project.data['pipeline']['stages'])}")
+    print(f"Workflow              : {' -> '.join(_public_workflow(project))}")
 
 
 def cmd_explain(args: argparse.Namespace) -> None:
@@ -754,7 +836,7 @@ def cmd_explain(args: argparse.Namespace) -> None:
         free = [name for name in free if name != derived]
     print(f"Input                 : {project.path}")
     print(f"Project               : {project.name}")
-    print(f"Workflow              : {' -> '.join(project.data['pipeline']['stages'])}")
+    print(f"Workflow              : {' -> '.join(_public_workflow(project))}")
     print(f"Independent dimensions: {compilation.dimensions}")
     print(f"Free parameters       : {len(free)}")
     print(f"Fixed parameters      : {len(fixed)}")
@@ -1309,8 +1391,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--run-id", default="default", help="Pipeline identifier (default: default)."
     )
     logs.add_argument(
-        "--stage", choices=["bo", "sample", "nn", "al", "audit", "finalize", "validate"],
-        help="Stage to inspect; defaults to the most recent logged stage.",
+        "--stage",
+        help=(
+            "Concrete stage to inspect (for example constrained_al_02); "
+            "defaults to the most recent logged stage."
+        ),
     )
     logs.add_argument(
         "--lines", type=int, default=80, help="Lines read from each log (default: 80)."
@@ -1321,8 +1406,8 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser(
         "run",
         help=(
-            "Run the restartable BO -> sampling -> ANN -> AL -> audit -> "
-            "finalize -> validation pipeline."
+            "Run the configured molecular or material workflow as one "
+            "restartable local/SLURM pipeline."
         ),
     )
     _add_context(run)
@@ -1346,12 +1431,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--poll-seconds", type=int, default=60,
         help="SLURM polling interval used with --watch (default: 60).",
     )
-    run.add_argument("--from-stage", choices=[
-        "bo", "sample", "nn", "al", "audit", "finalize", "validate"
-    ], help="Begin at a previously reached stage; completed upstream artifacts are required.")
-    run.add_argument("--until", choices=[
-        "bo", "sample", "nn", "al", "audit", "finalize", "validate"
-    ], help="Stop after this stage while retaining the configured full workflow.")
+    run.add_argument(
+        "--from-stage",
+        help=(
+            "Begin at a public stage (including screen/al) or a concrete expanded "
+            "stage; completed upstream artifacts are required."
+        ),
+    )
+    run.add_argument(
+        "--until",
+        help=(
+            "Stop after a public stage (including screen/al) or a concrete expanded "
+            "stage while retaining the configured full workflow."
+        ),
+    )
     run.set_defaults(function=cmd_run)
     return parser
 

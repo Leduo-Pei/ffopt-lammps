@@ -29,9 +29,10 @@ import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+import pandas as pd
 import torch
 from torch import Tensor
 
@@ -72,6 +73,13 @@ except ImportError:
 
 from .lammps_interface import LAMMPSRunner, LARGE_PENALTY
 from .parameter_space import build_parameter_space
+from .structural_coverage import (
+    assess_structural_properties,
+    build_coverage_archives,
+    select_coverage_batch,
+    select_coverage_representative,
+    structural_constraint_specs,
+)
 
 # Suppress repetitive BoTorch / GPyTorch warnings
 warnings.filterwarnings("ignore", message=".*qNoisyExpectedImprovement.*")
@@ -200,6 +208,9 @@ class ForceFieldOptimizer:
         # the same candidates and differ only in elapsed time.
         self.batch_size     = max(1, int(opt_cfg.get("batch_size", 48)))
         self.objective_type = opt_cfg.get("objective", "weighted_rmse")
+        self.coverage_enabled = str(self.objective_type).lower() == "feasible_coverage"
+        self.coverage_cfg = dict(opt_cfg.get("coverage", {}))
+        self._pending_selection_roles: dict[tuple[float, ...], str] = {}
 
         # TuRBO
         self.bo_method = self._select_bo_method(self.n_params, opt_cfg)
@@ -331,9 +342,10 @@ class ForceFieldOptimizer:
             and compute_surface
             and self.bo_method == "gp"
             and pareto_mode_cfg in ("auto", "active")
+            and not self.coverage_enabled
         )
         # Post-hoc Pareto: always computed when surface is available
-        self.pareto_posthoc = compute_surface
+        self.pareto_posthoc = compute_surface and not self.coverage_enabled
 
         # Reference point for qNEHVI (negated: BoTorch maximizes)
         struct_ref = float(ref_pt_cfg.get("structural", 30.0)) / 100.0
@@ -346,6 +358,25 @@ class ForceFieldOptimizer:
 
         torch.manual_seed(self.seed)
         np.random.seed(self.seed)
+
+    def _select_report_best(self, valid: List[dict]) -> dict:
+        """Select the human-facing best without changing the BO objective.
+
+        Legacy weighted-RMSE runs keep their exact historical ordering.
+        Coverage runs first require exact structural feasibility and then use
+        the ordinary fit objective as a deterministic representative; the
+        acquisition itself remains satisficing inside the accepted bands.
+        """
+        if not valid:
+            raise ValueError("A report representative requires a valid result")
+        if not getattr(self, "coverage_enabled", False):
+            return min(valid, key=lambda result: float(result["objective"]))
+        frame = pd.DataFrame(valid)
+        representative = select_coverage_representative(
+            frame,
+            parameter_names=self.param_names,
+        )
+        return valid[int(representative.name)]
 
     def _report_best_progress(
         self,
@@ -365,7 +396,7 @@ class ForceFieldOptimizer:
         if not valid:
             return
 
-        best = min(valid, key=lambda result: float(result["objective"]))
+        best = self._select_report_best(valid)
         status = ""
         if improved is True:
             status = " [IMPROVED]"
@@ -377,6 +408,14 @@ class ForceFieldOptimizer:
             f"objective={float(best['objective']):.6f}, "
             f"found={best.get('round', best.get('label', '?'))}"
         )
+        if getattr(self, "coverage_enabled", False):
+            print(
+                "    Exact structural gate: "
+                f"feasible={bool(best.get('structural_feasible', False))}, "
+                "max_band_ratio="
+                f"{float(best.get('structural_band_max_ratio', math.inf)):.6f}; "
+                "representative chosen by fit objective within the feasible set"
+            )
         print(
             f"    {'Property':<14} {'Calculated':>12} "
             f"{'Target':>10} {'Error%':>8}"
@@ -565,8 +604,21 @@ class ForceFieldOptimizer:
             #   (2) optimization.seed_params file (legacy)
             seed, src = self._resolve_warm_start()
             if seed:
-                initial_points = [seed] + initial_points
-                print(f"  Warm-start: seeded initial batch from {src}")
+                hard_differences = getattr(
+                    self.runner, "parameter_difference_constraints", []
+                )
+                seed_error = (
+                    self.runner.feasibility_error(seed)
+                    if hard_differences else None
+                )
+                if seed_error:
+                    print(
+                        "  Warm-start: skipped infeasible seed from "
+                        f"{src}: {seed_error}"
+                    )
+                else:
+                    initial_points = [seed] + initial_points
+                    print(f"  Warm-start: seeded initial batch from {src}")
             self._evaluate_and_record(initial_points, "initial")
 
             if self._best_valid_obj < float("inf"):
@@ -626,7 +678,9 @@ class ForceFieldOptimizer:
                 print(f"\n--- Round {self.current_round}/{self.n_bo_iters} "
                       f"[{self.bo_method.upper()}] {tag} ---")
 
-                if is_explore:
+                if self.coverage_enabled:
+                    candidates = self._propose_batch_coverage()
+                elif is_explore:
                     candidates = self._propose_exploration_batch()
                 else:
                     candidates = self._propose_batch()
@@ -672,7 +726,11 @@ class ForceFieldOptimizer:
                     self._save_checkpoint()
 
                 # Early stopping
-                if self.early_stop and no_improve_count >= self.patience:
+                if (
+                    self.early_stop
+                    and not self.coverage_enabled
+                    and no_improve_count >= self.patience
+                ):
                     print(f"\n  Early stopping: no improvement for "
                           f"{self.patience} consecutive rounds")
                     break
@@ -719,6 +777,95 @@ class ForceFieldOptimizer:
             return self._propose_batch_saasbo()
         else:
             raise ValueError(f"Unknown bo_method: {self.bo_method}")
+
+    def _propose_batch_coverage(self) -> List[Dict[str, float]]:
+        """Cover the structural feasible set without chasing its centre."""
+
+        pool_size = max(
+            self.batch_size,
+            int(self.coverage_cfg.get("candidate_pool", 16384)),
+        )
+        physical_dicts = self._generate_lhs(
+            pool_size,
+            seed_offset=50_000 + self.current_round,
+        )
+        physical = torch.tensor(
+            [[item[name] for name in self.param_names] for item in physical_dicts],
+            dtype=torch.double,
+        )
+        pool = normalize(physical, self.bounds).numpy()
+        existing = (
+            normalize(self.all_X, self.bounds).numpy()
+            if len(self.all_X)
+            else np.empty((0, self.n_params))
+        )
+
+        probability = np.zeros(len(pool), dtype=float)
+        if self._feasibility_model is not None:
+            try:
+                probability = self._feasibility_model.predict_proba(pool)[:, 1]
+            except Exception:
+                probability.fill(0.0)
+        uncertainty = np.ones(len(pool), dtype=float)
+        if len(self.train_X) >= 3:
+            try:
+                gp_x, gp_y = self._get_gp_training_data()
+                model = SingleTaskGP(
+                    normalize(gp_x, self.bounds),
+                    gp_y,
+                    outcome_transform=Standardize(m=1),
+                )
+                fit_gpytorch_mll(ExactMarginalLogLikelihood(model.likelihood, model))
+                with torch.no_grad():
+                    posterior = model.posterior(torch.tensor(pool, dtype=torch.double))
+                    mean = posterior.mean.squeeze(-1).numpy()
+                    uncertainty = posterior.variance.sqrt().squeeze(-1).numpy()
+                if self._feasibility_model is None:
+                    scale = max(float(np.nanmedian(np.abs(mean))), 1.0e-6)
+                    probability = np.exp(-np.maximum(mean, 0.0) / scale)
+            except Exception as exc:
+                print(f"  Coverage surrogate warning ({exc}); using novelty")
+                probability = np.exp(-4.0 * np.ones(len(pool)))
+
+        selected, roles = select_coverage_batch(
+            pool,
+            existing=existing,
+            feasible_probability=probability,
+            model_uncertainty=uncertainty,
+            batch_size=self.batch_size,
+            fractions={
+                "feasible_interior": float(
+                    self.coverage_cfg.get("feasible_fraction", 0.50)
+                ),
+                "constraint_boundary": float(
+                    self.coverage_cfg.get("boundary_fraction", 0.25)
+                ),
+                "model_uncertainty": float(
+                    self.coverage_cfg.get("uncertainty_fraction", 0.15)
+                ),
+                "global_novelty": float(
+                    self.coverage_cfg.get("global_fraction", 0.10)
+                ),
+            },
+            minimum_novelty=float(
+                self.coverage_cfg.get("minimum_novelty", 1.0e-6)
+            ),
+        )
+        selected_physical = unnormalize(
+            torch.tensor(selected, dtype=torch.double), self.bounds
+        )
+        output = self._tensor_to_param_dicts(selected_physical)
+        self._pending_selection_roles = {
+            tuple(round(float(item[name]), 12) for name in self.param_names): role
+            for item, role in zip(output, roles)
+        }
+        print(
+            "  Coverage acquisition: "
+            + ", ".join(
+                f"{role}={roles.count(role)}" for role in dict.fromkeys(roles)
+            )
+        )
+        return output
 
     # Active Pareto BO (GP + compute_surface)
 
@@ -1118,10 +1265,61 @@ class ForceFieldOptimizer:
     # Evaluation                                                              #
     # ====================================================================== #
 
+    def _replace_hard_constraint_violations(
+            self, param_dicts: List[Dict[str, float]]
+    ) -> List[Dict[str, float]]:
+        """Replace invalid proposals without clipping or training penalties."""
+        hard_differences = getattr(
+            self.runner, "parameter_difference_constraints", []
+        )
+        if not hard_differences:
+            return param_dicts
+
+        requested_count = len(param_dicts)
+        accepted = [
+            params for params in param_dicts
+            if self.runner.feasibility_error(params) is None
+        ]
+        rejected_count = requested_count - len(accepted)
+        if not rejected_count:
+            return param_dicts
+
+        seen = {
+            tuple(round(float(params[name]), 14) for name in self.param_names)
+            for params in accepted
+        }
+        attempt = 0
+        while len(accepted) < requested_count and attempt < 100:
+            replacements = self._generate_lhs(
+                requested_count - len(accepted),
+                seed_offset=90_000 + attempt,
+            )
+            for params in replacements:
+                key = tuple(
+                    round(float(params[name]), 14)
+                    for name in self.param_names
+                )
+                if key not in seen:
+                    seen.add(key)
+                    accepted.append(params)
+            attempt += 1
+        if len(accepted) < requested_count:
+            raise RuntimeError(
+                f"Could not replace {rejected_count} BO candidates rejected "
+                "by hard parameter-difference constraints"
+            )
+        print(
+            f"  Hard difference constraints: replaced "
+            f"{rejected_count}/{requested_count} proposed candidates before LAMMPS"
+        )
+        return accepted
+
     def _evaluate_and_record(self,
                              param_dicts: List[Dict[str, float]],
                              label: str):
         """Run LAMMPS batch, record all results, update GP training data."""
+        param_dicts = self._replace_hard_constraint_violations(param_dicts)
+
         eval_dir = os.path.join(self.work_dir, label)
         os.makedirs(eval_dir, exist_ok=True)
 
@@ -1130,6 +1328,16 @@ class ForceFieldOptimizer:
         new_X, new_Y, new_Y2, new_all_X, new_feasible = [], [], [], [], []
 
         for result in results:
+            coverage_assessment: dict[str, Any] = {}
+            if self.coverage_enabled and result.success:
+                coverage_assessment = assess_structural_properties(
+                    result.properties, self.config
+                )
+            acquisition_objective = (
+                float(coverage_assessment["acquisition_objective"])
+                if coverage_assessment
+                else float(result.objective)
+            )
             # Build CSV row
             entry: Dict = {
                 "round":      self.current_round,
@@ -1138,6 +1346,16 @@ class ForceFieldOptimizer:
                 "objective":  result.objective,
                 "error_msg":  result.error_msg,
             }
+            if self.coverage_enabled:
+                entry["fit_objective"] = float(result.objective)
+                entry.update(coverage_assessment)
+                key = tuple(
+                    round(float(result.params.get(name, math.nan)), 12)
+                    for name in self.param_names
+                )
+                entry["selection_role"] = self._pending_selection_roles.get(
+                    key, "initial_design"
+                )
             entry.update(objective_provenance(active_targets(self.config)))
             # All free BO params
             for name in self.param_names:
@@ -1158,13 +1376,17 @@ class ForceFieldOptimizer:
 
             x = [result.params.get(name, float("nan")) for name in self.param_names]
             new_all_X.append(x)
-            new_feasible.append(result.success)
+            new_feasible.append(
+                bool(coverage_assessment.get("structural_feasible", False))
+                if self.coverage_enabled
+                else result.success
+            )
 
-            if result.success and np.isfinite(result.objective):
+            if result.success and np.isfinite(acquisition_objective):
                 new_X.append(x)
-                new_Y.append([result.objective])
-                if result.objective < self._best_valid_obj:
-                    self._best_valid_obj = result.objective
+                new_Y.append([acquisition_objective])
+                if acquisition_objective < self._best_valid_obj:
+                    self._best_valid_obj = acquisition_objective
                 # Pareto training: negate because BoTorch maximizes
                 if (self.pareto_active
                         and np.isfinite(result.obj_structural)
@@ -1196,6 +1418,23 @@ class ForceFieldOptimizer:
 
     def _compute_penalty_cap(self) -> float:
         """Soft cap: penalty_cap_multiplier * worst valid objective (>=100)."""
+        if getattr(self, "coverage_enabled", False):
+            violations: list[float] = []
+            for row in self.all_results:
+                if not row.get("success"):
+                    continue
+                try:
+                    value = float(row.get("structural_constraint_violation"))
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(value):
+                    violations.append(value)
+            # Failed simulations must never look more promising to the
+            # violation GP than a successfully observed outside-band point.
+            return max(
+                1.0,
+                max(violations, default=0.0) * self.penalty_cap_multiplier,
+            )
         valid_objs = [r["objective"] for r in self.all_results if r["success"]]
         if not valid_objs:
             return 10.0
@@ -1221,7 +1460,28 @@ class ForceFieldOptimizer:
             print("\nStability audit: no successful candidates; skipping.")
             return
 
-        valid = sorted(valid, key=lambda r: r["objective"])[:self.stability_top_k]
+        if getattr(self, "coverage_enabled", False):
+            bounds = np.asarray(
+                [[low, high] for _name, low, high in self.param_space],
+                dtype=float,
+            )
+            archive, _anchors = build_coverage_archives(
+                pd.DataFrame(valid),
+                parameter_names=self.param_names,
+                parameter_bounds=bounds,
+                archive_target=self.stability_top_k,
+            )
+            valid = archive.to_dict(orient="records")
+            if not valid:
+                print(
+                    "\nStability audit: no exact structurally feasible "
+                    "candidate; skipping."
+                )
+                return
+        else:
+            valid = sorted(
+                valid, key=lambda r: r["objective"]
+            )[:self.stability_top_k]
         audit_dir = os.path.join(self.work_dir, "stability_audit")
         os.makedirs(audit_dir, exist_ok=True)
         print(f"\nStability audit: top {len(valid)} candidates x "
@@ -1430,27 +1690,157 @@ class ForceFieldOptimizer:
         """
         if len(self.train_X) <= MAX_GP_POINTS:
             return self.train_X, self.train_Y
+        if self.coverage_enabled:
+            return self._get_coverage_gp_training_data(MAX_GP_POINTS)
         idx = torch.argsort(self.train_Y.squeeze())[:MAX_GP_POINTS]
         return self.train_X[idx], self.train_Y[idx]
+
+    def _get_coverage_gp_training_data(self, maximum: int) -> Tuple[Tensor, Tensor]:
+        """Stratify a capped coverage GP instead of taking arbitrary zero ties."""
+        total = len(self.train_X)
+        if total <= maximum:
+            return self.train_X, self.train_Y
+        if len(self.all_feasible) != total or len(self.all_results) != total:
+            # A prerelease checkpoint may not preserve aligned coverage
+            # metadata.  Fail safely to deterministic objective ordering.
+            indices = torch.argsort(self.train_Y.squeeze())[:maximum]
+            return self.train_X[indices], self.train_Y[indices]
+
+        coordinates = normalize(self.train_X, self.bounds).numpy()
+        labels = np.asarray(self.all_feasible, dtype=bool)
+        objectives = self.train_Y.squeeze(-1).numpy()
+        successful = np.asarray([
+            self._csv_truthy(row.get("success", False))
+            for row in self.all_results
+        ], dtype=bool)
+        fit_objectives = pd.to_numeric(pd.Series([
+            row.get("fit_objective", row.get("objective", math.inf))
+            for row in self.all_results
+        ]), errors="coerce").to_numpy(float)
+        fit_objectives[~np.isfinite(fit_objectives)] = math.inf
+        selected: list[int] = []
+
+        def add_maximin(
+            candidates: np.ndarray,
+            count: int,
+            seed_score: np.ndarray,
+        ) -> None:
+            available = [
+                int(index) for index in candidates if int(index) not in selected
+            ]
+            if count <= 0 or not available:
+                return
+            first = min(available, key=lambda index: (seed_score[index], index))
+            selected.append(first)
+            while len([item for item in selected if item in candidates]) < min(
+                count, len(candidates)
+            ):
+                remaining = [item for item in available if item not in selected]
+                if not remaining:
+                    break
+                distance = np.linalg.norm(
+                    coordinates[remaining, None, :]
+                    - coordinates[np.asarray(selected)][None, :, :],
+                    axis=2,
+                ).min(axis=1)
+                winner = max(
+                    range(len(remaining)),
+                    key=lambda position: (
+                        float(distance[position]), -remaining[position]
+                    ),
+                )
+                selected.append(remaining[winner])
+
+        feasible_indices = np.flatnonzero(labels & successful)
+        outside_indices = np.flatnonzero(~labels & successful)
+        feasible_target = min(len(feasible_indices), int(round(0.40 * maximum)))
+        outside_target = min(len(outside_indices), int(round(0.40 * maximum)))
+        add_maximin(feasible_indices, feasible_target, fit_objectives)
+        add_maximin(outside_indices, outside_target, objectives)
+
+        while len(selected) < maximum:
+            remaining = [index for index in range(total) if index not in selected]
+            if not remaining:
+                break
+            if selected:
+                distance = np.linalg.norm(
+                    coordinates[remaining, None, :]
+                    - coordinates[np.asarray(selected)][None, :, :],
+                    axis=2,
+                ).min(axis=1)
+                winner = max(
+                    range(len(remaining)),
+                    key=lambda position: (
+                        float(distance[position]), -remaining[position]
+                    ),
+                )
+                selected.append(remaining[winner])
+            else:
+                selected.append(min(remaining))
+        indices = torch.tensor(selected, dtype=torch.long)
+        return self.train_X[indices], self.train_Y[indices]
 
     # ====================================================================== #
     # LHS sampling                                                            #
     # ====================================================================== #
 
-    def _generate_lhs(self, n_points: int) -> List[Dict[str, float]]:
-        """Latin Hypercube samples over the full parameter space."""
+    def _generate_lhs(
+            self, n_points: int, *, seed_offset: int = 0
+    ) -> List[Dict[str, float]]:
+        """Latin Hypercube samples, rejecting hard difference violations."""
         sampler = qmc.LatinHypercube(
             d=self.n_params,
-            seed=self.seed + self.current_round * 1000,
+            seed=self.seed + self.current_round * 1000 + seed_offset,
         )
         unit = sampler.random(n=n_points)
-        param_dicts = []
-        for i in range(n_points):
-            d = {}
-            for j, (name, lo, hi) in enumerate(self.param_space):
-                d[name] = lo + unit[i, j] * (hi - lo)
-            param_dicts.append(d)
-        return param_dicts
+
+        def convert(rows: np.ndarray) -> List[Dict[str, float]]:
+            converted = []
+            for row in rows:
+                converted.append({
+                    name: lo + row[j] * (hi - lo)
+                    for j, (name, lo, hi) in enumerate(self.param_space)
+                })
+            return converted
+
+        param_dicts = convert(unit)
+        hard_differences = getattr(
+            self.runner, "parameter_difference_constraints", []
+        )
+        if not hard_differences:
+            # Preserve the exact legacy design when no difference rule exists.
+            return param_dicts
+
+        accepted = [
+            params for params in param_dicts
+            if self.runner.feasibility_error(params) is None
+        ]
+        n_drawn = len(param_dicts)
+        max_draws = max(10_000, n_points * 1_000)
+        while len(accepted) < n_points and n_drawn < max_draws:
+            batch_size = min(
+                max(16, n_points - len(accepted)), max_draws - n_drawn
+            )
+            extra = convert(sampler.random(n=batch_size))
+            n_drawn += len(extra)
+            accepted.extend(
+                params for params in extra
+                if self.runner.feasibility_error(params) is None
+            )
+
+        if len(accepted) < n_points:
+            raise RuntimeError(
+                f"Only generated {len(accepted)}/{n_points} LHS points "
+                f"satisfying hard parameter-difference constraints after "
+                f"{n_drawn} deterministic draws. Relax the difference limit "
+                "or widen compatible parameter bounds."
+            )
+        if n_drawn > n_points:
+            print(
+                "  Hard difference constraints: accepted "
+                f"{n_points}/{n_drawn} deterministic LHS draws"
+            )
+        return accepted[:n_points]
 
     # ====================================================================== #
     # Utility                                                                 #
@@ -1591,9 +1981,14 @@ class ForceFieldOptimizer:
         valid = [r for r in self.all_results if r["success"]]
         if not valid:
             print("\nNo valid results; cannot generate summary.")
+            if getattr(self, "coverage_enabled", False):
+                pd.DataFrame(self.all_results).to_csv(
+                    os.path.join(self.work_dir, "all_results.csv"), index=False
+                )
+                self._save_coverage_outputs(best=None)
             return {}
 
-        best  = min(valid, key=lambda r: r["objective"])
+        best  = self._select_report_best(valid)
         n_f   = sum(self.all_feasible)
         n_t   = len(self.all_feasible)
 
@@ -1609,7 +2004,14 @@ class ForceFieldOptimizer:
         print(f"Evaluations : {len(self.all_results)} total, {len(valid)} valid")
         print(f"Feasibility : {n_f}/{n_t} ({n_f/n_t*100:.0f}%)")
         print(f"BO method   : {self.bo_method.upper()}")
-        print(f"Best objective : {best['objective']:.6f}")
+        if getattr(self, "coverage_enabled", False):
+            print(
+                "Representative fit objective : "
+                f"{float(best['objective']):.6f} "
+                f"(structural_feasible={bool(best.get('structural_feasible', False))})"
+            )
+        else:
+            print(f"Best objective : {best['objective']:.6f}")
         print(f"  Found at round {best.get('round','?')}, "
               f"label '{best.get('label','?')}'")
         print(f"  Evaluation #{best_idx+1} / {len(self.all_results)}")
@@ -1648,6 +2050,189 @@ class ForceFieldOptimizer:
         self._save_summary_files(best, elapsed, valid, pareto_front)
         return best
 
+    @staticmethod
+    def _minimum_archive_distance(
+        frame: pd.DataFrame,
+        parameter_names: List[str],
+        bounds: np.ndarray,
+    ) -> float | None:
+        if len(frame) < 2:
+            return None
+        spans = bounds[:, 1] - bounds[:, 0]
+        coordinates = (
+            frame[parameter_names].to_numpy(dtype=float) - bounds[:, 0]
+        ) / spans
+        distances = np.linalg.norm(
+            coordinates[:, None, :] - coordinates[None, :, :], axis=2
+        )
+        distances[np.diag_indices_from(distances)] = math.inf
+        value = float(np.min(distances))
+        return value if math.isfinite(value) else None
+
+    def _save_coverage_outputs(self, best: dict | None) -> List[str]:
+        """Publish strict feasible/archive evidence and a machine-readable audit."""
+        frame = pd.DataFrame(self.all_results)
+        for column in (
+            *self.param_names,
+            "success",
+            "structural_feasible",
+            "structural_band_max_ratio",
+            "structural_constraint_violation",
+            "fit_objective",
+        ):
+            if column not in frame:
+                frame[column] = pd.Series(dtype=float)
+        bounds = np.asarray(
+            [[low, high] for _name, low, high in self.param_space], dtype=float
+        )
+        archive_target = int(self.coverage_cfg.get("archive_target", 96))
+        feasible_archive, coverage_anchors = build_coverage_archives(
+            frame,
+            parameter_names=self.param_names,
+            parameter_bounds=bounds,
+            archive_target=archive_target,
+            anchor_max_band_ratio=float(
+                self.coverage_cfg.get("anchor_max_band_ratio", 3.0)
+            ),
+        )
+        feasible_path = os.path.join(self.work_dir, "feasible_archive.csv")
+        anchors_path = os.path.join(self.work_dir, "coverage_anchors.csv")
+        summary_path = os.path.join(self.work_dir, "coverage_summary.json")
+        feasible_archive.to_csv(feasible_path, index=False)
+        coverage_anchors.to_csv(anchors_path, index=False)
+
+        successful = (
+            frame["success"].astype(str).str.strip().str.lower().isin(
+                ("true", "1", "yes", "on")
+            )
+        )
+        structurally_feasible = (
+            frame["structural_feasible"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .isin(("true", "1", "yes", "on"))
+        )
+        role_counts = (
+            frame.get("selection_role", pd.Series(dtype=str))
+            .fillna("unlabelled")
+            .astype(str)
+            .value_counts()
+            .sort_index()
+            .to_dict()
+        )
+
+        def finite_or_none(value: Any) -> float | None:
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                return None
+            return numeric if math.isfinite(numeric) else None
+
+        representative = None
+        if best is not None:
+            representative = {
+                "selection": "exact_structural_feasible_then_fit_objective",
+                "structural_feasible": bool(
+                    str(best.get("structural_feasible", False)).lower()
+                    in ("true", "1", "yes", "on")
+                ),
+                "fit_objective": finite_or_none(
+                    best.get("fit_objective", best.get("objective"))
+                ),
+                "structural_constraint_violation": finite_or_none(
+                    best.get("structural_constraint_violation")
+                ),
+                "structural_band_max_ratio": finite_or_none(
+                    best.get("structural_band_max_ratio")
+                ),
+                "parameters": {
+                    name: finite_or_none(best.get(name)) for name in self.param_names
+                },
+            }
+        summary = {
+            "schema": "ffopt-structural-coverage-summary-v1",
+            "objective": "feasible_coverage",
+            "parameter_names": list(self.param_names),
+            "coverage_settings": {
+                "archive_target": archive_target,
+                "candidate_pool": int(
+                    self.coverage_cfg.get("candidate_pool", 16384)
+                ),
+                "feasible_fraction": float(
+                    self.coverage_cfg.get("feasible_fraction", 0.50)
+                ),
+                "boundary_fraction": float(
+                    self.coverage_cfg.get("boundary_fraction", 0.25)
+                ),
+                "uncertainty_fraction": float(
+                    self.coverage_cfg.get("uncertainty_fraction", 0.15)
+                ),
+                "global_fraction": float(
+                    self.coverage_cfg.get("global_fraction", 0.10)
+                ),
+                "minimum_novelty": float(
+                    self.coverage_cfg.get("minimum_novelty", 1.0e-6)
+                ),
+                "anchor_max_band_ratio": float(
+                    self.coverage_cfg.get("anchor_max_band_ratio", 3.0)
+                ),
+                "random_seed": int(
+                    self.config.get("optimization", {}).get("random_seed", 42)
+                ),
+            },
+            "continuous_structural_gates": structural_constraint_specs(self.config),
+            "selection_policy": {
+                "acquisition_inside_gate": "satisficing_zero_violation",
+                "report_representative": (
+                    "exact structural feasibility, then fit objective"
+                ),
+                "archive": "representative seed plus normalized maximin diversity",
+            },
+            "counts": {
+                "evaluations": int(len(frame)),
+                "successful": int(successful.sum()),
+                "structurally_feasible": int(
+                    (successful & structurally_feasible).sum()
+                ),
+                "structurally_infeasible_or_failed": int(
+                    len(frame) - (successful & structurally_feasible).sum()
+                ),
+                "feasible_archive": int(len(feasible_archive)),
+                "coverage_anchors": int(len(coverage_anchors)),
+            },
+            "proposal_role_counts": {
+                str(key): int(value) for key, value in role_counts.items()
+            },
+            "archive_diversity": {
+                "minimum_pair_distance_normalized": self._minimum_archive_distance(
+                    feasible_archive, self.param_names, bounds
+                ),
+                "selection_role_counts": {
+                    str(key): int(value)
+                    for key, value in feasible_archive.get(
+                        "archive_selection_role", pd.Series(dtype=str)
+                    ).value_counts().sort_index().to_dict().items()
+                },
+            },
+            "anchor_classes": {
+                str(key): int(value)
+                for key, value in coverage_anchors.get(
+                    "anchor_class", pd.Series(dtype=str)
+                ).value_counts().sort_index().to_dict().items()
+            },
+            "representative": representative,
+            "files": {
+                "all_results": "all_results.csv",
+                "feasible_archive": "feasible_archive.csv",
+                "coverage_anchors": "coverage_anchors.csv",
+            },
+        }
+        with open(summary_path, "w", encoding="utf-8") as handle:
+            json.dump(summary, handle, indent=2, sort_keys=True, allow_nan=False)
+            handle.write("\n")
+        return [feasible_path, anchors_path, summary_path]
+
     def _save_summary_files(self, best: dict, elapsed: float, valid: list,
                             pareto_front=None):
         import pandas as pd
@@ -1656,6 +2241,11 @@ class ForceFieldOptimizer:
         df       = pd.DataFrame(self.all_results)
         csv_path = os.path.join(self.work_dir, "all_results.csv")
         df.to_csv(csv_path, index=False)
+        coverage_paths = (
+            self._save_coverage_outputs(best)
+            if getattr(self, "coverage_enabled", False)
+            else []
+        )
 
         # best_parameters.txt (read by run.py --dry-run auto-loader)
         param_path = os.path.join(self.work_dir, "best_parameters.txt")
@@ -1664,6 +2254,12 @@ class ForceFieldOptimizer:
             f.write(f"# System    : {self.config['manifest']['system_name']}\n")
             f.write(f"# Method    : {self.bo_method.upper()}\n")
             f.write(f"# Objective : {best['objective']:.6f}\n")
+            if getattr(self, "coverage_enabled", False):
+                f.write("# Selection  : exact structural feasible, then fit objective\n")
+                f.write(
+                    "# Gate ratio : "
+                    f"{float(best.get('structural_band_max_ratio', math.inf)):.8f}\n"
+                )
             f.write(f"# Pareto    : active={self.pareto_active} posthoc={self.pareto_posthoc}\n")
             f.write(f"# Date      : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
             for name, lo, hi in self.param_space:
@@ -1687,6 +2283,15 @@ class ForceFieldOptimizer:
             f.write(f"Feasibility : {n_f}/{n_t} ({n_f/n_t*100:.0f}%)\n")
             f.write(f"Rounds      : {self.current_round}\n\n")
             f.write(f"Best objective : {best['objective']:.6f}\n\n")
+            if getattr(self, "coverage_enabled", False):
+                f.write(
+                    "Coverage representative: exact structural feasibility, "
+                    "then fit objective\n"
+                )
+                f.write(
+                    "Structural band max ratio: "
+                    f"{float(best.get('structural_band_max_ratio', math.inf)):.8f}\n\n"
+                )
             f.write("Parameters:\n")
             for name, lo, hi in self.param_space:
                 val = best.get(name, float("nan"))
@@ -1714,6 +2319,8 @@ class ForceFieldOptimizer:
         print(f"  {param_path}")
         print(f"  {report_path}")
         print(f"  {pareto_path}")
+        for path in coverage_paths:
+            print(f"  {path}")
 
     # ====================================================================== #
     # Header                                                                  #

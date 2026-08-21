@@ -60,7 +60,7 @@ conda install -c conda-forge "lammps=*=*openmpi*" openmpi -y
 python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 python -m pip install \
-  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a3/ffopt_lammps-0.3.0a3-py3-none-any.whl"
+  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a4/ffopt_lammps-0.3.0a4-py3-none-any.whl"
 ```
 
 上面的命令有意安装 CPU 版 PyTorch。GPU 工作站应先按 PyTorch 官方安装选择器
@@ -101,7 +101,7 @@ conda activate ffopt
 conda env config vars set PYTHONNOUSERSITE=1
 conda deactivate
 conda activate ffopt
-python -m pip install "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a3/ffopt_lammps-0.3.0a3-py3-none-any.whl"
+python -m pip install "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a4/ffopt_lammps-0.3.0a4-py3-none-any.whl"
 ```
 
 LAMMPS 和 MPI 可以由用户单独安装，随后在机器配置中填写绝对路径。路径含空格

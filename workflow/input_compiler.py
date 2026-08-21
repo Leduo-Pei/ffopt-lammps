@@ -52,6 +52,11 @@ PROPERTY_OUTPUT_UNITS = {
         "surf_energy": "J/m2", "E_complete": "kcal/mol",
         "E_split": "kcal/mol", "A_xy": "A2",
     },
+    "elasticity": {
+        "B": "GPa", "Cprime": "GPa", "C44": "GPa",
+        "C11": "GPa", "C12": "GPa", "G_hill": "GPa",
+        "E_hill": "GPa", "nu_hill": "dimensionless",
+    },
 }
 
 
@@ -63,6 +68,9 @@ class CompiledInput:
     dimensions: int
     fitted_properties: tuple[str, ...]
     validation_properties: tuple[str, ...]
+    material: dict[str, Any]
+    crystal: dict[str, Any]
+    parameter_constraints: dict[str, list[dict[str, Any]]]
 
 
 def _resource(relative: str) -> str:
@@ -111,7 +119,12 @@ def _param_value(
     optimize: bool,
 ) -> float | dict[str, float]:
     params = document.parameters
-    if not optimize or name in params.fixed or (label, name) in params.fixed_by_type:
+    if (
+        not optimize
+        or name in params.fixed
+        or (label, name) in params.fixed_by_type
+        or (document.material_kind == "elemental" and name == "charge")
+    ):
         return float(initial)
     range_spec = params.type_ranges.get((label, name)) or params.default_ranges.get(name)
     if range_spec is None:  # Parser validation normally catches this.
@@ -135,6 +148,19 @@ def _compile_atom_types(
         raise InputFileError(document.path, 1, f"data file not found: {primary_data}")
     summary = inspect_lammps_data(primary_data)
     by_id = {item.type_id: item for item in summary.atom_types}
+    if document.material_kind == "elemental":
+        declared_ids = {item.type_id for item in document.parameters.atom_types}
+        observed_ids = set(by_id)
+        if declared_ids != observed_ids:
+            raise InputFileError(
+                document.path,
+                document.material_line or 1,
+                "elemental primary-data atom-type IDs must exactly match the "
+                "parameter table; "
+                f"declared={sorted(declared_ids)}, observed={sorted(observed_ids)}, "
+                f"missing={sorted(observed_ids - declared_ids)}, "
+                f"unused={sorted(declared_ids - observed_ids)}",
+            )
     documents: list[dict[str, Any]] = []
     dimensions = 0
     for item in document.parameters.atom_types:
@@ -173,6 +199,122 @@ def _compile_atom_types(
         if any(spec.type_id == item.type_id for spec in document.parameters.atom_types)
     }
     return documents, dimensions, counts
+
+
+def _compile_parameter_constraints(
+    document: FFOptInput,
+    atom_types: list[dict[str, Any]],
+    dimensions: int,
+    *,
+    optimize: bool,
+) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, str]], int]:
+    """Compile the small public parameter graph without hiding its meaning.
+
+    Exact ties map to the legacy engine's ``derived_params`` mechanism, so a
+    tied value is sampled once.  Difference limits remain an explicit domain
+    constraint for constraint-aware optimizers; retaining the declaration in
+    the compiled configuration avoids converting a hard physical bound into a
+    penalty or an undocumented range truncation.
+    """
+    specs = document.parameters.atom_types
+    source_by_label = {item.label: item for item in specs}
+    compiled_by_label = {item["label"]: item for item in atom_types}
+    result: dict[str, list[dict[str, Any]]] = {
+        "ties": [],
+        "differences": [],
+    }
+    derived: list[dict[str, str]] = []
+
+    for tie in document.parameters.ties.values():
+        labels = [item.label for item in specs]
+        initials = [
+            float(getattr(source_by_label[label], tie.parameter))
+            for label in labels
+        ]
+        if max(initials) - min(initials) > 1.0e-12:
+            raise InputFileError(
+                document.path,
+                tie.line,
+                f"tie {tie.parameter!r} requires identical initial values",
+            )
+        source_label = labels[0]
+        source_key = f"{source_label}_{tie.parameter}"
+        compiled_values = [
+            compiled_by_label[label]["params"][tie.parameter]
+            for label in labels
+        ]
+        ranged = [value for value in compiled_values if isinstance(value, dict)]
+        if ranged:
+            if len(ranged) != len(compiled_values):
+                raise InputFileError(
+                    document.path,
+                    tie.line,
+                    f"tie {tie.parameter!r} mixes fixed and ranged atom types",
+                )
+            low = max(float(value["min"]) for value in ranged)
+            high = min(float(value["max"]) for value in ranged)
+            initial = initials[0]
+            if low >= high or not low <= initial <= high:
+                raise InputFileError(
+                    document.path,
+                    tie.line,
+                    f"tie {tie.parameter!r} has no common range containing its initial value",
+                )
+            compiled_by_label[source_label]["params"][tie.parameter] = {
+                "min": low,
+                "max": high,
+                "init": initial,
+            }
+            if optimize:
+                dimensions -= len(labels) - 1
+        for label in labels[1:]:
+            target = f"{label}_{tie.parameter}"
+            derived.append({
+                "target": target,
+                "expression": source_key,
+                "comment": f"tie {tie.parameter} all",
+            })
+        result["ties"].append({
+            "parameter": tie.parameter,
+            "types": labels,
+            "source": source_label,
+        })
+
+    for constraint in document.parameters.differences:
+        first_spec = source_by_label[constraint.first]
+        second_spec = source_by_label[constraint.second]
+        first_initial = float(getattr(first_spec, constraint.parameter))
+        second_initial = float(getattr(second_spec, constraint.parameter))
+        if abs(first_initial - second_initial) > constraint.maximum + 1.0e-12:
+            raise InputFileError(
+                document.path,
+                constraint.line,
+                "initial sigma difference exceeds the declared maximum",
+            )
+        first_value = compiled_by_label[constraint.first]["params"][constraint.parameter]
+        second_value = compiled_by_label[constraint.second]["params"][constraint.parameter]
+        if isinstance(first_value, dict) and isinstance(second_value, dict):
+            first_low, first_high = float(first_value["min"]), float(first_value["max"])
+            second_low, second_high = float(second_value["min"]), float(second_value["max"])
+            minimum_gap = max(
+                first_low - second_high,
+                second_low - first_high,
+                0.0,
+            )
+            if minimum_gap > constraint.maximum:
+                raise InputFileError(
+                    document.path,
+                    constraint.line,
+                    "sigma difference constraint is incompatible with the type ranges",
+                )
+        result["differences"].append({
+            "parameter": constraint.parameter,
+            "types": [constraint.first, constraint.second],
+            "max_abs": constraint.maximum,
+            "unit": "A",
+        })
+
+    return result, derived, dimensions
 
 
 def _target_document(document: FFOptInput, prop: PropertySpec) -> dict[str, dict[str, Any]]:
@@ -218,15 +360,47 @@ def _compile_bulk(document: FFOptInput, prop: PropertySpec, config: dict[str, An
     value = prop.data_files.get("bulk")
     if not value:
         raise InputFileError(document.path, prop.line, "bulk property requires 'data PATH'")
-    cells = prop.settings.get("cells", (1, 1, 1))
+    is_bcc = document.crystal_family == "bcc"
+    if is_bcc and document.material_kind != "elemental":
+        raise InputFileError(
+            document.path,
+            document.material_line or prop.line,
+            "the schema-1 BCC bulk protocol currently requires "
+            "'material elemental'",
+        )
+    if is_bcc and "cells" not in prop.settings:
+        raise InputFileError(
+            document.path,
+            prop.line,
+            "BCC bulk requires explicit 'cells_in_data NX NY NZ'",
+        )
+    cells = tuple(int(item) for item in prop.settings.get("cells", (1, 1, 1)))
     if any(int(value) < 1 for value in cells):
-        raise InputFileError(document.path, prop.line, "bulk cells must be positive")
+        raise InputFileError(
+            document.path,
+            prop.setting_lines.get("cells", prop.line),
+            "bulk cells_in_data values must be positive integers",
+        )
+    replicate = tuple(
+        int(item) for item in prop.settings.get("replicate", (1, 1, 1))
+    )
+    if any(value < 1 for value in replicate):
+        raise InputFileError(
+            document.path,
+            prop.setting_lines.get("replicate", prop.line),
+            "bulk replicate values must be positive integers",
+        )
+    effective_cells = tuple(
+        count * multiplier for count, multiplier in zip(cells, replicate)
+    )
     temperature = float(prop.settings.get("temperature", 300.0))
     timestep = float(prop.settings.get("timestep", 1.0))
     cutoff = float(prop.settings.get("cutoff", 8.0))
     equilibration = int(prop.settings.get("equilibration", 20000))
     production = int(prop.settings.get("production", 40000))
     seed = int(prop.settings.get("seed", 101))
+    tdamp = float(prop.settings.get("tdamp", 100.0))
+    pdamp = float(prop.settings.get("pdamp", 1000.0))
     if temperature <= 0.0:
         raise InputFileError(
             document.path,
@@ -238,6 +412,18 @@ def _compile_bulk(document: FFOptInput, prop: PropertySpec, config: dict[str, An
             document.path,
             prop.setting_lines.get("timestep", prop.line),
             "bulk timestep must be positive",
+        )
+    if tdamp <= 0.0:
+        raise InputFileError(
+            document.path,
+            prop.setting_lines.get("tdamp", prop.line),
+            "bulk tdamp must be positive",
+        )
+    if pdamp <= 0.0:
+        raise InputFileError(
+            document.path,
+            prop.setting_lines.get("pdamp", prop.line),
+            "bulk pdamp must be positive",
         )
     if cutoff <= 0.0:
         raise InputFileError(
@@ -264,19 +450,36 @@ def _compile_bulk(document: FFOptInput, prop: PropertySpec, config: dict[str, An
             "bulk seed must be positive",
         )
     config["manifest"]["data_files"]["bulk"] = _path(document, value)
+    bulk_config: dict[str, Any] = {
+        "nx": int(effective_cells[0]),
+        "ny": int(effective_cells[1]),
+        "nz": int(effective_cells[2]),
+        "npt_seed": seed,
+        "equil_steps": equilibration,
+        "prod_steps": production,
+        "temperature": temperature,
+        "pressure": float(prop.settings.get("pressure", 1.0)),
+        "protocol": "minimize+npt",
+    }
+    if is_bcc:
+        bulk_config.update({
+            "cells_in_data": list(cells),
+            "replicate": list(replicate),
+            "effective_cells": list(effective_cells),
+            "tdamp": tdamp,
+            "pdamp": pdamp,
+            "runtime_replicate": True,
+            "protocol": "box_relax_0k+tri_npt",
+        })
     config["lammps"].update({
-        "bulk_input": _resource("lammps/inputs/bulk/in.bulk.mol"),
+        "bulk_input": _resource(
+            "lammps/inputs/bulk/in.bcc.elemental"
+            if is_bcc
+            else "lammps/inputs/bulk/in.bulk.mol"
+        ),
         "cutoff": cutoff,
         "timestep": timestep,
-        "bulk": {
-            "nx": int(cells[0]), "ny": int(cells[1]), "nz": int(cells[2]),
-            "npt_seed": seed,
-            "equil_steps": equilibration,
-            "prod_steps": production,
-            "temperature": temperature,
-            "pressure": float(prop.settings.get("pressure", 1.0)),
-            "protocol": "minimize+npt",
-        },
+        "bulk": bulk_config,
     })
     return _target_document(document, prop)
 
@@ -455,22 +658,337 @@ def _compile_adsorption(document: FFOptInput, prop: PropertySpec, config: dict[s
     return _target_document(document, prop)
 
 
+def _compile_surface(
+    document: FFOptInput,
+    prop: PropertySpec,
+    config: dict[str, Any],
+    primary_data: Path,
+) -> dict[str, Any]:
+    """Compile the bundled, 0 K BCC(110) cleavage calculation.
+
+    The complete and split boxes are an energy difference, so merely having
+    the same total atom count is insufficient: both boxes must contain the
+    same count of every numbered atom type.  Type comments in the data files
+    are also checked against the primary structure to catch accidental type
+    reordering before an expensive LAMMPS run.
+    """
+    facet = prop.settings.get("facet")
+    if facet is None:
+        raise InputFileError(
+            document.path,
+            prop.line,
+            "surface requires an explicit 'facet 110' declaration",
+        )
+    if document.crystal_family != "bcc":
+        raise InputFileError(
+            document.path,
+            prop.setting_lines.get("facet", prop.line),
+            "the bundled surface evaluator supports BCC(110) only; "
+            f"crystal is {document.crystal_family!r}",
+        )
+    if str(facet) != "110":
+        raise InputFileError(
+            document.path,
+            prop.setting_lines.get("facet", prop.line),
+            "the bundled surface evaluator supports facet 110 only",
+        )
+
+    missing = [role for role in ("complete", "split") if role not in prop.data_files]
+    if missing:
+        raise InputFileError(
+            document.path,
+            prop.line,
+            "surface requires complete and split data files; "
+            f"missing={missing}",
+        )
+
+    replicate = tuple(int(value) for value in prop.settings.get("replicate", (1, 1, 1)))
+    if len(replicate) != 3 or any(value < 1 for value in replicate):
+        raise InputFileError(
+            document.path,
+            prop.setting_lines.get("replicate", prop.line),
+            "surface replicate values must be three positive integers",
+        )
+
+    data_paths = {
+        role: Path(_path(document, prop.data_files[role]))
+        for role in ("complete", "split")
+    }
+    summaries = {}
+    for role, data_path in data_paths.items():
+        try:
+            summaries[role] = inspect_lammps_data(data_path)
+        except (OSError, ValueError) as exc:
+            raise InputFileError(
+                document.path,
+                prop.line,
+                f"cannot inspect surface {role} data {data_path}: {exc}",
+            ) from exc
+    try:
+        primary_summary = inspect_lammps_data(primary_data)
+    except (OSError, ValueError) as exc:  # Usually reported by _compile_atom_types first.
+        raise InputFileError(
+            document.path,
+            prop.line,
+            f"cannot inspect primary data {primary_data}: {exc}",
+        ) from exc
+
+    def atom_count(role: str, summary: Any) -> int:
+        parsed = sum(item.atom_count for item in summary.atom_types)
+        declared = summary.declared_counts.get("atoms")
+        if parsed < 1:
+            raise InputFileError(
+                document.path,
+                prop.line,
+                f"surface {role} data contains no readable atoms",
+            )
+        if declared is not None and int(declared) != parsed:
+            raise InputFileError(
+                document.path,
+                prop.line,
+                f"surface {role} atom header ({declared}) does not match "
+                f"the parsed Atoms section ({parsed})",
+            )
+        return parsed
+
+    complete_count = atom_count("complete", summaries["complete"])
+    split_count = atom_count("split", summaries["split"])
+    if complete_count != split_count:
+        raise InputFileError(
+            document.path,
+            prop.line,
+            "BCC(110) cleavage requires equal atom counts: "
+            f"complete={complete_count}, split={split_count}",
+        )
+
+    expected_ids = {item.type_id for item in document.parameters.atom_types}
+    expected_data_labels = {
+        item.type_id: item.label for item in primary_summary.atom_types
+    }
+    counts_by_role: dict[str, dict[int, int]] = {}
+    for role, summary in summaries.items():
+        observed_ids = {item.type_id for item in summary.atom_types}
+        if observed_ids != expected_ids:
+            raise InputFileError(
+                document.path,
+                prop.line,
+                f"surface {role} atom-type IDs must match the parameter table; "
+                f"expected={sorted(expected_ids)}, observed={sorted(observed_ids)}",
+            )
+        observed_labels = {item.type_id: item.label for item in summary.atom_types}
+        if observed_labels != expected_data_labels:
+            raise InputFileError(
+                document.path,
+                prop.line,
+                f"surface {role} type labels must match the primary data by type ID; "
+                f"expected={expected_data_labels}, observed={observed_labels}",
+            )
+        counts_by_role[role] = {
+            item.type_id: int(item.atom_count) for item in summary.atom_types
+        }
+    if counts_by_role["complete"] != counts_by_role["split"]:
+        raise InputFileError(
+            document.path,
+            prop.line,
+            "BCC(110) cleavage requires identical per-type composition: "
+            f"complete={counts_by_role['complete']}, split={counts_by_role['split']}",
+        )
+
+    config["manifest"].update({"surface_facet": "110"})
+    config["manifest"]["data_files"].update({
+        "surf_complete": str(data_paths["complete"]),
+        "surf_split": str(data_paths["split"]),
+    })
+    config["lammps"].update({
+        "surf_input": _resource("lammps/inputs/surface/in.bcc.surface"),
+    })
+    config["lammps"]["surf"].update({
+        "replicate": list(replicate),
+        "protocol": "minimize_0k",
+    })
+    return _target_document(document, prop)
+
+
+def _compile_elasticity(
+    document: FFOptInput,
+    prop: PropertySpec,
+    config: dict[str, Any],
+    bulk_prop: PropertySpec | None,
+    surface_prop: PropertySpec | None,
+) -> dict[str, Any]:
+    """Compile a role-aware cubic-elasticity contract.
+
+    The targets intentionally live below ``config.elasticity`` rather than in
+    the legacy ``config.targets`` mapping.  The latter feeds the first-stage
+    weighted structural objective, whereas static elasticity is a downstream
+    constrained-minimax objective and dynamic elasticity is promotion or
+    validation evidence.
+    """
+
+    if bulk_prop is None or "bulk" not in bulk_prop.data_files:
+        raise InputFileError(
+            document.path,
+            prop.line,
+            "elasticity requires a bulk property with 'data PATH'",
+        )
+
+    canonical_bulk_targets = {
+        TARGET_ALIASES.get(target.name, target.name) for target in bulk_prop.targets
+    }
+    surface_targets = (
+        {
+            TARGET_ALIASES.get(target.name, target.name)
+            for target in surface_prop.targets
+        }
+        if surface_prop is not None
+        else set()
+    )
+    gate_requirements = {
+        "lattice": (canonical_bulk_targets, {"a", "b", "c"}, "bulk a/b/c targets"),
+        "angles": (
+            canonical_bulk_targets,
+            {"alpha", "beta", "gamma_ang"},
+            "bulk alpha/beta/gamma targets",
+        ),
+        "density": (canonical_bulk_targets, {"density"}, "a bulk density target"),
+        "surface": (surface_targets, {"surf_energy"}, "a surface-energy target"),
+    }
+    compiled_gates: dict[str, dict[str, Any]] = {}
+    for gate_name, (available, required, description) in gate_requirements.items():
+        key = f"gate.{gate_name}"
+        if key not in prop.settings:
+            continue
+        if not required <= available:
+            missing = sorted(required - available)
+            raise InputFileError(
+                document.path,
+                prop.setting_lines[key],
+                f"elasticity {gate_name} gate requires {description}; "
+                f"missing={missing}",
+            )
+        compiled_gates[gate_name] = {
+            (
+                "maximum_absolute_error_degree"
+                if gate_name == "angles"
+                else "maximum_relative_error_percent"
+            ): float(prop.settings[key]),
+            "unit": "degree" if gate_name == "angles" else "percent",
+        }
+
+    strain = [float(value) for value in prop.settings.get(
+        "strain", (0.002, 0.004, 0.006)
+    )]
+    replicate = [int(value) for value in prop.settings.get("replicate", (1, 1, 1))]
+    minimum_r2 = float(prop.settings.get("minimum_r2", 0.98))
+    born_required = bool(prop.settings.get("born", True))
+    reporting_tier = float(prop.settings.get("tier", 20.0))
+
+    targets_by_fidelity: dict[str, dict[str, dict[str, Any]]] = {}
+    for fidelity in ("static", "dynamic"):
+        targets_by_fidelity[fidelity] = {
+            name: {
+                "value": next(
+                    target.value
+                    for target in prop.elasticity_targets
+                    if target.fidelity == fidelity and target.name == name
+                ),
+                "unit": "GPa",
+            }
+            for name in ("B", "Cprime", "C44")
+            if fidelity in prop.elasticity_modules
+        }
+
+    modules: dict[str, dict[str, Any]] = {}
+    static = prop.elasticity_modules["static"]
+    modules["static"] = {
+        "evaluator": "static_cubic",
+        "role": static.role,
+        "fidelity": "static_0k",
+        "cost_class": "low",
+        "targets": targets_by_fidelity["static"],
+        "protocol": {
+            "method": "symmetric_energy_strain",
+            "strain_magnitudes": strain,
+            "replicate": replicate,
+            "temperature_k": 0.0,
+        },
+    }
+
+    dynamic = prop.elasticity_modules.get("dynamic")
+    if dynamic is not None:
+        dynamic_module: dict[str, Any] = {
+            "evaluator": "dynamic_cubic",
+            "role": dynamic.role,
+            "fidelity": "dynamic_300k",
+            "cost_class": "high",
+            "targets": targets_by_fidelity["dynamic"],
+            "protocol": {
+                "method": "symmetric_stress_strain",
+                "strain_magnitudes": strain,
+                "replicate": replicate,
+                "temperature_k": float(prop.settings.get("temperature", 300.0)),
+                "timestep_fs": float(prop.settings.get("timestep", 1.0)),
+                "equilibration_steps": int(
+                    prop.settings.get("equilibration", 20000)
+                ),
+                "production_steps": int(prop.settings.get("production", 40000)),
+                "seeds": [int(value) for value in prop.settings.get(
+                    "seeds", (101, 202, 303)
+                )],
+            },
+        }
+        if "validation_seeds" in prop.settings:
+            dynamic_module["validation_protocol"] = {
+                "seeds": [
+                    int(value) for value in prop.settings["validation_seeds"]
+                ],
+            }
+        modules["dynamic"] = dynamic_module
+
+    config["elasticity"] = {
+        "enabled": True,
+        "symmetry": "cubic",
+        "target_basis": ["B", "Cprime", "C44"],
+        "derived_diagnostics_only": ["G_hill", "E_hill", "nu_hill"],
+        "selection": {
+            "method": "constrained_minimax_relative_error",
+            "structural_gates": compiled_gates,
+            "fit_quality": {"minimum_r2": minimum_r2},
+            "born_stability": {"required": born_required},
+        },
+        # A tier labels scientific quality; it is not an eligibility gate and
+        # must not discard the best feasible compromise when a pair potential
+        # cannot reach the requested percentage.
+        "reporting": {
+            "mechanical_tier_percent": reporting_tier,
+            "tier_is_hard_gate": False,
+        },
+        "modules": modules,
+    }
+    return {}
+
+
 def _stage_line(document: FFOptInput, stage: str, *keys: str) -> int:
     lines = document.stage_setting_lines.get(stage, {})
     return next((lines[key] for key in keys if key in lines), 1)
 
 
 def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: dict[str, Any]) -> None:
+    if "screen" in document.workflow:
+        stages.setdefault("screen", {})
+    if "finalists" in document.workflow:
+        stages.setdefault("finalists", {})
     bo_map = {
         "method": "method", "initial_points": "n_initial", "rounds": "n_bo_iterations",
         "max_rounds": "n_bo_iterations", "batch_size": "batch_size",
-        "random_seed": "random_seed",
+        "random_seed": "random_seed", "objective": "objective",
     }
     sample_map = {
         "points": "n_points", "centers": "elite_centers", "elite_centers": "elite_centers",
         "seeds": "seeds", "radii": "radii", "global_fraction": "global_fraction",
         "design_seed": "design_seed",
         "center_selection": "center_selection",
+        "boundary_fraction": "boundary_fraction",
     }
     nn_map = {
         "model": "model", "method": "model", "ensemble": "ensemble_size",
@@ -482,14 +1000,34 @@ def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: 
         "rounds": "n_rounds", "candidates": "n_candidates_per_round",
         "candidate_pool": "n_candidate_pool", "uncertainty_threshold": "uncertainty_threshold",
         "sampling_domain": "sampling_domain", "local_radii": "local_radii",
+        "static_candidates": "static_points",
+        "improvement_fraction": "improvement_fraction",
+        "boundary_fraction": "boundary_fraction",
+        "global_fraction": "global_fraction",
     }
-    audit_map = {"top_k": "top_k", "seeds": "seeds"}
+    audit_map = {"top_k": "top_k", "seeds": "seeds", "max_workers": "max_workers"}
+    screen_map = {
+        "minimum": "minimum",
+        "per_dimension": "per_dimension",
+        "maximum": "maximum",
+        "core_fraction": "core_fraction",
+        "buffer_multiplier": "buffer_multiplier",
+        "elite_fraction": "objective_elite_fraction",
+    }
+    finalists_map = {
+        "minimum": "minimum",
+        "maximum": "maximum",
+        "window": "near_optimal_window_percent",
+        "diverse": "diverse_reserve",
+    }
     maps = {
         "bo": bo_map,
         "sample": sample_map,
         "nn": nn_map,
         "al": al_map,
         "audit": audit_map,
+        "screen": screen_map,
+        "finalists": finalists_map,
     }
     destinations = {
         "bo": config["optimization"], "sample": stages.setdefault("sample", {}),
@@ -497,6 +1035,8 @@ def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: 
         "audit": stages.setdefault(
             "audit", {"top_k": 8, "seeds": [101, 202, 303]}
         ),
+        "screen": stages.get("screen", {}),
+        "finalists": stages.get("finalists", {}),
     }
     for stage, settings in document.stage_settings.items():
         if stage == "finalize":
@@ -554,6 +1094,49 @@ def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: 
             if key == "early_stop" and stage == "bo":
                 destination.setdefault("early_stop", {}).update(value)
                 continue
+            if key == "early_stop" and stage == "al":
+                aliases = {"patience": "patience", "improvement": "min_improvement"}
+                unknown = set(value) - set(aliases)
+                if unknown:
+                    raise InputFileError(
+                        document.path,
+                        _stage_line(
+                            document, stage,
+                            *(f"early_stop.{item}" for item in sorted(unknown)),
+                        ),
+                        f"unknown AL early_stop setting(s): {sorted(unknown)}",
+                    )
+                early = destination.setdefault("early_stop", {})
+                early.update({aliases[item]: raw for item, raw in value.items()})
+                continue
+            if key == "coverage" and stage == "bo":
+                values = value if isinstance(value, list) else [value]
+                if len(values) % 2:
+                    raise InputFileError(
+                        document.path,
+                        _stage_line(document, stage, key),
+                        "BO coverage requires KEY VALUE pairs",
+                    )
+                aliases = {
+                    "archive": "archive_target",
+                    "pool": "candidate_pool",
+                    "feasible": "feasible_fraction",
+                    "boundary": "boundary_fraction",
+                    "uncertainty": "uncertainty_fraction",
+                    "global": "global_fraction",
+                }
+                pairs = dict(zip(values[::2], values[1::2]))
+                unknown = {str(item).lower() for item in pairs} - set(aliases)
+                if unknown:
+                    raise InputFileError(
+                        document.path,
+                        _stage_line(document, stage, key),
+                        f"unknown BO coverage setting(s): {sorted(unknown)}",
+                    )
+                coverage = destination.setdefault("coverage", {})
+                for item, raw in pairs.items():
+                    coverage[aliases[str(item).lower()]] = raw
+                continue
             if key == "stability_audit" and stage == "bo":
                 if not isinstance(value, bool):
                     raise InputFileError(
@@ -586,12 +1169,19 @@ def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: 
                 ] = value
                 continue
             if key == "acquisition" and stage == "al":
-                if str(value).lower() != "uncertainty":
+                acquisition = str(value).lower()
+                allowed = (
+                    {"uncertainty", "constrained_minimax"}
+                    if document.material_kind != "molecular"
+                    else {"uncertainty"}
+                )
+                if acquisition not in allowed:
                     raise InputFileError(
                         document.path,
                         _stage_line(document, stage, key),
-                        "AL acquisition currently supports uncertainty",
+                        f"AL acquisition must be one of {sorted(allowed)}",
                     )
+                destination["acquisition"] = acquisition
                 continue
             if key not in mapping:
                 raise InputFileError(
@@ -620,6 +1210,81 @@ def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: 
             _stage_line(document, "bo", "method"),
             "BO method must be auto, gp, turbo, or saasbo",
         )
+    optimization["method"] = method
+    objective = str(optimization.get("objective", "weighted_rmse")).lower()
+    if objective not in {"weighted_rmse", "feasible_coverage"}:
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "bo", "objective"),
+            "BO objective must be weighted_rmse or feasible_coverage",
+        )
+    optimization["objective"] = objective
+    if objective == "feasible_coverage" and document.material_kind == "molecular":
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "bo", "objective"),
+            "BO feasible_coverage requires an explicit material workflow",
+        )
+    configured_coverage = optimization.get("coverage", {})
+    if configured_coverage and objective != "feasible_coverage":
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "bo", "coverage"),
+            "BO coverage settings require 'objective feasible_coverage'",
+        )
+    if objective == "feasible_coverage":
+        if method not in {"auto", "gp"}:
+            raise InputFileError(
+                document.path,
+                _stage_line(document, "bo", "method", "objective"),
+                "BO feasible_coverage uses a GP and requires method auto or gp",
+            )
+        optimization["method"] = "gp"
+        coverage = optimization.setdefault("coverage", {})
+        coverage.setdefault("archive_target", 96)
+        coverage.setdefault("candidate_pool", 16384)
+        coverage.setdefault("feasible_fraction", 0.50)
+        coverage.setdefault("boundary_fraction", 0.25)
+        coverage.setdefault("uncertainty_fraction", 0.15)
+        coverage.setdefault("global_fraction", 0.10)
+        for key in ("archive_target", "candidate_pool"):
+            value = coverage[key]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise InputFileError(
+                    document.path,
+                    _stage_line(document, "bo", "coverage"),
+                    f"BO coverage {key} must be a positive integer",
+                )
+        fraction_keys = (
+            "feasible_fraction", "boundary_fraction",
+            "uncertainty_fraction", "global_fraction",
+        )
+        if any(isinstance(coverage[key], bool) for key in fraction_keys):
+            raise InputFileError(
+                document.path,
+                _stage_line(document, "bo", "coverage"),
+                "BO coverage fractions must be numeric, not booleans",
+            )
+        try:
+            fractions = [float(coverage[key]) for key in fraction_keys]
+        except (TypeError, ValueError) as exc:
+            raise InputFileError(
+                document.path,
+                _stage_line(document, "bo", "coverage"),
+                "BO coverage fractions must be numeric",
+            ) from exc
+        if any(not math.isfinite(value) or value < 0.0 for value in fractions):
+            raise InputFileError(
+                document.path,
+                _stage_line(document, "bo", "coverage"),
+                "BO coverage fractions must be finite and non-negative",
+            )
+        if not math.isclose(sum(fractions), 1.0, rel_tol=0.0, abs_tol=1.0e-9):
+            raise InputFileError(
+                document.path,
+                _stage_line(document, "bo", "coverage"),
+                "BO coverage feasible/boundary/uncertainty/global fractions must sum to 1",
+            )
     bo_public_keys = {
         "n_initial": ("initial_points",),
         "n_bo_iterations": ("max_rounds", "rounds"),
@@ -765,6 +1430,19 @@ def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: 
             _stage_line(document, "sample", "global_fraction"),
             "sample global_fraction must be in [0, 1]",
         )
+    boundary_fraction = float(sample.get("boundary_fraction", 0.0))
+    if not 0.0 <= boundary_fraction <= 1.0:
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "sample", "boundary_fraction"),
+            "sample boundary_fraction must be in [0, 1]",
+        )
+    if boundary_fraction + global_fraction > 1.0 + 1.0e-12:
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "sample", "boundary_fraction", "global_fraction"),
+            "sample boundary_fraction + global_fraction cannot exceed 1",
+        )
     if str(sample.get("center_selection", "diverse")) not in {"top", "diverse"}:
         raise InputFileError(
             document.path,
@@ -877,6 +1555,46 @@ def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: 
             _stage_line(document, "al", "local_radii"),
             "AL local_radii must be in (0, 1]",
         )
+    if "static_points" in active_learning and int(active_learning["static_points"]) < 1:
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "al", "static_candidates"),
+            "AL static_candidates must be positive",
+        )
+    if str(active_learning.get("acquisition", "uncertainty")) == "constrained_minimax":
+        fractions = [
+            float(active_learning.get("improvement_fraction", 0.50)),
+            float(active_learning.get("boundary_fraction", 0.30)),
+            float(active_learning.get("global_fraction", 0.20)),
+        ]
+        if any(not math.isfinite(value) or value < 0.0 for value in fractions):
+            raise InputFileError(
+                document.path,
+                _stage_line(document, "al", "improvement_fraction"),
+                "AL acquisition fractions must be finite and non-negative",
+            )
+        if not math.isclose(sum(fractions), 1.0, rel_tol=0.0, abs_tol=1.0e-9):
+            raise InputFileError(
+                document.path,
+                _stage_line(document, "al", "improvement_fraction"),
+                "AL improvement/boundary/global fractions must sum to 1",
+            )
+        al_stop = active_learning.setdefault("early_stop", {})
+        al_stop.setdefault("patience", 3)
+        al_stop.setdefault("min_improvement", 0.5)
+        if int(al_stop["patience"]) < 1:
+            raise InputFileError(
+                document.path,
+                _stage_line(document, "al", "early_stop.patience"),
+                "AL early_stop patience must be positive",
+            )
+        improvement = float(al_stop["min_improvement"])
+        if not math.isfinite(improvement) or improvement < 0.0:
+            raise InputFileError(
+                document.path,
+                _stage_line(document, "al", "early_stop.improvement"),
+                "AL early_stop improvement must be finite and non-negative",
+            )
 
     audit = stages.setdefault("audit", {"top_k": 8, "seeds": [101, 202, 303]})
     if int(audit.get("top_k", 0)) < 1:
@@ -895,6 +1613,85 @@ def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: 
             "audit seeds must be positive integers",
         )
 
+    if "screen" in document.workflow:
+        screen = stages.setdefault("screen", {})
+        defaults = {
+            "minimum": 480,
+            "per_dimension": 160,
+            "maximum": 1200,
+            "core_fraction": 0.75,
+            "buffer_multiplier": 1.50,
+            "objective_elite_fraction": 0.10,
+        }
+        for key, value in defaults.items():
+            screen.setdefault(key, value)
+        for key in ("minimum", "per_dimension", "maximum"):
+            value = screen[key]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise InputFileError(
+                    document.path,
+                    _stage_line(document, "screen", key),
+                    f"screen {key} must be a positive integer",
+                )
+        if int(screen["minimum"]) > int(screen["maximum"]):
+            raise InputFileError(
+                document.path,
+                _stage_line(document, "screen", "minimum", "maximum"),
+                "screen minimum cannot exceed maximum",
+            )
+        for key in ("core_fraction", "objective_elite_fraction"):
+            value = float(screen[key])
+            if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                raise InputFileError(
+                    document.path,
+                    _stage_line(document, "screen", key),
+                    f"screen {key} must be in [0, 1]",
+                )
+        if float(screen["buffer_multiplier"]) < 1.0:
+            raise InputFileError(
+                document.path,
+                _stage_line(document, "screen", "buffer_multiplier"),
+                "screen buffer_multiplier must be at least 1",
+            )
+
+    if "finalists" in document.workflow:
+        finalists = stages.setdefault("finalists", {})
+        defaults = {
+            "minimum": 10,
+            "maximum": 20,
+            "near_optimal_window_percent": 1.0,
+            "diverse_reserve": 1,
+        }
+        for key, value in defaults.items():
+            finalists.setdefault(key, value)
+        for key in ("minimum", "maximum", "diverse_reserve"):
+            value = finalists[key]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise InputFileError(
+                    document.path,
+                    _stage_line(document, "finalists", key),
+                    f"finalists {key} must be a non-negative integer",
+                )
+        if int(finalists["minimum"]) < 1:
+            raise InputFileError(
+                document.path,
+                _stage_line(document, "finalists", "minimum"),
+                "finalists minimum must be positive",
+            )
+        if int(finalists["minimum"]) > int(finalists["maximum"]):
+            raise InputFileError(
+                document.path,
+                _stage_line(document, "finalists", "minimum", "maximum"),
+                "finalists minimum cannot exceed maximum",
+            )
+        window = float(finalists["near_optimal_window_percent"])
+        if not math.isfinite(window) or window < 0.0:
+            raise InputFileError(
+                document.path,
+                _stage_line(document, "finalists", "window"),
+                "finalists window must be finite and non-negative",
+            )
+
 
 def compile_input(document: FFOptInput) -> CompiledInput:
     """Compile a parsed input file without reading any legacy project YAML."""
@@ -903,14 +1700,23 @@ def compile_input(document: FFOptInput) -> CompiledInput:
     atom_types, dimensions, type_counts = _compile_atom_types(
         document, primary, optimize=optimize
     )
+    parameter_constraints, derived_params, dimensions = (
+        _compile_parameter_constraints(
+            document,
+            atom_types,
+            dimensions,
+            optimize=optimize,
+        )
+    )
     if dimensions < 1 and any(stage in {"bo", "sample", "nn", "al"} for stage in document.workflow):
         raise InputFileError(document.path, 1, "parameter constraints leave no free dimensions")
     params = document.parameters
-    if params.mixing_epsilon != "geometric":
+    if params.mixing_epsilon not in {"default", "geometric"}:
         raise InputFileError(
             document.path, 1,
             "the LAMMPS backend supports geometric epsilon mixing; choose sigma "
-            "geometric (LAMMPS mix geometric) or arithmetic (LAMMPS mix arithmetic)",
+            "default, geometric (LAMMPS mix geometric), or arithmetic "
+            "(LAMMPS mix arithmetic)",
         )
     derive_type = None
     if params.derive_charge is not None:
@@ -919,17 +1725,17 @@ def compile_input(document: FFOptInput) -> CompiledInput:
     config = deep_merge(method_defaults(), {
         "manifest": {
             "system_name": document.project,
-            "crystal_structure": "molecular",
+            "crystal_structure": document.crystal_family,
             "surface_facet": "none",
             "data_files": {"bulk": str(primary)},
         },
         "pair_params": {
             "mixing_rule": params.mixing_sigma,
             "explicit_pairs": [],
-            "derived_params": [],
+            "derived_params": derived_params,
         },
         "charge": {
-            "enabled": True,
+            "enabled": document.material_kind != "elemental",
             "kspace_accuracy": 1.0e-5,
             "neutrality_constraint": {
                 "enabled": derive_type is not None,
@@ -984,9 +1790,42 @@ def compile_input(document: FFOptInput) -> CompiledInput:
         },
     })
 
+    material = {
+        "kind": document.material_kind,
+        "name": document.material_name or document.project,
+    }
+    if (
+        document.material_kind == "elemental"
+        and document.crystal_family == "bcc"
+    ):
+        material.update({
+            "force_field": "lj/cut",
+            "pair_style": "lj/cut",
+        })
+        config["lammps"]["pair_style"] = "lj/cut"
+        config["pair_params"]["pair_style"] = "lj/cut"
+    crystal = {"family": document.crystal_family}
+    material_pipeline = bool(
+        document.material_kind != "molecular"
+        or document.crystal_family != "molecular"
+        or any(stage in {"screen", "finalists"} for stage in document.workflow)
+    )
+    uses_material_extension = bool(
+        document.material_line is not None
+        or document.crystal_line is not None
+        or parameter_constraints["ties"]
+        or parameter_constraints["differences"]
+        or material_pipeline
+    )
+    if uses_material_extension:
+        config["material"] = material
+        config["crystal"] = crystal
+        config["parameter_constraints"] = parameter_constraints
+
     fitted: list[str] = []
     validation_only: list[str] = []
     bulk_prop = _property(document, "bulk")
+    surface_prop = _property(document, "surface")
     for prop in document.properties:
         if prop.name == "bulk":
             targets = _compile_bulk(document, prop, config)
@@ -994,8 +1833,22 @@ def compile_input(document: FFOptInput) -> CompiledInput:
             targets = _compile_sublimation(document, prop, config, bulk_prop)
         elif prop.name == "adsorption":
             targets = _compile_adsorption(document, prop, config)
-        else:
-            raise InputFileError(document.path, prop.line, "surface input compilation is not implemented yet")
+        elif prop.name == "surface":
+            targets = _compile_surface(document, prop, config, primary)
+        elif prop.name == "elasticity":
+            targets = _compile_elasticity(
+                document,
+                prop,
+                config,
+                bulk_prop,
+                surface_prop,
+            )
+        else:  # Parser validation makes this branch defensive only.
+            raise InputFileError(
+                document.path,
+                prop.line,
+                f"property input compilation is not implemented for {prop.name!r}",
+            )
         config["validation"]["property_units"].update(PROPERTY_OUTPUT_UNITS[prop.name])
         config["validation"]["property_units"].update({
             name: info["unit"] for name, info in targets.items()
@@ -1003,12 +1856,15 @@ def compile_input(document: FFOptInput) -> CompiledInput:
         if prop.fitted:
             fitted.append(prop.name)
             config["targets"].update(targets)
-            config["property_evaluators"][prop.name] = {"enabled": True}
+            if prop.name != "elasticity":
+                config["property_evaluators"][prop.name] = {"enabled": True}
             if prop.name == "sublimation":
                 config["sublimation"]["enabled"] = True
                 config["property_evaluators"]["bulk"] = {"enabled": True}
             elif prop.name == "adsorption":
                 config["adsorption"]["enabled"] = True
+            elif prop.name == "surface":
+                config["lammps"]["compute_surface"] = True
         else:
             validation_only.append(prop.name)
             config["validation"]["property_evaluators"][prop.name] = {"enabled": True}
@@ -1017,9 +1873,16 @@ def compile_input(document: FFOptInput) -> CompiledInput:
                 config["validation"]["property_settings"]["sublimation"] = {"enabled": True}
             elif prop.name == "adsorption":
                 config["validation"]["property_settings"]["adsorption"] = {"enabled": True}
+            elif prop.name == "surface":
+                config["validation"]["property_settings"]["lammps"] = {
+                    "compute_surface": True,
+                }
     # Every fitted property is also recomputed by final validation.
     for name in fitted:
-        config["validation"]["property_evaluators"].setdefault(name, {"enabled": True})
+        if name != "elasticity":
+            config["validation"]["property_evaluators"].setdefault(
+                name, {"enabled": True}
+            )
 
     stages: dict[str, Any] = {
         "sample": {
@@ -1037,6 +1900,75 @@ def compile_input(document: FFOptInput) -> CompiledInput:
     _apply_stage_settings(document, config, stages)
     config.setdefault("workflow", {})["active_properties"] = list(config["targets"])
 
+    pipeline_stages = list(document.workflow)
+    if material_pipeline:
+        # ``al`` remains the concise public token.  The material registry expands
+        # it into independently restartable constrained-refinement rounds.
+        pipeline_stages = [
+            "constrained_al" if stage == "al" else stage
+            for stage in pipeline_stages
+        ]
+    pipeline: dict[str, Any] = {
+        "stages": pipeline_stages,
+        "audit": dict(stages["audit"]),
+    }
+    if material_pipeline and "screen" in pipeline_stages:
+        # The public ``screen`` stage expands to two executable nodes.  Keep
+        # the fully defaulted scientific selection contract on both nodes so
+        # their signatures and command builders do not depend on knowing that
+        # the settings originally came from a synthetic public-stage token.
+        screen_settings = dict(stages["screen"])
+        pipeline["candidates"] = dict(screen_settings)
+        pipeline["static"] = dict(screen_settings)
+    if material_pipeline and "constrained_al" in pipeline_stages:
+        active_learning = config["active_learning"]
+        early_stop = active_learning.get("early_stop", {})
+        improvement_fraction = float(
+            active_learning.get("improvement_fraction", 0.50)
+        )
+        maximum_rounds = int(active_learning["n_rounds"])
+        pipeline["stage_repetitions"] = {
+            "constrained_al": maximum_rounds,
+        }
+        pipeline["constrained_al"] = {
+            "maximum_rounds": maximum_rounds,
+            "patience": int(early_stop.get("patience", 3)),
+            "minimum_improvement_percent_points": float(
+                early_stop.get("min_improvement", 0.5)
+            ),
+            "structural_proposals_per_round": int(
+                active_learning["n_candidates_per_round"]
+            ),
+            "mechanical_proposals_per_round": int(
+                active_learning.get("static_points", 20)
+            ),
+            "improvement_fraction": improvement_fraction,
+            # The prerelease explicit-pool backend calls the improvement
+            # tranche ``feasible``.  Preserve the alias until every backend
+            # consumes the generic improvement name.
+            "feasible_fraction": improvement_fraction,
+            "boundary_fraction": float(
+                active_learning.get("boundary_fraction", 0.30)
+            ),
+            "global_fraction": float(
+                active_learning.get("global_fraction", 0.20)
+            ),
+            "candidate_pool": int(active_learning["n_candidate_pool"]),
+            "seed": int(config["optimization"]["random_seed"]),
+            # Reuse the declared replicated structural-audit seeds.  A
+            # single NPT trajectory is not sufficient evidence for promoting
+            # a newly acquired candidate to exact static mechanics.
+            "structural_seeds": [int(seed) for seed in stages["audit"]["seeds"]],
+        }
+        pipeline["graph_mode"] = "linear"
+    if material_pipeline and "finalists" in pipeline_stages:
+        finalist_settings = dict(stages["finalists"])
+        pipeline["finalists"] = {
+            **finalist_settings,
+            "top_n": int(finalist_settings["maximum"]),
+            "diversity_slots": int(finalist_settings["diverse_reserve"]),
+        }
+
     project_data = {
         "schema_version": 1,
         "project": {
@@ -1045,11 +1977,14 @@ def compile_input(document: FFOptInput) -> CompiledInput:
             "run_root": f"runs/{document.project}",
         },
         "stages": stages,
-        "pipeline": {
-            "stages": list(document.workflow),
-            "audit": dict(stages["audit"]),
-        },
+        "pipeline": pipeline,
     }
+    if uses_material_extension:
+        project_data.update({
+            "material": material,
+            "crystal": crystal,
+            "parameter_constraints": parameter_constraints,
+        })
     return CompiledInput(
         document=document,
         config=config,
@@ -1057,4 +1992,7 @@ def compile_input(document: FFOptInput) -> CompiledInput:
         dimensions=dimensions,
         fitted_properties=tuple(fitted),
         validation_properties=tuple(validation_only),
+        material=material,
+        crystal=crystal,
+        parameter_constraints=parameter_constraints,
     )

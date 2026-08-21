@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ffopt-lammps"
-version = "0.3.0a3"
+version = "0.3.0a4"
 description = "Restartable force-field parameter optimization with LAMMPS, Bayesian optimization, surrogate models, and active learning."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -100,7 +100,10 @@ viz = "viz"
 "share/ffopt/lammps/inputs/bulk" = ["lammps/inputs/bulk/*"]
 "share/ffopt/lammps/inputs/molecule" = ["lammps/inputs/molecule/*"]
 "share/ffopt/lammps/inputs/adsorption" = ["lammps/inputs/adsorption/*"]
+"share/ffopt/lammps/inputs/surface" = ["lammps/inputs/surface/*"]
+"share/ffopt/lammps/inputs/elasticity" = ["lammps/inputs/elasticity/*"]
 "share/ffopt/examples/btah" = ["examples/btah/*.in"]
+"share/ffopt/examples/fe_bcc" = ["examples/fe_bcc/*.in", "examples/fe_bcc/*.md"]
 "share/ffopt/data/bulk" = ["data/bulk/BTAH_822_bulk.data"]
 "share/ffopt/data/molecule" = ["data/molecule/BTAH_822_single.data"]
 "share/ffopt/data/adsorption" = ["data/adsorption/*.data"]

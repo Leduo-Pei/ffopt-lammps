@@ -1,11 +1,12 @@
 # Property evaluator plugins (advanced)
 
-The schema-1 `ffopt.in` compiler currently exposes `bulk`, `sublimation`, and
-`adsorption`. Run `ffopt plugins` and check the `ffopt.in=yes` marker before
-using a property in the one-file interface. The surface evaluator and external
-entry points are engine APIs retained for development and legacy generated
-configurations; installing an evaluator alone does not add new `ffopt.in`
-syntax.
+The schema-1 `ffopt.in` compiler recognizes the built-in `bulk`,
+`sublimation`, `adsorption`, `surface`, and `elasticity` blocks. Run
+`ffopt plugins` and check the `ffopt.in=yes` marker for evaluator-backed
+properties. Cubic `elasticity` is instead executed by the native BCC material
+stage graph, so it is public input syntax but is not a third-party evaluator
+entry point. Installing an external evaluator alone does not add new
+`ffopt.in` syntax.
 
 FFOpt discovers external property evaluators from the Python entry-point group
 `ffopt.property_evaluators`.
@@ -21,6 +22,9 @@ from ffopt.properties import (
 
 class DipoleEvaluator(PropertyEvaluator):
     name = "dipole"
+    roles = frozenset({"objective", "validation"})
+    fidelity = "static_0k"
+    cost_class = "low"
     dependencies = ()
     provides = frozenset({"dipole_debye"})
 
@@ -38,6 +42,46 @@ dipole = "my_ffopt_plugin:DipoleEvaluator"
 
 The entry point may expose an evaluator instance, a `PropertyEvaluator`
 subclass, or a zero-argument factory. Names use lower-case snake_case.
+
+## Property contracts
+
+The five metadata fields above form the evaluator contract. `roles` may contain
+`constraint`, `objective`, `promotion`, or `validation`; `fidelity` is an
+extensible lower-case identifier such as `structural`, `static_0k`, or
+`dynamic_300k`; and `cost_class` is one of `low`, `medium`, `high`, or
+`extreme`. Dependencies name other evaluators, while `provides` names numerical
+outputs. FFOpt validates all fields at registration time.
+
+For a single explicit object, import and assign `PropertyContract` instead:
+
+```python
+from ffopt.properties import PropertyContract, PropertyRole
+
+contract = PropertyContract(
+    roles=frozenset({PropertyRole.PROMOTION, PropertyRole.VALIDATION}),
+    fidelity="dynamic_300k",
+    cost_class="high",
+    dependencies=("bulk",),
+    provides=frozenset({"elastic_K", "elastic_Cprime", "elastic_C44"}),
+)
+```
+
+Do not declare a field both on the class and in `contract` with different
+values. Legacy plugins that only define `dependencies` and `provides` remain
+valid; their compatibility defaults are roles `objective` and `validation`,
+fidelity `unspecified`, and cost class `medium`.
+
+Registries can select evaluators and build dependency-complete plans without
+hard-coding material names:
+
+```python
+selected = registry.select(role="promotion", fidelity="static_0k")
+plan = registry.build_plan(role="promotion", fidelity="static_0k")
+```
+
+Required dependencies are included even when their own role or fidelity does
+not match the filter. `ffopt plugins --json` exposes the normalized contract for
+each built-in or third-party evaluator.
 
 ## Engine configuration
 

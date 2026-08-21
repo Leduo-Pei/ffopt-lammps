@@ -1,0 +1,84 @@
+# Elemental BCC bulk: zero-K triclinic relaxation followed by flexible-cell NPT.
+#
+# ``nx``, ``ny`` and ``nz`` are the effective cell counts after replication:
+# cells_in_data[i] * replicate[i].  They are used only to normalize the
+# reported lattice constants.  The input data itself is replicated exactly
+# once by the three explicit replicate variables.
+
+units           real
+dimension       3
+boundary        p p p
+atom_style      full
+newton          on
+
+variable inv_nx equal 1.0/${nx}
+variable inv_ny equal 1.0/${ny}
+variable inv_nz equal 1.0/${nz}
+
+pair_style      lj/cut ${cutoff}
+read_data       ${bulk_data}
+replicate       ${replicate_x} ${replicate_y} ${replicate_z}
+include         pair_coeffs.lmp
+change_box      all triclinic
+
+neighbor        2.0 bin
+neigh_modify    delay 0 every 1 check yes
+
+# Relax all six cell degrees of freedom at zero external pressure.
+fix              RELAX all box/relax tri 0.0 vmax 0.001
+min_style        cg
+minimize         1.0e-8 1.0e-10 10000 100000
+unfix            RELAX
+run              0
+
+variable a_0K equal $(cella*v_inv_nx)
+if "${save_traj} == 1" then "write_data bulk_0K_relaxed.data nocoeff"
+
+# Fully flexible finite-temperature cell.  ``tdamp`` and ``pdamp`` are explicit
+# scientific protocol inputs rather than hidden constants.
+velocity         all create ${temperature} ${npt_seed} mom yes rot no dist gaussian
+fix              NPT all npt temp ${temperature} ${temperature} ${tdamp} &
+                 tri ${pressure} ${pressure} ${pdamp}
+timestep         ${timestep_value}
+thermo           5000
+thermo_style     custom step temp press pe enthalpy vol density &
+                 cella cellb cellc cellalpha cellbeta cellgamma
+
+run              ${equil_steps}
+reset_timestep   0
+
+if "${save_traj} == 1" then &
+  "dump TRAJ all custom 100 bulk_npt_trajectory.lammpstrj id type x y z vx vy vz"
+if "${save_traj} == 1" then "dump_modify TRAJ sort id"
+
+variable a_inst  equal cella*v_inv_nx
+variable b_inst  equal cellb*v_inv_ny
+variable c_inst  equal cellc*v_inv_nz
+variable al_inst equal cellalpha
+variable bt_inst equal cellbeta
+variable gm_inst equal cellgamma
+variable d_inst  equal density
+variable pe_inst equal pe
+variable h_inst  equal enthalpy
+
+fix AVE all ave/time 10 100 1000 &
+    v_a_inst v_b_inst v_c_inst v_al_inst v_bt_inst v_gm_inst &
+    v_d_inst v_pe_inst v_h_inst
+run ${prod_steps}
+
+variable a_mean  equal $(f_AVE[1])
+variable b_mean  equal $(f_AVE[2])
+variable c_mean  equal $(f_AVE[3])
+variable al_mean equal $(f_AVE[4])
+variable bt_mean equal $(f_AVE[5])
+variable gm_mean equal $(f_AVE[6])
+variable d_mean  equal $(f_AVE[7])
+variable pe_mean equal $(f_AVE[8])
+variable h_mean  equal $(f_AVE[9])
+
+unfix AVE
+unfix NPT
+
+print "DATA_BULK: ${a_0K} ${a_mean} ${b_mean} ${c_mean} ${al_mean} ${bt_mean} ${gm_mean} ${d_mean} ${pe_mean} ${h_mean}"
+if "${save_traj} == 1" then "undump TRAJ"
+if "${save_traj} == 1" then "write_data bulk_300K_final.data nocoeff"

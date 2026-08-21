@@ -10,9 +10,20 @@ from pathlib import Path
 from typing import Any
 
 PARAMETER_NAMES = {"epsilon", "sigma", "charge"}
-PIPELINE_STAGE_ORDER = ("bo", "sample", "nn", "al", "audit", "finalize", "validate")
-PIPELINE_STAGES = set(PIPELINE_STAGE_ORDER)
-PROPERTY_NAMES = {"bulk", "sublimation", "adsorption"}
+LEGACY_PIPELINE_STAGE_ORDER = (
+    "bo", "sample", "nn", "al", "audit", "finalize", "validate",
+)
+MATERIAL_PIPELINE_STAGE_ORDER = (
+    "bo", "sample", "audit", "screen", "nn", "al", "finalists", "validate",
+)
+# Keep the public vocabulary independent of one workflow shape.  The applicable
+# ordering and dependency contract is selected only after the complete input is
+# parsed, so a user may place ``material`` before or after ``workflow``.
+PIPELINE_STAGE_ORDER = LEGACY_PIPELINE_STAGE_ORDER
+PIPELINE_STAGES = set(LEGACY_PIPELINE_STAGE_ORDER) | set(MATERIAL_PIPELINE_STAGE_ORDER)
+PROPERTY_NAMES = {"bulk", "sublimation", "adsorption", "surface", "elasticity"}
+MATERIAL_KINDS = {"elemental", "molecular", "multicomponent"}
+CRYSTAL_FAMILIES = {"bcc", "molecular"}
 
 
 class InputFileError(ValueError):
@@ -49,6 +60,23 @@ class AtomTypeSpec:
     epsilon: float
     sigma: float
     charge: float
+    charge_explicit: bool
+    line: int
+
+
+@dataclass(frozen=True)
+class TieSpec:
+    parameter: str
+    labels: str | tuple[str, ...]
+    line: int
+
+
+@dataclass(frozen=True)
+class DifferenceSpec:
+    parameter: str
+    first: str
+    second: str
+    maximum: float
     line: int
 
 
@@ -61,6 +89,8 @@ class ParameterSpec:
     fixed_by_type: set[tuple[str, str]] = field(default_factory=set)
     fixed_lines: dict[str, int] = field(default_factory=dict)
     fixed_by_type_lines: dict[tuple[str, str], int] = field(default_factory=dict)
+    ties: dict[str, TieSpec] = field(default_factory=dict)
+    differences: list[DifferenceSpec] = field(default_factory=list)
     derive_charge: str | None = None
     mixing_epsilon: str = "geometric"
     mixing_sigma: str = "geometric"
@@ -78,18 +108,40 @@ class TargetSpec:
     line: int
 
 
+@dataclass(frozen=True)
+class ElasticityModuleSpec:
+    """One fidelity-specific cubic-elasticity module declaration."""
+
+    fidelity: str
+    role: str
+    line: int
+
+
+@dataclass(frozen=True)
+class ElasticityTargetSpec:
+    """An independent cubic target at one explicitly named fidelity."""
+
+    fidelity: str
+    name: str
+    value: float
+    unit: str
+    line: int
+
+
 @dataclass
 class PropertySpec:
     name: str
     line: int
     data_files: dict[str, str] = field(default_factory=dict)
     targets: list[TargetSpec] = field(default_factory=list)
+    elasticity_modules: dict[str, ElasticityModuleSpec] = field(default_factory=dict)
+    elasticity_targets: list[ElasticityTargetSpec] = field(default_factory=list)
     settings: dict[str, Any] = field(default_factory=dict)
     setting_lines: dict[str, int] = field(default_factory=dict)
 
     @property
     def fitted(self) -> bool:
-        return bool(self.targets)
+        return bool(self.targets or self.elasticity_targets)
 
 
 @dataclass
@@ -97,6 +149,11 @@ class FFOptInput:
     path: Path
     version: int | None = None
     project: str = ""
+    material_kind: str = "molecular"
+    material_name: str | None = None
+    material_line: int | None = None
+    crystal_family: str = "molecular"
+    crystal_line: int | None = None
     workflow: list[str] = field(default_factory=list)
     parameters: ParameterSpec = field(default_factory=ParameterSpec)
     properties: list[PropertySpec] = field(default_factory=list)
@@ -181,8 +238,8 @@ def _range_spec(path: Path, line: int, tokens: list[str]) -> RangeSpec:
         high = _float(path, line, tokens[2], "absolute upper bound")
     else:
         raise InputFileError(path, line, f"unknown range mode {tokens[0]!r}")
-    if low == high:
-        raise InputFileError(path, line, "range bounds must differ")
+    if low >= high:
+        raise InputFileError(path, line, "range lower bound must be smaller than upper bound")
     return RangeSpec(mode, float(low), float(high), line)
 
 
@@ -233,23 +290,349 @@ def _parse_target(path: Path, prop: PropertySpec, line: int, args: list[str]) ->
     return TargetSpec(name, value, unit, weight, tolerance, line)
 
 
+def _parse_elasticity_line(
+    document: FFOptInput,
+    prop: PropertySpec,
+    line: int,
+    tokens: list[str],
+) -> None:
+    """Parse the strict cubic-elasticity sub-language.
+
+    Elasticity deliberately does not reuse the legacy weighted-target grammar:
+    its three independent moduli are ranked by constrained minimax error, not
+    by a weighted RMSE. Keeping the syntax separate prevents a seemingly
+    harmless ``weight`` option from silently changing the scientific problem.
+    """
+
+    path = document.path
+    command = tokens[0].lower()
+    args = tokens[1:]
+
+    def set_setting(key: str, value: Any) -> None:
+        if key in prop.settings:
+            previous = prop.setting_lines[key]
+            raise InputFileError(
+                path,
+                line,
+                f"duplicate elasticity {key!r} setting "
+                f"(first set on line {previous})",
+            )
+        prop.settings[key] = value
+        prop.setting_lines[key] = line
+
+    if command == "module":
+        if len(args) != 2:
+            raise InputFileError(
+                path,
+                line,
+                "elasticity module syntax: module static objective | "
+                "module dynamic promotion|validation",
+            )
+        fidelity, role = args[0].lower(), args[1].lower()
+        if fidelity not in {"static", "dynamic"}:
+            raise InputFileError(
+                path,
+                line,
+                "elasticity module must be static or dynamic",
+            )
+        allowed_roles = {
+            "static": {"objective"},
+            "dynamic": {"promotion", "validation"},
+        }[fidelity]
+        if role not in allowed_roles:
+            choices = " or ".join(sorted(allowed_roles))
+            raise InputFileError(
+                path,
+                line,
+                f"elasticity {fidelity} module role must be {choices}",
+            )
+        if fidelity in prop.elasticity_modules:
+            previous = prop.elasticity_modules[fidelity]
+            raise InputFileError(
+                path,
+                line,
+                f"duplicate elasticity {fidelity!r} module "
+                f"(first set on line {previous.line})",
+            )
+        prop.elasticity_modules[fidelity] = ElasticityModuleSpec(
+            fidelity=fidelity,
+            role=role,
+            line=line,
+        )
+        return
+
+    if command == "target":
+        if len(args) != 4:
+            raise InputFileError(
+                path,
+                line,
+                "elasticity target syntax: "
+                "target static|dynamic B|Cprime|C44 VALUE GPa",
+            )
+        fidelity, name, raw_value, unit = args
+        fidelity = fidelity.lower()
+        if fidelity not in {"static", "dynamic"}:
+            raise InputFileError(
+                path,
+                line,
+                "elasticity target fidelity must be static or dynamic",
+            )
+        if name not in {"B", "Cprime", "C44"}:
+            raise InputFileError(
+                path,
+                line,
+                "cubic elasticity fit targets must be exactly B, Cprime, and C44; "
+                "K, G, E, and nu are not independent fit targets",
+            )
+        if unit.lower() != "gpa":
+            raise InputFileError(
+                path,
+                line,
+                f"elasticity target {name} unit must be GPa, got {unit!r}",
+            )
+        value = _float(path, line, raw_value, f"elasticity target {name}")
+        if value <= 0.0:
+            raise InputFileError(
+                path,
+                line,
+                f"elasticity target {name} must be positive",
+            )
+        duplicate = next(
+            (
+                target
+                for target in prop.elasticity_targets
+                if target.fidelity == fidelity and target.name == name
+            ),
+            None,
+        )
+        if duplicate is not None:
+            raise InputFileError(
+                path,
+                line,
+                f"duplicate elasticity {fidelity} target {name!r} "
+                f"(first set on line {duplicate.line})",
+            )
+        prop.elasticity_targets.append(
+            ElasticityTargetSpec(fidelity, name, value, "GPa", line)
+        )
+        return
+
+    if command == "gate":
+        if len(args) != 3:
+            raise InputFileError(
+                path,
+                line,
+                "elasticity gate syntax: gate lattice|density|surface VALUE "
+                "percent | gate angles VALUE degree",
+            )
+        name = args[0].lower()
+        expected_units = {
+            "lattice": {"percent", "%"},
+            "density": {"percent", "%"},
+            "surface": {"percent", "%"},
+            "angles": {"degree", "degrees", "deg"},
+        }
+        if name not in expected_units:
+            raise InputFileError(
+                path,
+                line,
+                "elasticity gate must be lattice, angles, density, or surface",
+            )
+        if args[2].lower() not in expected_units[name]:
+            unit = "degree" if name == "angles" else "percent"
+            raise InputFileError(
+                path,
+                line,
+                f"elasticity {name} gate unit must be {unit}",
+            )
+        value = _float(path, line, args[1], f"elasticity {name} gate")
+        if value <= 0.0:
+            raise InputFileError(
+                path,
+                line,
+                f"elasticity {name} gate must be positive",
+            )
+        set_setting(f"gate.{name}", value)
+        return
+
+    if command == "tier":
+        if len(args) != 2 or args[1].lower() not in {"percent", "%"}:
+            raise InputFileError(
+                path,
+                line,
+                "elasticity tier syntax: tier VALUE percent",
+            )
+        value = _float(path, line, args[0], "elasticity reporting tier")
+        if value <= 0.0:
+            raise InputFileError(
+                path,
+                line,
+                "elasticity reporting tier must be positive",
+            )
+        set_setting("tier", value)
+        return
+
+    if command == "born":
+        if len(args) != 1 or args[0].lower() not in {"required", "off"}:
+            raise InputFileError(
+                path,
+                line,
+                "elasticity born syntax: born required|off",
+            )
+        set_setting("born", args[0].lower() == "required")
+        return
+
+    if command == "r2":
+        if len(args) != 1:
+            raise InputFileError(path, line, "elasticity r2 requires one value")
+        value = _float(path, line, args[0], "elasticity minimum R2")
+        if not 0.0 < value <= 1.0:
+            raise InputFileError(
+                path,
+                line,
+                "elasticity r2 must be in (0, 1]",
+            )
+        set_setting("minimum_r2", value)
+        return
+
+    if command == "strain":
+        if len(args) < 2:
+            raise InputFileError(
+                path,
+                line,
+                "elasticity strain requires at least two positive magnitudes",
+            )
+        values = tuple(
+            _float(path, line, value, "elasticity strain magnitude")
+            for value in args
+        )
+        if any(value <= 0.0 or value > 0.05 for value in values):
+            raise InputFileError(
+                path,
+                line,
+                "elasticity strain magnitudes must be in (0, 0.05]",
+            )
+        if any(right <= left for left, right in zip(values, values[1:])):
+            raise InputFileError(
+                path,
+                line,
+                "elasticity strain magnitudes must be unique and strictly increasing",
+            )
+        set_setting("strain", values)
+        return
+
+    if command == "replicate":
+        if len(args) != 3:
+            raise InputFileError(
+                path,
+                line,
+                "elasticity replicate requires NX NY NZ",
+            )
+        values = tuple(
+            _int(path, line, value, "elasticity replicate") for value in args
+        )
+        if any(value < 1 for value in values):
+            raise InputFileError(
+                path,
+                line,
+                "elasticity replicate values must be positive integers",
+            )
+        set_setting("replicate", values)
+        return
+
+    if command in {"temperature", "timestep"}:
+        accepted_units = {
+            "temperature": {"k"},
+            "timestep": {"fs"},
+        }[command]
+        if len(args) != 2 or args[1].lower() not in accepted_units:
+            unit = "K" if command == "temperature" else "fs"
+            raise InputFileError(
+                path,
+                line,
+                f"elasticity {command} syntax: {command} VALUE {unit}",
+            )
+        value = _float(path, line, args[0], f"elasticity {command}")
+        if value <= 0.0:
+            raise InputFileError(
+                path,
+                line,
+                f"elasticity {command} must be positive",
+            )
+        set_setting(command, value)
+        return
+
+    if command in {"equilibration", "production"}:
+        if len(args) != 1:
+            raise InputFileError(
+                path,
+                line,
+                f"elasticity {command} requires one integer value",
+            )
+        value = _int(path, line, args[0], f"elasticity {command}")
+        minimum = 0 if command == "equilibration" else 1
+        if value < minimum:
+            qualifier = "non-negative" if command == "equilibration" else "positive"
+            raise InputFileError(
+                path,
+                line,
+                f"elasticity {command} must be {qualifier}",
+            )
+        set_setting(command, value)
+        return
+
+    if command in {"seeds", "validation_seeds"}:
+        label = (
+            "seeds" if command == "seeds" else "validation_seeds"
+        )
+        if not args:
+            raise InputFileError(
+                path,
+                line,
+                f"elasticity {label} requires one or more values",
+            )
+        values = tuple(
+            _int(path, line, value, f"elasticity {label} value")
+            for value in args
+        )
+        if any(value < 1 for value in values):
+            raise InputFileError(
+                path,
+                line,
+                f"elasticity {label} must be positive integers",
+            )
+        if len(set(values)) != len(values):
+            raise InputFileError(
+                path, line, f"elasticity {label} must be unique"
+            )
+        set_setting(command, values)
+        return
+
+    raise InputFileError(
+        path,
+        line,
+        f"unknown elasticity property command {tokens[0]!r}",
+    )
+
+
 def _parse_parameter_line(document: FFOptInput, line: int, tokens: list[str]) -> None:
     path = document.path
     params = document.parameters
     command = tokens[0].lower()
     args = tokens[1:]
     if command == "type":
-        if len(args) != 5:
+        if len(args) not in {4, 5}:
             raise InputFileError(
                 path, line,
-                "type requires ID LABEL EPSILON SIGMA CHARGE",
+                "type requires ID LABEL EPSILON SIGMA [CHARGE]",
             )
         atom_type = AtomTypeSpec(
             _int(path, line, args[0], "type ID"),
             args[1],
             _float(path, line, args[2], "epsilon"),
             _float(path, line, args[3], "sigma"),
-            _float(path, line, args[4], "charge"),
+            _float(path, line, args[4], "charge") if len(args) == 5 else 0.0,
+            len(args) == 5,
             line,
         )
         for previous in params.atom_types:
@@ -342,6 +725,54 @@ def _parse_parameter_line(document: FFOptInput, line: int, tokens: list[str]) ->
                 )
             params.default_ranges[name] = _range_spec(path, line, args[1:])
         return
+    if command == "tie":
+        if len(args) != 2 or args[0].lower() not in PARAMETER_NAMES:
+            raise InputFileError(path, line, "tie syntax: tie PARAMETER all")
+        parameter = args[0].lower()
+        if args[1].lower() != "all":
+            raise InputFileError(path, line, "tie currently requires the group 'all'")
+        if parameter in params.ties:
+            previous = params.ties[parameter].line
+            raise InputFileError(
+                path,
+                line,
+                f"duplicate tie for parameter {parameter!r} "
+                f"(first set on line {previous})",
+            )
+        params.ties[parameter] = TieSpec(parameter, "all", line)
+        return
+    if command == "difference":
+        if len(args) not in {5, 6} or args[3].lower() != "max":
+            raise InputFileError(
+                path,
+                line,
+                "difference syntax: difference sigma LABEL1 LABEL2 max VALUE [A]",
+            )
+        parameter = args[0].lower()
+        if parameter != "sigma":
+            raise InputFileError(path, line, "difference currently supports sigma only")
+        if len(args) == 6 and args[5].lower() not in {"a", "angstrom", "angstroms"}:
+            raise InputFileError(path, line, "sigma difference unit must be A/angstrom")
+        first, second = args[1], args[2]
+        if first == second:
+            raise InputFileError(path, line, "difference requires two distinct type labels")
+        maximum = _float(path, line, args[4], "maximum sigma difference")
+        if maximum <= 0.0:
+            raise InputFileError(path, line, "maximum sigma difference must be positive")
+        for previous in params.differences:
+            if previous.parameter == parameter and {
+                previous.first, previous.second
+            } == {first, second}:
+                raise InputFileError(
+                    path,
+                    line,
+                    f"duplicate difference for {first!r}/{second!r} "
+                    f"(first set on line {previous.line})",
+                )
+        params.differences.append(
+            DifferenceSpec(parameter, first, second, maximum, line)
+        )
+        return
     if command == "neutrality":
         if "neutrality" in params.setting_lines:
             previous = params.setting_lines["neutrality"]
@@ -361,11 +792,15 @@ def _parse_parameter_line(document: FFOptInput, line: int, tokens: list[str]) ->
     if command == "mixing":
         if len(args) == 1:
             rule = args[0].lower()
-            if rule not in {"geometric", "arithmetic"}:
+            if rule not in {"default", "geometric", "arithmetic"}:
                 raise InputFileError(
-                    path, line, "mixing rule must be geometric or arithmetic"
+                    path,
+                    line,
+                    "mixing rule must be default, geometric, or arithmetic",
                 )
-            # LAMMPS mix arithmetic still uses geometric epsilon mixing.
+            # LAMMPS mix arithmetic still uses geometric epsilon mixing.  The
+            # explicit ``default`` value is retained for the backend so it can
+            # omit pair_modify and let the selected pair style decide.
             for parameter in ("epsilon", "sigma"):
                 setting = f"mixing_{parameter}"
                 if setting in params.setting_lines:
@@ -377,7 +812,7 @@ def _parse_parameter_line(document: FFOptInput, line: int, tokens: list[str]) ->
                         f"(first set on line {previous})",
                     )
                 params.setting_lines[setting] = line
-            params.mixing_epsilon = "geometric"
+            params.mixing_epsilon = "default" if rule == "default" else "geometric"
             params.mixing_sigma = rule
         elif len(args) == 2 and args[0].lower() in {"epsilon", "sigma"}:
             rule = args[1].lower()
@@ -406,7 +841,7 @@ def _parse_parameter_line(document: FFOptInput, line: int, tokens: list[str]) ->
             raise InputFileError(
                 path,
                 line,
-                "mixing syntax: mixing geometric|arithmetic",
+                "mixing syntax: mixing default|geometric|arithmetic",
             )
         return
     if command == "charge_limit":
@@ -433,6 +868,9 @@ def _parse_property_line(document: FFOptInput, prop: PropertySpec, line: int, to
     path = document.path
     command = tokens[0].lower()
     args = tokens[1:]
+    if prop.name == "elasticity":
+        _parse_elasticity_line(document, prop, line, tokens)
+        return
     if command == "target":
         prop.targets.append(_parse_target(path, prop, line, args))
         return
@@ -440,6 +878,7 @@ def _parse_property_line(document: FFOptInput, prop: PropertySpec, line: int, to
         "bulk": {"data", "bulk"},
         "sublimation": {"bulk", "single"},
         "adsorption": {"complex", "slab", "molecule", "mol"},
+        "surface": {"complete", "split"},
     }[prop.name]
     if command == "data":
         if prop.name == "bulk" and len(args) == 1:
@@ -470,13 +909,17 @@ def _parse_property_line(document: FFOptInput, prop: PropertySpec, line: int, to
     if not args:
         raise InputFileError(path, line, f"{command} requires a value")
 
+    bulk_settings = {
+        "cells_in_data", "temperature", "pressure", "timestep", "cutoff",
+        "equilibration", "production", "seed",
+    }
+    if document.crystal_family == "bcc":
+        bulk_settings.update({"replicate", "tdamp", "pdamp"})
     allowed_settings = {
-        "bulk": {
-            "cells_in_data", "temperature", "pressure", "timestep", "cutoff",
-            "equilibration", "production", "seed",
-        },
+        "bulk": bulk_settings,
         "sublimation": {"temperature", "cutoff"},
         "adsorption": {"cutoff", "protocol", "metal"},
+        "surface": {"facet", "replicate"},
     }[prop.name]
     if command not in allowed_settings:
         raise InputFileError(
@@ -502,12 +945,22 @@ def _parse_property_line(document: FFOptInput, prop: PropertySpec, line: int, to
             tuple(_int(path, line, value, command) for value in args),
         )
         return
-    if command in {"temperature", "pressure", "timestep", "cutoff"}:
+    if command == "replicate":
+        if len(args) != 3:
+            raise InputFileError(path, line, "replicate requires NX NY NZ")
+        set_setting(
+            "replicate",
+            tuple(_int(path, line, value, command) for value in args),
+        )
+        return
+    if command in {"temperature", "pressure", "timestep", "cutoff", "tdamp", "pdamp"}:
         units = {
             "temperature": {"k"},
             "pressure": {"atm"},
             "timestep": {"fs"},
             "cutoff": {"a", "angstrom", "angstroms"},
+            "tdamp": {"fs"},
+            "pdamp": {"fs"},
         }[command]
         if len(args) not in {1, 2}:
             raise InputFileError(path, line, f"{command} requires VALUE [UNIT]")
@@ -527,6 +980,11 @@ def _parse_property_line(document: FFOptInput, prop: PropertySpec, line: int, to
         if len(args) != 1:
             raise InputFileError(path, line, f"{command} requires one value")
         set_setting(command, args[0].lower() if command != "metal" else args[0])
+        return
+    if command == "facet":
+        if len(args) != 1:
+            raise InputFileError(path, line, "facet requires one Miller-index value")
+        set_setting("facet", args[0])
         return
     raise InputFileError(path, line, f"unknown {prop.name} property command {tokens[0]!r}")
 
@@ -552,6 +1010,89 @@ def _parse_stage_line(document: FFOptInput, stage: str, line: int, tokens: list[
         raise InputFileError(document.path, line, f"duplicate {stage} setting {key!r}")
     settings[key] = values[0] if len(values) == 1 else values
     setting_lines[key] = line
+
+
+def _validate_elasticity_property(
+    document: FFOptInput,
+    prop: PropertySpec,
+) -> None:
+    """Validate cross-line invariants of one cubic-elasticity block."""
+
+    path = document.path
+    static = prop.elasticity_modules.get("static")
+    if static is None:
+        raise InputFileError(
+            path,
+            prop.line,
+            "elasticity requires 'module static objective'",
+        )
+    if document.crystal_family != "bcc":
+        line = document.crystal_line or prop.line
+        raise InputFileError(
+            path,
+            line,
+            "the schema-1 cubic elasticity contract requires 'crystal bcc'",
+        )
+
+    required_targets = {"B", "Cprime", "C44"}
+    for fidelity, module in prop.elasticity_modules.items():
+        names = {
+            target.name
+            for target in prop.elasticity_targets
+            if target.fidelity == fidelity
+        }
+        if names != required_targets:
+            missing = sorted(required_targets - names)
+            extra = sorted(names - required_targets)
+            details = []
+            if missing:
+                details.append(f"missing={missing}")
+            if extra:
+                details.append(f"extra={extra}")
+            raise InputFileError(
+                path,
+                module.line,
+                f"elasticity {fidelity} module requires exactly independent "
+                f"B/Cprime/C44 targets ({', '.join(details)})",
+            )
+
+    for target in prop.elasticity_targets:
+        if target.fidelity not in prop.elasticity_modules:
+            raise InputFileError(
+                path,
+                target.line,
+                f"elasticity {target.fidelity} target requires "
+                f"'module {target.fidelity} ...'",
+            )
+
+    dynamic_only_settings = {
+        "temperature",
+        "timestep",
+        "equilibration",
+        "production",
+        "seeds",
+        "validation_seeds",
+    }
+    if "dynamic" not in prop.elasticity_modules:
+        unused = sorted(dynamic_only_settings & set(prop.settings))
+        if unused:
+            key = unused[0]
+            raise InputFileError(
+                path,
+                prop.setting_lines[key],
+                f"elasticity {key} requires a dynamic module",
+            )
+    if "validation_seeds" in prop.settings:
+        promotion_seeds = set(prop.settings.get("seeds", (101, 202, 303)))
+        holdout_seeds = set(prop.settings["validation_seeds"])
+        overlap = sorted(promotion_seeds & holdout_seeds)
+        if overlap:
+            raise InputFileError(
+                path,
+                prop.setting_lines["validation_seeds"],
+                "elasticity validation_seeds must be disjoint from promotion "
+                f"seeds; overlap={overlap}",
+            )
 
 
 def _validate(document: FFOptInput) -> None:
@@ -591,6 +1132,21 @@ def _validate(document: FFOptInput) -> None:
                 f"initial charge {item.charge:g} exceeds charge_limit "
                 f"{document.parameters.charge_abs_max:g}",
             )
+        if document.material_kind != "elemental" and not item.charge_explicit:
+            raise InputFileError(
+                path,
+                item.line,
+                "charge may be omitted only for an elemental material",
+            )
+        if document.material_kind == "elemental" and abs(item.charge) > 1.0e-12:
+            raise InputFileError(
+                path,
+                item.line,
+                "elemental atom types must have zero charge",
+            )
+    if document.material_kind == "elemental" and document.parameters.derive_charge is not None:
+        line = document.parameters.setting_lines.get("neutrality", 1)
+        raise InputFileError(path, line, "elemental materials do not use charge neutrality")
     if document.parameters.derive_charge not in {None, *labels}:
         raise InputFileError(path, 1, f"neutrality label {document.parameters.derive_charge!r} is unknown")
     known_labels = set(labels)
@@ -601,7 +1157,11 @@ def _validate(document: FFOptInput) -> None:
                 spec.line,
                 f"range refers to unknown type label {label!r}",
             )
-        if name in document.parameters.fixed or (label, name) in document.parameters.fixed_by_type:
+        if (
+            name in document.parameters.fixed
+            or (label, name) in document.parameters.fixed_by_type
+            or (document.material_kind == "elemental" and name == "charge")
+        ):
             raise InputFileError(
                 path,
                 spec.line,
@@ -616,14 +1176,57 @@ def _validate(document: FFOptInput) -> None:
                 f"fix refers to unknown type label {label!r}",
             )
     for name, spec in document.parameters.default_ranges.items():
-        if name in document.parameters.fixed:
+        if name in document.parameters.fixed or (
+            document.material_kind == "elemental" and name == "charge"
+        ):
             raise InputFileError(
                 path,
                 spec.line,
                 f"parameter {name!r} cannot be both globally fixed and ranged",
             )
+    params = document.parameters
+    for tie in params.ties.values():
+        if len(known_labels) < 2:
+            raise InputFileError(
+                path,
+                tie.line,
+                f"tie {tie.parameter!r} requires at least two atom types",
+            )
+        typed_fixed = [
+            label for label in labels
+            if (label, tie.parameter) in params.fixed_by_type
+        ]
+        if typed_fixed:
+            raise InputFileError(
+                path,
+                tie.line,
+                f"tie {tie.parameter!r} overlaps type-specific fixes for: "
+                + ", ".join(typed_fixed),
+            )
+    seen_differences: set[tuple[str, frozenset[str]]] = set()
+    for constraint in params.differences:
+        unknown = {constraint.first, constraint.second} - known_labels
+        if unknown:
+            raise InputFileError(
+                path,
+                constraint.line,
+                f"difference refers to unknown type label(s): {sorted(unknown)}",
+            )
+        key = (constraint.parameter, frozenset({constraint.first, constraint.second}))
+        if key in seen_differences:  # Defensive: parser normally catches this.
+            raise InputFileError(path, constraint.line, "duplicate difference constraint")
+        seen_differences.add(key)
+        if constraint.parameter in params.ties:
+            raise InputFileError(
+                path,
+                constraint.line,
+                f"parameter {constraint.parameter!r} cannot be both tied and difference-limited",
+            )
     if "bo" in document.workflow:
-        for name in PARAMETER_NAMES - document.parameters.fixed:
+        implicit_fixed = set(document.parameters.fixed)
+        if document.material_kind == "elemental":
+            implicit_fixed.add("charge")
+        for name in PARAMETER_NAMES - implicit_fixed:
             missing = [
                 item.label for item in document.parameters.atom_types
                 if (item.label, name) not in document.parameters.fixed_by_type
@@ -638,6 +1241,19 @@ def _validate(document: FFOptInput) -> None:
     prop_names = [item.name for item in document.properties]
     if len(prop_names) != len(set(prop_names)):
         raise InputFileError(path, 1, "each property block may appear only once")
+    for prop in document.properties:
+        if prop.name == "elasticity":
+            _validate_elasticity_property(document, prop)
+        if (
+            prop.name == "bulk"
+            and document.crystal_family == "bcc"
+            and "cells" not in prop.settings
+        ):
+            raise InputFileError(
+                path,
+                prop.line,
+                "BCC bulk requires explicit 'cells_in_data NX NY NZ'",
+            )
     if (
         any(stage in {"bo", "sample", "nn", "al"} for stage in document.workflow)
         and not any(prop.fitted for prop in document.properties)
@@ -651,6 +1267,14 @@ def _validate(document: FFOptInput) -> None:
     ]
     if any(stage in {"bo", "sample", "nn", "al"} for stage in document.workflow):
         if not active_targets:
+            if any(prop.elasticity_targets for prop in document.properties):
+                raise InputFileError(
+                    path,
+                    1,
+                    "structural BO/NN/AL requires at least one non-elastic target "
+                    "with positive weight; static elasticity is a downstream "
+                    "constrained objective",
+                )
             raise InputFileError(
                 path, 1, "optimization workflow requires a target with positive weight"
             )
@@ -661,6 +1285,33 @@ def _validate(document: FFOptInput) -> None:
                 "weighted relative RMSE requires nonzero active target values: "
                 + ", ".join(zero_targets),
             )
+    material_workflow = (
+        document.material_kind != "molecular"
+        or document.crystal_family != "molecular"
+        or any(stage in {"screen", "finalists"} for stage in document.workflow)
+    )
+    stage_order = (
+        MATERIAL_PIPELINE_STAGE_ORDER
+        if material_workflow
+        else LEGACY_PIPELINE_STAGE_ORDER
+    )
+    unsupported = set(document.workflow) - set(stage_order)
+    if unsupported:
+        kind = "material" if material_workflow else "molecular"
+        raise InputFileError(
+            path,
+            1,
+            f"{kind} workflow does not support stage(s): {sorted(unsupported)}; "
+            f"use {' -> '.join(stage_order)}",
+        )
+    positions = [stage_order.index(stage) for stage in document.workflow]
+    if positions != sorted(positions):
+        raise InputFileError(
+            path,
+            1,
+            "workflow stages must follow: " + " -> ".join(stage_order),
+        )
+
     unused_blocks = set(document.stage_settings) - set(document.workflow)
     if unused_blocks:
         raise InputFileError(
@@ -668,13 +1319,24 @@ def _validate(document: FFOptInput) -> None:
             "method block(s) are not present in workflow: "
             + ", ".join(sorted(unused_blocks)),
         )
-    required = {
-        "sample": {"bo"},
-        "nn": {"bo"},
-        "al": {"bo", "nn"},
-        "audit": {"bo"},
-        "finalize": {"audit"},
-    }
+    required = (
+        {
+            "sample": {"bo"},
+            "audit": {"bo", "sample"},
+            "screen": {"audit"},
+            "nn": {"screen"},
+            "al": {"nn", "screen"},
+            "finalists": {"al"},
+        }
+        if material_workflow
+        else {
+            "sample": {"bo"},
+            "nn": {"bo"},
+            "al": {"bo", "nn"},
+            "audit": {"bo"},
+            "finalize": {"audit"},
+        }
+    )
     active = set(document.workflow)
     for stage, dependencies in required.items():
         if stage in active and not dependencies <= active:
@@ -727,6 +1389,35 @@ def parse_input_file(value: str | Path) -> FFOptInput:
             if len(tokens) != 2 or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]*", tokens[1]):
                 raise InputFileError(path, line_number, "project requires a portable NAME")
             document.project = tokens[1]
+        elif command == "material":
+            if command in seen_top_level:
+                raise InputFileError(path, line_number, "duplicate material declaration")
+            seen_top_level.add(command)
+            if len(tokens) not in {2, 3} or tokens[1].lower() not in MATERIAL_KINDS:
+                raise InputFileError(
+                    path,
+                    line_number,
+                    "material syntax: material elemental|molecular|multicomponent [NAME]",
+                )
+            if len(tokens) == 3 and not re.fullmatch(
+                r"[A-Za-z][A-Za-z0-9_.-]*", tokens[2]
+            ):
+                raise InputFileError(path, line_number, "material NAME must be portable")
+            document.material_kind = tokens[1].lower()
+            document.material_name = tokens[2] if len(tokens) == 3 else None
+            document.material_line = line_number
+        elif command == "crystal":
+            if command in seen_top_level:
+                raise InputFileError(path, line_number, "duplicate crystal declaration")
+            seen_top_level.add(command)
+            if len(tokens) != 2 or tokens[1].lower() not in CRYSTAL_FAMILIES:
+                raise InputFileError(
+                    path,
+                    line_number,
+                    "crystal must be bcc or molecular",
+                )
+            document.crystal_family = tokens[1].lower()
+            document.crystal_line = line_number
         elif command == "workflow":
             if command in seen_top_level:
                 raise InputFileError(path, line_number, "duplicate workflow declaration")
@@ -739,13 +1430,6 @@ def parse_input_file(value: str | Path) -> FFOptInput:
                 raise InputFileError(path, line_number, f"unknown workflow stages: {sorted(unknown)}")
             if len(stages) != len(set(stages)):
                 raise InputFileError(path, line_number, "workflow stages cannot repeat")
-            positions = [PIPELINE_STAGE_ORDER.index(stage) for stage in stages]
-            if positions != sorted(positions):
-                raise InputFileError(
-                    path,
-                    line_number,
-                    "workflow stages must follow: " + " -> ".join(PIPELINE_STAGE_ORDER),
-                )
             document.workflow = stages
         elif command == "parameters":
             if command in seen_top_level:

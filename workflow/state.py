@@ -256,7 +256,7 @@ class WorkflowState:
         return bool(
             record
             and record.signature == signature
-            and record.status == "completed"
+            and record.status in {"completed", "skipped"}
             and self.artifacts_exist(record)
         )
 

@@ -6,8 +6,22 @@ expectations while the public API remains in alpha.
 
 ## Unreleased
 
+## 0.3.0a4 - 2026-08-21
+
 ### Added
 
+- Add an experimental, opt-in elemental-BCC workflow to the common one-input
+  pipeline: structural feasible-region BO, multi-centre sampling, replicated
+  audit, exact 0 K cubic elasticity, constrained-minimax GP active learning,
+  finite-temperature finalists, independent holdout validation, and Top-N
+  reporting.
+- Add typed material/crystal declarations, zero-charge elemental atom types,
+  parameter ties and bounded same-element differences, native LAMMPS default
+  mixing, and role/fidelity/cost property contracts without changing legacy
+  molecular input semantics.
+- Add content-addressed candidate/stage manifests and explicit multi-round
+  material-stage graphs so one `ffopt run ... --watch` command advances AL and
+  the same command safely resumes an interrupted campaign.
 - Make `ffopt doctor` validate all active bulk, isolated-molecule, adsorption
   complex, slab, and adsorbate data files as one cross-file physical contract.
 - Add `ffopt --debug ...` and concise default CLI errors so input and machine

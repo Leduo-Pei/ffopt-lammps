@@ -1,0 +1,27 @@
+# Relaxed BCC (110) complete/split cleavage boxes at 0 K.
+units real
+dimension 3
+boundary p p p
+atom_style full
+newton on
+
+pair_style lj/cut ${cutoff}
+read_data ${slab_file}
+# Replication is declared by the public property surface block.
+replicate ${replicate_x} ${replicate_y} ${replicate_z}
+include pair_coeffs.lmp
+
+neighbor 2.0 bin
+neigh_modify delay 0 every 1 check yes
+min_style cg
+if "${save_traj} == 1" then &
+  "dump TRAJ all custom 10 surface_min_trajectory.lammpstrj id type x y z"
+if "${save_traj} == 1" then "dump_modify TRAJ sort id"
+minimize 1.0e-8 1.0e-10 10000 100000
+run 0
+
+variable E equal $(pe)
+variable A equal $(lx*ly)
+print "DATA_SURF: tag=${slab_tag} E_slab=${E} A_xy=${A}"
+if "${save_traj} == 1" then "undump TRAJ"
+if "${save_traj} == 1" then "write_data surface_final.data nocoeff"

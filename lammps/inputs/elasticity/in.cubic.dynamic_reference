@@ -1,0 +1,35 @@
+# FFOpt cubic elasticity: one finite-temperature NPT reference trajectory.
+# All zero/strained NVT states branch from the same restart below.
+units ${units}
+dimension 3
+boundary p p p
+atom_style ${atom_style}
+newton on
+
+pair_style lj/cut ${cutoff}
+read_data ${bulk_data}
+replicate ${replicate_x} ${replicate_y} ${replicate_z}
+include ${force_field_file}
+change_box all triclinic
+
+neighbor 2.0 bin
+neigh_modify delay 0 every 1 check yes
+
+fix RELAX all box/relax tri ${target_pressure_atm} vmax ${box_vmax}
+min_style cg
+min_modify dmax ${min_dmax}
+minimize ${energy_tolerance} ${force_tolerance} ${max_iterations} ${max_evaluations}
+unfix RELAX
+
+velocity all create ${temperature_k} ${npt_seed} mom yes rot no dist gaussian
+fix NPT all npt temp ${temperature_k} ${temperature_k} ${tdamp} &
+  tri ${target_pressure_atm} ${target_pressure_atm} ${pdamp}
+timestep ${timestep}
+thermo ${thermo_every}
+thermo_style custom step temp press pxx pyy pzz pxy pxz pyz lx ly lz xy xz yz vol density
+run ${npt_equil_steps}
+unfix NPT
+run 0
+
+write_restart elastic_reference.restart
+print "FFOPT_DYNAMIC_REFERENCE: $(lx) $(ly) $(lz) $(xy) $(xz) $(yz) $(temp) $(density)"

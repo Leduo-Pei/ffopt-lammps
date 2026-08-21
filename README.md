@@ -23,6 +23,14 @@ validation.
 > as fixed and optimizes the molecular atom types; arbitrary multicomponent or
 > charged substrates are outside the schema 1 contract.
 
+> **Development branch:** `feature/material-workflows` adds an experimental
+> elemental-BCC workflow without forking the orchestration framework.  It uses
+> the same one-file project, persistent state, machine profiles, and packaging
+> as BTAH, while adding structural feasible-region coverage, exact cubic
+> elasticity, constrained active learning, finite-temperature promotion, and
+> model-form diagnostics.  It is not a released support claim until the BTAH
+> and Fe acceptance gates both pass from one built distribution.
+
 ## One input, one run
 
 <p align="center">
@@ -69,7 +77,7 @@ wheels and are not yet published on PyPI:
 
 ```bash
 python -m pip install \
-  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a3/ffopt_lammps-0.3.0a3-py3-none-any.whl"
+  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a4/ffopt_lammps-0.3.0a4-py3-none-any.whl"
 ```
 
 For development:
@@ -196,6 +204,9 @@ total neutrality.
 - [0.3.0a3 single/two-node acceptance record](docs/reference/acceptance-v0.3.0a3.md)
 - [Workflow and accuracy model](docs/explanation/workflow-and-accuracy.md)
 - [BTAH examples and acceptance benchmark](examples/btah/README.md)
+- [Elemental BCC development guide](docs/how-to/elemental-bcc.md)
+- [Unified material-workflow design](docs/development/material-workflows-design.md)
+- [Scientific rationale and literature](docs/development/material-workflows-scientific-rationale.md)
 - [Developer architecture](docs/explanation/architecture.md)
 
 ## Scientific definition

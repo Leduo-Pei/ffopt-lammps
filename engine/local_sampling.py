@@ -126,11 +126,7 @@ def generate_design(
         if key in seen:
             return False
         params = dict(zip(names, values))
-        try:
-            resolved = runner._resolve_params(params)
-            if runner._charge_feasible(resolved) is not None:
-                return False
-        except Exception:
+        if runner.feasibility_error(params) is not None:
             return False
         seen.add(key)
         record = {

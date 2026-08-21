@@ -388,7 +388,7 @@ class ActiveLearner:
             ], dtype=bool)
             print(
                 f"  [1] Feasible candidates: {int(feasible.sum())}/"
-                f"{len(feasible)} after charge/derived-parameter constraints"
+                f"{len(feasible)} after hard parameter/charge constraints"
             )
             stability_probability = self._predict_stability_probability(X_pool)
             if stability_probability is not None:
@@ -865,14 +865,64 @@ class ActiveLearner:
             # Sobol requires n to be a power of 2; round up
             n_sobol = 2 ** math.ceil(math.log2(max(n_pool, 2)))
             unit    = sampler.random(n_sobol)[:n_pool]
+            draw_more = sampler.random
         elif method == "lhs":
             sampler = qmc.LatinHypercube(d=self.n_params, seed=seed)
             unit    = sampler.random(n_pool)
+            draw_more = sampler.random
         else:   # "random"
             rng  = np.random.default_rng(seed)
             unit = rng.random((n_pool, self.n_params))
 
-        return qmc.scale(unit, self.sample_lo, self.sample_hi)
+            def draw_more(n):
+                return rng.random((n, self.n_params))
+
+        pool = qmc.scale(unit, self.sample_lo, self.sample_hi)
+        if n_pool == 0:
+            return pool
+        hard_differences = getattr(
+            self.runner, "parameter_difference_constraints", []
+        )
+        if not hard_differences:
+            # Preserve the exact legacy candidate sequence when no difference
+            # rule exists.
+            return pool
+
+        accepted = [
+            row for row in pool
+            if self.runner.feasibility_error(
+                dict(zip(self.param_names, row))
+            ) is None
+        ]
+        n_drawn = len(pool)
+        max_draws = max(10_000, n_pool * 1_000)
+        while len(accepted) < n_pool and n_drawn < max_draws:
+            batch_size = min(
+                max(32, n_pool - len(accepted)), max_draws - n_drawn
+            )
+            extra = qmc.scale(
+                draw_more(batch_size), self.sample_lo, self.sample_hi
+            )
+            n_drawn += len(extra)
+            accepted.extend(
+                row for row in extra
+                if self.runner.feasibility_error(
+                    dict(zip(self.param_names, row))
+                ) is None
+            )
+        if len(accepted) < n_pool:
+            raise RuntimeError(
+                f"Only generated {len(accepted)}/{n_pool} AL candidates "
+                f"satisfying hard parameter-difference constraints after "
+                f"{n_drawn} deterministic draws. Relax the difference limit "
+                "or widen compatible parameter bounds."
+            )
+        if n_drawn > n_pool:
+            print(
+                "  [1] Hard difference constraints: accepted "
+                f"{n_pool}/{n_drawn} envelope draws"
+            )
+        return np.asarray(accepted[:n_pool], dtype=float)
 
     def _sample_candidate_pool(
             self, data: pd.DataFrame, n_pool: int,
