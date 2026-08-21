@@ -49,7 +49,12 @@ def _validated_ranking(
     path: Path,
     parameter_space: Sequence[tuple[str, float, float]],
 ) -> pd.DataFrame:
-    frame = pd.read_csv(path)
+    # Parameter keys hash the exact IEEE-754 values written by upstream
+    # stages.  Pandas' default fast parser may round the last bit (for example
+    # 1.9982040118551214 -> 1.9982040118551212), creating a false identity
+    # mismatch.  Round-trip parsing reconstructs the value that produced the
+    # recorded key while retaining the strict key comparison below.
+    frame = pd.read_csv(path, float_precision="round_trip")
     names = [name for name, _lower, _upper in parameter_space]
     if frame.empty:
         for name in ("parameter_key", *names):
@@ -289,7 +294,7 @@ def write_top_parameters_report(
             raise MaterialValidationArtifactError(
                 f"completed Top-N report is not reusable: {decision.reason}"
             )
-        return pd.read_csv(outputs["top_csv"])
+        return pd.read_csv(outputs["top_csv"], float_precision="round_trip")
 
     static = _validated_ranking(static_source, parameter_space)
     dynamic = _validated_ranking(dynamic_source, parameter_space)

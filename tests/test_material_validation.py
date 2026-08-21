@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from engine.cubic_elastic_batch import plan_nested_resources
 from engine.lammps_interface import EvalResult
@@ -703,3 +704,52 @@ def test_top_parameters_reports_rank_reversal_and_explicit_provenance(tmp_path):
         output / "TOP_PARAMETERS.md"
     ).read_text(encoding="utf-8")
     assert (output / "stage_manifest.json").is_file()
+
+
+def test_top_parameters_round_trip_exact_parameter_identity(tmp_path):
+    config_path, _config_document = _config(tmp_path)
+    parameters = {
+        "Fe_corner_epsilon": 5.95016427334725,
+        "Fe_corner_sigma": 1.9982040118551214,
+        "Fe_body_sigma": 2.627529700048513,
+    }
+    ranking = _ranking_row(parameters, maximum=10.0, rmse=8.0)
+    expected_key = ranking["parameter_key"]
+    static_path = tmp_path / "round_trip_static.csv"
+    dynamic_path = tmp_path / "round_trip_dynamic.csv"
+    pd.DataFrame([ranking]).to_csv(static_path, index=False)
+    pd.DataFrame([ranking]).to_csv(dynamic_path, index=False)
+
+    frame = write_top_parameters_report(
+        config_path=config_path,
+        static_ranking_path=static_path,
+        dynamic_ranking_path=dynamic_path,
+        output_dir=tmp_path / "round_trip_report",
+        top_n=1,
+    )
+
+    assert frame.loc[0, "parameter_key"] == expected_key
+    assert frame.loc[0, "Fe_corner_sigma"] == parameters["Fe_corner_sigma"]
+
+
+def test_top_parameters_still_rejects_genuine_parameter_key_mismatch(tmp_path):
+    config_path, config = _config(tmp_path)
+    parameters = _parameters(config)
+    ranking = _ranking_row(parameters, maximum=10.0, rmse=8.0)
+    ranking["parameter_key"] = canonical_parameter_key({
+        **parameters,
+        "Fe_corner_sigma": parameters["Fe_corner_sigma"] + 0.01,
+    })
+    static_path = tmp_path / "bad_key_static.csv"
+    dynamic_path = tmp_path / "bad_key_dynamic.csv"
+    pd.DataFrame([ranking]).to_csv(static_path, index=False)
+    pd.DataFrame([ranking]).to_csv(dynamic_path, index=False)
+
+    with pytest.raises(ValueError, match="parameter_key does not match values"):
+        write_top_parameters_report(
+            config_path=config_path,
+            static_ranking_path=static_path,
+            dynamic_ranking_path=dynamic_path,
+            output_dir=tmp_path / "bad_key_report",
+            top_n=1,
+        )
