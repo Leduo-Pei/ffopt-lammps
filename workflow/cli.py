@@ -26,6 +26,7 @@ from .machine import (
     resolve_executable,
     save_machine_profile,
 )
+from .mpi_local_exec import resolve_launcher_flavor
 from .project import (
     Project,
     compose_config,
@@ -475,6 +476,18 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         mpi_name = str(config["lammps"].get("mpiexec", "mpiexec"))
         mpi_launcher = resolve_executable(mpi_name)
         checks.append(("MPI launcher", mpi_launcher is not None, mpi_launcher or mpi_name))
+        if (
+            bool(config.get("parallel", {}).get("use_mpi", False))
+            and int(config.get("parallel", {}).get("cores_per_worker", 1)) > 1
+        ):
+            try:
+                flavor = resolve_launcher_flavor(
+                    mpi_name, config["lammps"].get("mpi_flavor")
+                )
+            except ValueError as exc:
+                checks.append(("MPI launcher flavor", False, str(exc)))
+            else:
+                checks.append(("MPI launcher flavor", True, flavor))
         step_name = str(config.get("parallel", {}).get("scheduler_launcher", "srun"))
         step_launcher = shutil.which(step_name)
         checks.append((
@@ -692,6 +705,7 @@ def cmd_machine(args: argparse.Namespace) -> None:
     backend = args.backend or "local"
     lammps = args.lammps
     mpi = args.mpi
+    mpi_flavor = args.mpi_flavor
     workers = args.workers
     ranks = args.ranks or 1
     omp_threads = args.omp_threads or 1
@@ -728,12 +742,14 @@ def cmd_machine(args: argparse.Namespace) -> None:
                 "MPI was not found on PATH. Pass --mpi /absolute/path/to/mpirun."
             )
         mpi = mpi or probe["mpi"]["path"]
+        mpi_flavor = mpi_flavor or probe["mpi"].get("flavor")
         print("Using conservative values from 'ffopt machine probe'.")
     profile = build_machine_profile(
         name=args.name,
         backend=backend,
         lammps=lammps,
         mpi=mpi,
+        mpi_flavor=mpi_flavor,
         workers=workers,
         ranks=ranks,
         omp_threads=omp_threads,
@@ -746,6 +762,16 @@ def cmd_machine(args: argparse.Namespace) -> None:
         walltime=args.walltime,
         memory_per_node=memory_per_node,
     )
+    if (
+        ranks > 1
+        and not Path(str(profile["lammps"]["mpiexec"])).name.lower().startswith("srun")
+        and not profile["lammps"].get("mpi_flavor")
+    ):
+        raise SystemExit(
+            "MPI launcher flavor is ambiguous. Pass --mpi-flavor openmpi or "
+            "--mpi-flavor intelmpi; FFOpt will store the selection in the "
+            "machine profile."
+        )
     path = save_machine_profile(args.name, profile, overwrite=args.force)
     print(f"Machine profile saved: {path}")
 
@@ -1303,6 +1329,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     machine.add_argument("--lammps", help="LAMMPS executable; auto-detected when omitted.")
     machine.add_argument("--mpi", help="MPI launcher; auto-detected when omitted.")
+    machine.add_argument(
+        "--mpi-flavor", choices=("openmpi", "intelmpi"),
+        help=(
+            "MPI command-line dialect. Required when --mpi-ranks is greater "
+            "than one and the launcher path is ambiguous."
+        ),
+    )
     machine.add_argument(
         "--workers",
         type=int,

@@ -533,7 +533,7 @@ def _structural_scientific_config(config: Mapping[str, Any]) -> dict[str, Any]:
         "lammps": {
             key: value
             for key, value in config.get("lammps", {}).items()
-            if key not in {"executable", "mpiexec"}
+            if key not in {"executable", "mpiexec", "mpi_flavor"}
         },
         "parameter_constraints": config.get("parameter_constraints", {}),
         "pair_params": config.get("pair_params", {}),

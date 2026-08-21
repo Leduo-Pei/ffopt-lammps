@@ -102,7 +102,7 @@ MPI=/storage/home/liguoling/peizy/software/anaconda3/envs/ffopt/bin/mpirun
 
 ffopt machine configure \
   --name mag1-1node --backend slurm \
-  --lammps "$LMP" --mpi "$MPI" --partition CPU \
+  --lammps "$LMP" --mpi "$MPI" --mpi-flavor openmpi --partition CPU \
   --nodes 1 --total-cores 40 --workers 10 \
   --mpi-ranks 4 --omp-threads 1 \
   --memory-per-node 64G --walltime 06:00:00 \
@@ -110,7 +110,7 @@ ffopt machine configure \
 
 ffopt machine configure \
   --name mag1-2node --backend slurm \
-  --lammps "$LMP" --mpi "$MPI" --partition CPU \
+  --lammps "$LMP" --mpi "$MPI" --mpi-flavor openmpi --partition CPU \
   --nodes 2 --total-cores 80 --workers 20 \
   --mpi-ranks 4 --omp-threads 1 \
   --memory-per-node 64G --walltime 06:00:00 \
@@ -124,7 +124,7 @@ independent LAMMPS workers on each node:
 ```bash
 ffopt machine configure \
   --name mag1-2node-backfill --backend slurm \
-  --lammps "$LMP" --mpi "$MPI" --partition CPU \
+  --lammps "$LMP" --mpi "$MPI" --mpi-flavor openmpi --partition CPU \
   --nodes 2 --total-cores 32 --workers 8 \
   --mpi-ranks 4 --omp-threads 1 \
   --memory-per-node 16G --walltime 06:00:00 \

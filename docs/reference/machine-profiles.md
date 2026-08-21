@@ -19,6 +19,7 @@ extends = "cluster"
 [machines.cluster-2node.lammps]
 executable = "/absolute/path/to/lmp"
 mpiexec = "/absolute/path/to/mpirun"
+mpi_flavor = "openmpi"
 timeout = 216000
 
 [machines.cluster-2node.parallel]
@@ -45,6 +46,7 @@ set and therefore requests one LAMMPS-sized allocation.
 | `machine.backend` | `--backend` | `local` or `slurm` |
 | `lammps.executable` | `--lammps` | Absolute LAMMPS path or command on `PATH` |
 | `lammps.mpiexec` | `--mpi` | MPI launcher used inside allocated nodes |
+| `lammps.mpi_flavor` | `--mpi-flavor` | Explicit launcher dialect: `openmpi` or `intelmpi` |
 | `lammps.timeout` | `--timeout` | Seconds allowed for one LAMMPS evaluation |
 | `parallel.max_workers` | `--workers` | Concurrent independent parameter evaluations |
 | `parallel.cores_per_worker` | `--mpi-ranks` | MPI ranks per evaluation |
@@ -60,6 +62,14 @@ set and therefore requests one LAMMPS-sized allocation.
 Machine fields do not alter parameter bounds, random seeds, BO batch size,
 sampling count, targets, weights, or LAMMPS protocol. Those belong to
 `ffopt.in` and are included in scientific provenance.
+
+When more than one MPI rank is used, set `mpi_flavor` explicitly. Open MPI
+and Intel MPI/Hydra both commonly install executables named `mpiexec` or
+`mpirun`, but their node-placement and binding flags are incompatible. FFOpt
+only infers the flavor from unambiguous paths such as `.../openmpi/...` or
+`.../intel/.../mpi/...`; an ambiguous launcher fails before LAMMPS starts.
+The choice is stored in the machine profile so resumed runs do not depend on
+whichever MPI module happens to be first on `PATH`.
 
 ## Environment setup
 

@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Iterator
+from pathlib import Path
 
 try:
     import fcntl
@@ -17,25 +18,102 @@ except ImportError:  # pragma: no cover - SLURM workers run on Unix
     fcntl = None
 
 
+_FLAVOR_ALIASES = {
+    "openmpi": "openmpi",
+    "open-mpi": "openmpi",
+    "ompi": "openmpi",
+    "intelmpi": "intelmpi",
+    "intel-mpi": "intelmpi",
+    "impi": "intelmpi",
+    "hydra": "intelmpi",
+}
+
+
+def launcher_flavor_from_version(version_output: str) -> str | None:
+    """Parse a probe result without treating an unknown vendor as compatible."""
+    value = str(version_output).lower()
+    if "open mpi" in value or "openrte" in value or "open rte" in value:
+        return "openmpi"
+    if "intel(r) mpi" in value or "intel mpi" in value:
+        return "intelmpi"
+    return None
+
+
+def resolve_launcher_flavor(
+    launcher: str,
+    launcher_flavor: str | None = None,
+) -> str:
+    """Return a deterministic MPI command-line dialect or fail closed.
+
+    Plain ``mpiexec`` and ``mpirun`` names are shared by several incompatible
+    MPI implementations.  We therefore accept an explicit profile value and
+    only infer a flavor from unambiguous executable/path markers.  In
+    particular, this function never shells out to whichever MPI happens to be
+    first on ``PATH`` during a resumed run.
+    """
+    if launcher_flavor is not None and str(launcher_flavor).strip():
+        value = str(launcher_flavor).strip().lower()
+        try:
+            return _FLAVOR_ALIASES[value]
+        except KeyError as exc:
+            supported = "openmpi, intelmpi"
+            raise ValueError(
+                f"Unsupported MPI launcher flavor {launcher_flavor!r}; "
+                f"choose one of: {supported}"
+            ) from exc
+
+    normalized = str(launcher).strip().replace("\\", "/").lower()
+    executable = Path(normalized).name
+    if executable in {"orterun", "prterun"} or any(
+        marker in f"/{normalized.strip('/')}/"
+        for marker in ("/openmpi/", "/open-mpi/")
+    ):
+        return "openmpi"
+    if executable in {"mpiexec.hydra", "mpirun.hydra"} or (
+        "/intel/" in f"/{normalized.strip('/')}/"
+        and "/mpi/" in f"/{normalized.strip('/')}/"
+    ) or "/oneapi/mpi/" in f"/{normalized.strip('/')}/":
+        return "intelmpi"
+    raise ValueError(
+        "Cannot determine the MPI launcher flavor from "
+        f"{launcher!r}. Set lammps.mpi_flavor to 'openmpi' or 'intelmpi' "
+        "in the machine profile. FFOpt will not guess for an ambiguous "
+        "mpiexec/mpirun executable."
+    )
+
+
 def build_command(
     launcher: str,
     ranks: int,
     command: list[str],
     *,
+    launcher_flavor: str | None = None,
     hostname: str | None = None,
     cpu_list: str | None = None,
 ) -> list[str]:
     if not command:
         raise ValueError("MPI worker command is empty")
+    if ranks < 1:
+        raise ValueError("MPI rank count must be positive")
     host = hostname or socket.gethostname()
     application = ["taskset", "-c", cpu_list, *command] if cpu_list else command
+    flavor = resolve_launcher_flavor(launcher, launcher_flavor)
+    if flavor == "openmpi":
+        return [
+            launcher,
+            "--prtemca", "plm", "ssh",
+            "--host", host,
+            "-n", str(ranks),
+            "--oversubscribe",
+            "--bind-to", "none",
+            *application,
+        ]
     return [
         launcher,
-        "--prtemca", "plm", "ssh",
-        "--host", host,
+        "-launcher", "fork",
+        "-hosts", host,
+        "-genv", "I_MPI_PIN", "0",
         "-n", str(ranks),
-        "--oversubscribe",
-        "--bind-to", "none",
         *application,
     ]
 
@@ -83,6 +161,7 @@ def cpu_slot(slots: int, cpus_per_slot: int) -> Iterator[str | None]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--launcher")
+    parser.add_argument("--launcher-flavor", choices=("openmpi", "intelmpi"))
     parser.add_argument("--ranks", default=1, type=int)
     parser.add_argument("--direct", action="store_true")
     parser.add_argument("--slots", default=1, type=int)
@@ -100,6 +179,7 @@ def main() -> None:
                 args.launcher,
                 args.ranks,
                 command,
+                launcher_flavor=args.launcher_flavor,
                 cpu_list=selected_cpus,
             )
         result = subprocess.run(worker_command)

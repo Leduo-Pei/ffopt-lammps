@@ -6,6 +6,13 @@ expectations while the public API remains in alpha.
 
 ## Unreleased
 
+### Fixed
+
+- Select the nested single-node MPI launcher dialect explicitly and fail on
+  ambiguous `mpiexec`/`mpirun` paths instead of passing Open MPI-only flags to
+  Intel MPI/Hydra. Machine acceptance now exercises every configured worker
+  even when the complete worker pool fits on one SLURM node.
+
 ## 0.3.0a4 - 2026-08-21
 
 ### Added

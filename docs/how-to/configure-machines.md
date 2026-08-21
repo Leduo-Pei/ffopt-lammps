@@ -41,6 +41,7 @@ Local example:
 ```bash
 ffopt machine configure --name local-workstation \
   --backend local --lammps /path/to/lmp --mpi /path/to/mpirun \
+  --mpi-flavor openmpi \
   --workers 4 --mpi-ranks 4 --omp-threads 1 --force
 ```
 
@@ -49,6 +50,7 @@ SLURM examples for 48-core nodes:
 ```bash
 ffopt machine configure --name cluster-1node \
   --backend slurm --lammps /path/to/lmp --mpi /path/to/mpirun \
+  --mpi-flavor openmpi \
   --partition CPU --nodes 1 --total-cores 48 \
   --workers 12 --mpi-ranks 4 --omp-threads 1 \
   --memory-per-node 64G --walltime 14-00:00:00 \
@@ -56,6 +58,7 @@ ffopt machine configure --name cluster-1node \
 
 ffopt machine configure --name cluster-2node \
   --backend slurm --lammps /path/to/lmp --mpi /path/to/mpirun \
+  --mpi-flavor openmpi \
   --partition CPU --nodes 2 --total-cores 96 \
   --workers 24 --mpi-ranks 4 --omp-threads 1 \
   --memory-per-node 64G --walltime 14-00:00:00 \
@@ -72,6 +75,7 @@ round or sampling point count.
 |---|---|---|
 | `--workers` | Independent LAMMPS evaluations running concurrently | No |
 | `--mpi-ranks` | MPI processes inside each LAMMPS evaluation | No |
+| `--mpi-flavor` | MPI command dialect (`openmpi` or `intelmpi`) | No |
 | `--omp-threads` | Threads used by each MPI process | No |
 | `--total-cores` | Total CPUs requested from SLURM | No |
 | `bo batch_size` | Candidates evaluated per BO round | Yes |

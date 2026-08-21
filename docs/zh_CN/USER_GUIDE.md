@@ -191,6 +191,7 @@ ffopt machine configure \
   --backend local \
   --lammps /absolute/path/to/lmp \
   --mpi /absolute/path/to/mpirun \
+  --mpi-flavor openmpi \
   --workers 4 \
   --mpi-ranks 4 \
   --omp-threads 1 \
@@ -208,6 +209,7 @@ ffopt machine configure \
   --backend slurm \
   --lammps /absolute/path/to/lmp \
   --mpi /absolute/path/to/mpirun \
+  --mpi-flavor openmpi \
   --partition CPU \
   --nodes 1 \
   --total-cores 48 \
@@ -228,6 +230,7 @@ ffopt machine configure \
   --backend slurm \
   --lammps /absolute/path/to/lmp \
   --mpi /absolute/path/to/mpirun \
+  --mpi-flavor openmpi \
   --partition CPU \
   --nodes 2 \
   --total-cores 96 \

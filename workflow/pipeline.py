@@ -78,7 +78,7 @@ def _scientific_config(config: dict[str, Any]) -> dict[str, Any]:
         if key not in excluded
     }
     lammps = dict(result.get("lammps", {}))
-    for key in ("executable", "mpiexec", "timeout"):
+    for key in ("executable", "mpiexec", "mpi_flavor", "timeout"):
         lammps.pop(key, None)
     result["lammps"] = lammps
     return result
@@ -211,6 +211,7 @@ class PipelineRunner:
             "backend": self.backend,
             "lammps_executable": self.config.get("lammps", {}).get("executable"),
             "mpi_launcher": self.config.get("lammps", {}).get("mpiexec"),
+            "mpi_launcher_flavor": self.config.get("lammps", {}).get("mpi_flavor"),
         }
         environment_text = json.dumps(
             environment, indent=2, ensure_ascii=False, sort_keys=True

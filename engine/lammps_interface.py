@@ -29,6 +29,7 @@ import numpy as np
 
 from .property_evaluators import PropertyEvaluationContext, build_property_plan
 from .parameter_space import parameter_difference_error
+from workflow.mpi_local_exec import resolve_launcher_flavor
 from workflow.slurm_pool import SlurmCommandPool
 
 
@@ -245,6 +246,14 @@ class LAMMPSRunner:
         self.scheduler_launcher = parallel.get("scheduler_launcher")
         self.scheduler_node_count = max(1, int(parallel.get("scheduler_nodes", 1)))
         self.workers_per_node = max(1, int(parallel.get("workers_per_node", 1)))
+        configured_mpi_flavor = lmp_cfg.get("mpi_flavor")
+        self.mpi_flavor = None
+        if configured_mpi_flavor or (
+            self.scheduler_launcher and self.use_mpi and int(self.cores) > 1
+        ):
+            self.mpi_flavor = resolve_launcher_flavor(
+                str(self.mpiexec), configured_mpi_flavor
+            )
         self.scheduler_pool = (
             SlurmCommandPool.from_config(config) if start_scheduler_pool else None
         )
@@ -1246,10 +1255,12 @@ class LAMMPSRunner:
                     "--slots", str(self.workers_per_node),
                     "--",
                 ]
+            mpi_flavor = self.mpi_flavor or resolve_launcher_flavor(self.mpiexec)
             return prefix + [
                 sys.executable,
                 "-m", "workflow.mpi_local_exec",
                 "--launcher", self.mpiexec,
+                "--launcher-flavor", mpi_flavor,
                 "--ranks", str(ranks),
                 "--slots", str(self.workers_per_node),
                 "--",
@@ -1322,6 +1333,7 @@ class LAMMPSRunner:
                     },
                     timeout=self.timeout,
                     mpi_launcher=self.mpiexec if self.use_mpi else None,
+                    mpi_launcher_flavor=self.mpi_flavor if self.use_mpi else None,
                     mpi_ranks=self.cores if self.use_mpi else 1,
                 )
             else:
