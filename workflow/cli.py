@@ -1068,7 +1068,27 @@ def cmd_explain(args: argparse.Namespace) -> None:
                 f"epochs={nn.get('max_epochs')}",
             ])
         print(f"Surrogate             : {' '.join(details)}")
-    if "al" in stages:
+    if "constrained_al" in stages:
+        refinement = project.data.get("pipeline", {}).get("constrained_al", {})
+        print(
+            "Constrained AL        : "
+            f"rounds<={refinement.get('maximum_rounds')} auto_advance=yes "
+            "structural/static candidates="
+            f"{refinement.get('structural_proposals_per_round')}/"
+            f"{refinement.get('mechanical_proposals_per_round')} "
+            f"pool={refinement.get('candidate_pool')}"
+        )
+        print(
+            "AL acquisition/stop   : "
+            "constrained_minimax; improvement/boundary/global="
+            f"{float(refinement.get('improvement_fraction', 0.0)):.2f}/"
+            f"{float(refinement.get('boundary_fraction', 0.0)):.2f}/"
+            f"{float(refinement.get('global_fraction', 0.0)):.2f}; "
+            f"patience={refinement.get('patience')} "
+            "min_improvement="
+            f"{refinement.get('minimum_improvement_percent_points')} pp"
+        )
+    elif "al" in stages:
         active_learning = config["active_learning"]
         print(
             "Active learning       : "

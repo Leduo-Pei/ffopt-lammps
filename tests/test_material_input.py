@@ -158,6 +158,15 @@ def test_explain_reports_material_parameter_graph_and_elasticity_contract(
     assert "strains=[0.002, 0.004, 0.006]" in output
     assert "promotion_seeds=[101, 202, 303]" in output
     assert "validation_seeds=[404, 505, 606]" in output
+    assert (
+        "Constrained AL        : rounds<=8 auto_advance=yes "
+        "structural/static candidates=76/38 pool=65536"
+    ) in output
+    assert (
+        "AL acquisition/stop   : constrained_minimax; "
+        "improvement/boundary/global=0.50/0.30/0.20; "
+        "patience=3 min_improvement=0.5 pp"
+    ) in output
 
 
 def test_elemental_material_compiles_charge_defaults_and_parameter_graph(tmp_path):
