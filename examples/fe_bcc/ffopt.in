@@ -16,9 +16,12 @@ parameters
     difference sigma Fe_corner Fe_body max 0.75 A
 
     # id  label       epsilon(kcal/mol)  sigma(A)
-    # Charge is implicitly disabled for an elemental material.
-    type 1 Fe_corner 6.0 2.30
-    type 2 Fe_body   6.0 2.30
+    # Charge is implicitly disabled for an elemental material.  The initial
+    # values are one previously measured structural-feasible point, used only
+    # as the single BO warm start.  The broad ranges and all BO/Sample/AL
+    # evaluations remain new calculations.
+    type 1 Fe_corner 5.9464626141 2.0046831130
+    type 2 Fe_body   5.9464626141 2.6112575897
 end
 
 property bulk
