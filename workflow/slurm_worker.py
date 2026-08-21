@@ -28,6 +28,7 @@ def request_command(data: dict[str, Any]) -> list[str]:
         launcher,
         ranks,
         command,
+        launcher_flavor=str(data.get("mpi_launcher_flavor", "")) or None,
         hostname=socket.gethostname(),
         cpu_list=cpus,
     )

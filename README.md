@@ -23,6 +23,14 @@ validation.
 > as fixed and optimizes the molecular atom types; arbitrary multicomponent or
 > charged substrates are outside the schema 1 contract.
 
+> **Development branch:** `feature/material-workflows` adds an experimental
+> elemental-BCC workflow without forking the orchestration framework.  It uses
+> the same one-file project, persistent state, machine profiles, and packaging
+> as BTAH, while adding structural feasible-region coverage, exact cubic
+> elasticity, constrained active learning, finite-temperature promotion, and
+> model-form diagnostics.  It is not a released support claim until the BTAH
+> and Fe acceptance gates both pass from one built distribution.
+
 ## One input, one run
 
 <p align="center">
@@ -58,8 +66,9 @@ a calculation. Change `ffopt.in` and start a new campaign when the scientific
 input changes.
 
 When `lmp` is already on `PATH`, `--machine local` works without a profile and
-uses one serial worker. A named profile is only needed for explicit paths or
-parallel resources.
+uses one serial worker. `local` executes directly on the current host and does
+not submit through SLURM, so do not use it for production on a cluster login
+node. A named profile is needed for explicit paths or parallel resources.
 
 ## Install
 
@@ -69,7 +78,7 @@ wheels and are not yet published on PyPI:
 
 ```bash
 python -m pip install \
-  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a3/ffopt_lammps-0.3.0a3-py3-none-any.whl"
+  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a4/ffopt_lammps-0.3.0a4-py3-none-any.whl"
 ```
 
 For development:
@@ -87,11 +96,14 @@ LAMMPS is an external dependency. A CPU-only PyTorch installation is valid;
 ## Configure and verify a machine
 
 ```bash
-ffopt machine probe --partition CPU
+ffopt machine probe --partition YOUR_PARTITION
 ffopt machine configure --auto --name cluster-1node \
-  --backend slurm --partition CPU --nodes 1 --force
+  --backend slurm --partition YOUR_PARTITION --nodes 1 --force
 ffopt machine test --name cluster-1node
 ```
+
+`YOUR_PARTITION` is a site-specific SLURM partition reported by `sinfo`, not a
+compute-node name. Omit `--partition` from `probe` to list all visible choices.
 
 Before fitting a new material, run the packaged scientific acceptance test:
 
@@ -108,7 +120,22 @@ does not change with the machine.
 
 ## Create a project
 
-Validate the data contract first:
+The BTAH acceptance data is included in every wheel. It can be inspected
+without finding a repository checkout:
+
+```bash
+ffopt inspect builtin:data/bulk/BTAH_822_bulk.data
+ffopt data check \
+  --bulk builtin:data/bulk/BTAH_822_bulk.data \
+  --single builtin:data/molecule/BTAH_822_single.data --strict
+```
+
+Use `ffopt self-test --prepare-only --workdir ./ffopt-btah-example` when you
+want a visible local copy. Ordinary command-line relative paths are resolved
+from the current shell directory; paths inside `ffopt.in` are resolved from
+the input file's directory.
+
+For your own material, validate the data contract first:
 
 ```bash
 ffopt data check --bulk crystal.data --single molecule.data
@@ -196,6 +223,9 @@ total neutrality.
 - [0.3.0a3 single/two-node acceptance record](docs/reference/acceptance-v0.3.0a3.md)
 - [Workflow and accuracy model](docs/explanation/workflow-and-accuracy.md)
 - [BTAH examples and acceptance benchmark](examples/btah/README.md)
+- [Elemental BCC development guide](docs/how-to/elemental-bcc.md)
+- [Unified material-workflow design](docs/development/material-workflows-design.md)
+- [Scientific rationale and literature](docs/development/material-workflows-scientific-rationale.md)
 - [Developer architecture](docs/explanation/architecture.md)
 
 ## Scientific definition

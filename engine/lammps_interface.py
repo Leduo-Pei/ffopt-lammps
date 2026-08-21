@@ -3,7 +3,7 @@ lammps_interface.py  |  LAMMPS runner for force-field optimization
 
 Workflow per evaluation:
   1. Bulk tri NPT 300 K -> a_0K, a, b, c, alpha, beta, gamma_ang, density, pe, enthalpy
-  2. Surf NVT 300 K (complete + split run in parallel) -> surf_energy
+  2. Surf 0 K minimization (complete + split run in parallel) -> surf_energy
         # Stages 2+3: surf_complete and surf_split run in parallel.          #
 
 pair_coeffs.lmp is written before each LAMMPS call (never passed as -var).
@@ -28,6 +28,8 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from .property_evaluators import PropertyEvaluationContext, build_property_plan
+from .parameter_space import parameter_difference_error
+from workflow.mpi_local_exec import resolve_launcher_flavor
 from workflow.slurm_pool import SlurmCommandPool
 
 
@@ -103,6 +105,18 @@ class LAMMPSRunner:
         self.derived_params_cfg = pair_cfg.get("derived_params", [])  # list of constraint dicts
         self.explicit_pairs_cfg = pair_cfg.get("explicit_pairs", [])  # list of cross-pair dicts
 
+        # Hard relations that cannot be represented by independent box bounds
+        # (for example |Fe_corner_sigma - Fe_body_sigma| <= 0.75 A).  Keep the
+        # original object when malformed so the fail-closed validator can
+        # report it instead of silently treating it as no constraints.
+        parameter_constraints = config.get("parameter_constraints", {})
+        if isinstance(parameter_constraints, dict):
+            self.parameter_difference_constraints = parameter_constraints.get(
+                "differences", []
+            )
+        else:
+            self.parameter_difference_constraints = parameter_constraints
+
         # -- atom types --
         self.atom_types = config["atom_types"]   # list of {type, label, mass, params}
 
@@ -122,9 +136,80 @@ class LAMMPSRunner:
         bulk_md = lmp_cfg["bulk"]
         surf_md = lmp_cfg["surf"]
 
-        self.bulk_nx       = bulk_md["nx"]
-        self.bulk_ny       = bulk_md["ny"]
-        self.bulk_nz       = bulk_md["nz"]
+        # Molecular schema-1 snapshots expose only nx/ny/nz and never perform
+        # a runtime replicate.  Elemental BCC snapshots retain both pieces of
+        # geometry and derive the effective reporting divisor once.  This
+        # prevents an already-5x5x5 data file replicated 2x2x2 from being
+        # reported as either 5 cells or accidentally replicated twice.
+        self.bulk_runtime_replicate = bool(
+            bulk_md.get("runtime_replicate", False)
+        )
+        if self.bulk_runtime_replicate:
+            try:
+                self.bulk_cells_in_data = tuple(
+                    int(value) for value in bulk_md["cells_in_data"]
+                )
+                self.bulk_replicate = tuple(
+                    int(value) for value in bulk_md["replicate"]
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    "BCC lammps.bulk requires three positive cells_in_data and "
+                    "replicate values"
+                ) from exc
+            if (
+                len(self.bulk_cells_in_data) != 3
+                or len(self.bulk_replicate) != 3
+                or any(
+                    value < 1
+                    for value in (*self.bulk_cells_in_data, *self.bulk_replicate)
+                )
+            ):
+                raise ValueError(
+                    "BCC lammps.bulk requires three positive cells_in_data and "
+                    "replicate values"
+                )
+            self.bulk_effective_cells = tuple(
+                count * multiplier
+                for count, multiplier in zip(
+                    self.bulk_cells_in_data, self.bulk_replicate
+                )
+            )
+            configured_effective = tuple(
+                int(value)
+                for value in bulk_md.get(
+                    "effective_cells", self.bulk_effective_cells
+                )
+            )
+            configured_nxyz = tuple(
+                int(bulk_md[name]) for name in ("nx", "ny", "nz")
+            )
+            if (
+                configured_effective != self.bulk_effective_cells
+                or configured_nxyz != self.bulk_effective_cells
+            ):
+                raise ValueError(
+                    "BCC effective cell counts must equal "
+                    "cells_in_data * replicate"
+                )
+            self.bulk_tdamp = float(bulk_md["tdamp"])
+            self.bulk_pdamp = float(bulk_md["pdamp"])
+            if (
+                not np.isfinite(self.bulk_tdamp)
+                or not np.isfinite(self.bulk_pdamp)
+                or self.bulk_tdamp <= 0.0
+                or self.bulk_pdamp <= 0.0
+            ):
+                raise ValueError("BCC bulk tdamp and pdamp must be positive")
+        else:
+            self.bulk_cells_in_data = tuple(
+                int(bulk_md[name]) for name in ("nx", "ny", "nz")
+            )
+            self.bulk_replicate = (1, 1, 1)
+            self.bulk_effective_cells = self.bulk_cells_in_data
+            self.bulk_tdamp = 100.0
+            self.bulk_pdamp = 1000.0
+        self.bulk_nx, self.bulk_ny, self.bulk_nz = self.bulk_effective_cells
         self.bulk_npt_seed = bulk_md["npt_seed"]
         self.bulk_equil    = bulk_md["equil_steps"]   # NPT equilibration steps (discarded)
         self.bulk_prod     = bulk_md["prod_steps"]    # NPT production steps (time-averaged)
@@ -138,6 +223,20 @@ class LAMMPSRunner:
         self.surf_npt_seed = surf_md["npt_seed"]
         self.surf_equil    = surf_md["equil_steps"]   # NVT equilibration steps (discarded)
         self.surf_prod     = surf_md["prod_steps"]    # NVT production steps (time-averaged)
+        try:
+            self.surf_replicate = tuple(
+                int(value) for value in surf_md.get("replicate", (1, 1, 1))
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "lammps.surf.replicate must contain three positive integers"
+            ) from exc
+        if len(self.surf_replicate) != 3 or any(
+            value < 1 for value in self.surf_replicate
+        ):
+            raise ValueError(
+                "lammps.surf.replicate must contain three positive integers"
+            )
 
         # -- parallel execution --
         self.cores       = parallel["cores_per_worker"]
@@ -147,6 +246,14 @@ class LAMMPSRunner:
         self.scheduler_launcher = parallel.get("scheduler_launcher")
         self.scheduler_node_count = max(1, int(parallel.get("scheduler_nodes", 1)))
         self.workers_per_node = max(1, int(parallel.get("workers_per_node", 1)))
+        configured_mpi_flavor = lmp_cfg.get("mpi_flavor")
+        self.mpi_flavor = None
+        if configured_mpi_flavor or (
+            self.scheduler_launcher and self.use_mpi and int(self.cores) > 1
+        ):
+            self.mpi_flavor = resolve_launcher_flavor(
+                str(self.mpiexec), configured_mpi_flavor
+            )
         self.scheduler_pool = (
             SlurmCommandPool.from_config(config) if start_scheduler_pool else None
         )
@@ -387,11 +494,21 @@ class LAMMPSRunner:
         return results
 
     def feasibility_error(self, raw_params: Dict[str, float]) -> Optional[str]:
-        """Return a cheap parameter/charge constraint error before LAMMPS."""
+        """Return a cheap hard-constraint error before LAMMPS."""
         try:
             resolved = self._resolve_params(raw_params)
         except Exception as exc:
             return f"param resolution failed: {exc}"
+        return self._resolved_parameter_feasibility_error(resolved)
+
+    def _resolved_parameter_feasibility_error(
+            self, resolved: Dict[str, float]) -> Optional[str]:
+        """Validate every hard relation on a fully resolved parameter set."""
+        difference_error = parameter_difference_error(
+            resolved, getattr(self, "parameter_difference_constraints", [])
+        )
+        if difference_error:
+            return difference_error
         return self._charge_feasible(resolved)
 
     def evaluate_replicates(self,
@@ -436,7 +553,7 @@ class LAMMPSRunner:
             resolved = self._resolve_params(raw_params)
         except Exception:
             return None
-        if self._charge_feasible(resolved):
+        if self._resolved_parameter_feasibility_error(resolved):
             return None
 
         bulk_log = os.path.join(eval_dir, "bulk", "lammps_stdout.log")
@@ -571,6 +688,14 @@ class LAMMPSRunner:
             "pressure":       self.bulk_pressure,
             "save_traj":      _sv,
         }
+        if self.bulk_runtime_replicate:
+            bulk_vars.update({
+                "replicate_x": self.bulk_replicate[0],
+                "replicate_y": self.bulk_replicate[1],
+                "replicate_z": self.bulk_replicate[2],
+                "tdamp": self.bulk_tdamp,
+                "pdamp": self.bulk_pdamp,
+            })
         if self.use_charge:
             bulk_vars["kspace_accuracy"] = self.kspace_accuracy
 
@@ -608,14 +733,15 @@ class LAMMPSRunner:
                 error_msg=f"param resolution failed: {e}",
             )
 
-        # Hard charge feasibility gate (q>0 for H, |q|<abs_max for all types).
-        # Cheap rejection BEFORE LAMMPS keeps BO inside the allowed charge box.
-        cerr = self._charge_feasible(resolved)
-        if cerr:
+        # Hard parameter and charge feasibility gate.  This is the final
+        # execution barrier: violating points never reach a property runner or
+        # create a LAMMPS subprocess, even if an upstream sampler missed them.
+        constraint_error = self._resolved_parameter_feasibility_error(resolved)
+        if constraint_error:
             return EvalResult(
                 params=raw_params, properties={},
                 objective=LARGE_PENALTY, success=False,
-                error_msg=cerr,
+                error_msg=constraint_error,
             )
 
         stage_result = self.property_plan.execute(
@@ -653,7 +779,8 @@ class LAMMPSRunner:
                  slab_path:  str,
                  extra_base: Dict) -> Optional[Dict]:
         """
-  2. Surf NVT 300 K (complete + split run in parallel) -> surf_energy
+        Run one member of the complete/split 0 K cleavage pair.
+
         Called concurrently for both tags inside ThreadPoolExecutor.
         """
         sdir = os.path.join(eval_dir, f"surf_{tag}")
@@ -854,7 +981,7 @@ class LAMMPSRunner:
             include pair_coeffs.lmp
 
         File contents (in order):
-          1. pair_modify mix {rule}        (if mixing_rule != none)
+          1. pair_modify mix {rule}        (only for an explicit rule)
           2. pair_coeff i i epsilon sigma  (same-type, for every atom type)
           3. pair_coeff i j epsilon sigma  (explicit cross pairs, mixing_rule: none only)
           4. set type N charge Q           (if charge.enabled: true, for every type)
@@ -870,14 +997,25 @@ class LAMMPSRunner:
         -------
         str : absolute path to the written file.
         """
+        difference_error = parameter_difference_error(
+            resolved, getattr(self, "parameter_difference_constraints", [])
+        )
+        if difference_error:
+            raise ValueError(
+                "refusing to write LAMMPS pair coefficients: "
+                f"{difference_error}"
+            )
         lines = [
             "# pair_coeffs.lmp -- generated by FFOpt-LAMMPS",
             "# DO NOT EDIT: overwritten before each LAMMPS call",
             "",
         ]
 
-        # 1. Mixing rule (must precede pair_coeff for LAMMPS to apply it)
-        if self.mixing_rule != "none":
+        # 1. Mixing rule (must precede pair_coeff for LAMMPS to apply it).
+        # ``default`` delegates to the pair style's built-in rule.  LAMMPS has
+        # no ``pair_modify mix default`` command, so emitting one would both be
+        # invalid syntax and defeat that delegation.
+        if self.mixing_rule not in {"default", "none"}:
             lines.append(f"pair_modify mix {self.mixing_rule}")
             lines.append("")
 
@@ -983,7 +1121,9 @@ class LAMMPSRunner:
         its data-file LJ (no pair_coeff) and is set to charge 0.
         """
         lines = ["# pair_coeffs.lmp (adsorption system) -- auto-generated", ""]
-        if self.mixing_rule != "none":
+        # Keep the adsorption writer identical to the bulk writer: a declared
+        # default is represented by the absence of a pair_modify override.
+        if self.mixing_rule not in {"default", "none"}:
             lines.append(f"pair_modify mix {self.mixing_rule}")
             lines.append("")
         for t in sorted(type_labels):
@@ -1115,10 +1255,12 @@ class LAMMPSRunner:
                     "--slots", str(self.workers_per_node),
                     "--",
                 ]
+            mpi_flavor = self.mpi_flavor or resolve_launcher_flavor(self.mpiexec)
             return prefix + [
                 sys.executable,
                 "-m", "workflow.mpi_local_exec",
                 "--launcher", self.mpiexec,
+                "--launcher-flavor", mpi_flavor,
                 "--ranks", str(ranks),
                 "--slots", str(self.workers_per_node),
                 "--",
@@ -1191,6 +1333,7 @@ class LAMMPSRunner:
                     },
                     timeout=self.timeout,
                     mpi_launcher=self.mpiexec if self.use_mpi else None,
+                    mpi_launcher_flavor=self.mpi_flavor if self.use_mpi else None,
                     mpi_ranks=self.cores if self.use_mpi else 1,
                 )
             else:

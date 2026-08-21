@@ -495,15 +495,24 @@ end
         f"Generated FFOpt project type: `{project_type}`; parameter mode: "
         f"`{mode if target_list else 'validation_only'}`.\n\n"
         "Review every type, any ranges and targets, tolerances, and run lengths in "
-        "`ffopt.in`, then run:\n\n"
+        "`ffopt.in`, then validate it:\n\n"
         "```bash\n"
         "ffopt check ffopt.in\n"
         "ffopt explain ffopt.in\n"
+        "```\n\n"
+        "On a local workstation (direct execution, no scheduler):\n\n"
+        "```bash\n"
         "ffopt doctor ffopt.in --machine local\n"
         "ffopt run ffopt.in --machine local --dry-run\n"
         "ffopt run ffopt.in --machine local\n"
         "```\n\n"
-        "Replace `local` with a configured SLURM profile when running on a cluster.\n",
+        "On a SLURM cluster, choose a configured profile instead of `local`:\n\n"
+        "```bash\n"
+        "ffopt machine list\n"
+        "ffopt doctor ffopt.in --machine PROFILE\n"
+        "ffopt run ffopt.in --machine PROFILE --dry-run\n"
+        "ffopt run ffopt.in --machine PROFILE --watch\n"
+        "```\n",
         encoding="ascii", newline="\n",
     )
     (root / ".gitignore").write_text(

@@ -33,14 +33,21 @@ emits the established engine schema. Defaults are typed dictionaries in
 
 `engine.lammps_interface.LAMMPSRunner` supplies the validated LAMMPS
 primitives. Evaluators declare dependencies and are ordered by the property
-registry. Schema 1 exposes bulk, sublimation, and adsorption in `ffopt.in`;
-the legacy surface evaluator remains an internal engine API until its public
-data contract and templates are defined.
+registry. Schema 1 exposes `bulk`, `sublimation`, `adsorption`, `surface`, and
+`elasticity` blocks in `ffopt.in`. Surface energy has a public complete/split
+data contract and packaged LAMMPS template. Cubic elasticity is a native BCC
+material-stage contract rather than a third-party evaluator: it combines exact
+static calculations, optional finite-temperature promotion, and independent
+holdout validation in the persistent execution graph.
 
 - Bulk always performs fixed-box minimization followed by finite-temperature
   NPT equilibration and production.
 - Sublimation reuses the bulk NPT mean potential energy and combines it with a
   minimized isolated-molecule potential energy.
+- Surface energy compares the configured complete and split slabs with the
+  same force-field parameters and explicit facet metadata.
+- Cubic elasticity fits `B`, `Cprime`, and `C44`; derived `G`, `E`, and
+  Poisson ratio are validation outputs rather than extra fit dimensions.
 - A property with targets runs during fitting and validation.
 - A property without targets is enabled only by final validation.
 - Intermediate optimization evaluations do not save trajectories; final

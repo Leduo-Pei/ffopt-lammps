@@ -9,11 +9,13 @@ def _runner(
     launcher: str,
     omp_threads: int = 1,
     scheduler_launcher: str | None = None,
+    mpi_flavor: str = "openmpi",
 ) -> LAMMPSRunner:
     runner = object.__new__(LAMMPSRunner)
     runner.mpiexec = launcher
     runner.omp_threads = omp_threads
     runner.scheduler_launcher = scheduler_launcher
+    runner.mpi_flavor = mpi_flavor
     runner.scheduler_node_count = 1
     runner.workers_per_node = 12
     return runner
@@ -27,8 +29,19 @@ def test_slurm_launcher_wraps_local_mpi_in_an_exact_single_node_step():
     ]
     assert prefix[8:] == [
         "-m", "workflow.mpi_local_exec", "--launcher", "/opt/mpi/mpirun",
+        "--launcher-flavor", "openmpi",
         "--ranks", "4", "--slots", "12", "--",
     ]
+
+
+def test_slurm_launcher_propagates_intel_mpi_flavor():
+    prefix = _runner(
+        "/opt/intel/oneapi/mpi/latest/bin/mpiexec",
+        scheduler_launcher="srun",
+        mpi_flavor="intelmpi",
+    )._mpi_prefix(2)
+    index = prefix.index("--launcher-flavor")
+    assert prefix[index:index + 2] == ["--launcher-flavor", "intelmpi"]
 
 
 def test_slurm_launcher_selects_node_from_evaluation_index():

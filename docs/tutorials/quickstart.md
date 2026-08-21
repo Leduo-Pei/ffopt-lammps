@@ -18,7 +18,7 @@ conda activate ffopt
 conda install -c conda-forge "lammps=*=*openmpi*" openmpi -y
 python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 python -m pip install \
-  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a3/ffopt_lammps-0.3.0a3-py3-none-any.whl"
+  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a4/ffopt_lammps-0.3.0a4-py3-none-any.whl"
 ```
 
 The command above deliberately installs CPU PyTorch. On a GPU workstation,
@@ -49,6 +49,11 @@ not an FFOpt or LAMMPS failure.
 The complete target syntax used by `ffopt init` is
 `NAME=VALUE[,WEIGHT[,UNIT[,TOLERANCE]]]`. Generated tolerance values are
 explicit in `ffopt.in` and must be reviewed against experimental uncertainty.
+`weight` controls a property's relative contribution to the objective.
+`tolerance` is a same-unit absolute error threshold used only by final
+validation. For example, `a=4.2422,1.0,A,0.15` requires
+`|a_calc - 4.2422| <= 0.15 A`. If omitted, `ffopt init` writes
+`max(3% of |target|, 1e-6)` explicitly.
 
 ## 2. Configure one machine profile
 
@@ -56,14 +61,20 @@ Inspect the host first:
 
 ```bash
 ffopt machine probe
+ffopt machine probe --partition YOUR_PARTITION
 ```
+
+`YOUR_PARTITION` is the site's SLURM partition name, not a compute-node name.
+Use `sinfo` to discover it, or omit the filter to list every visible partition.
 
 For a local workstation:
 
 If both `lmp` and its dependencies are already on `PATH`, first-time users can
 skip configuration and use `--machine local`. The built-in profile runs one
-serial evaluation at a time. Configure a named profile to use explicit paths
-or more CPU cores:
+serial evaluation at a time. `local` means direct execution on the host where
+the command is entered; it does not submit through a scheduler. Do not use it
+for production on a cluster login node. Configure a named profile to use
+explicit paths or more CPU cores:
 
 ```bash
 ffopt machine configure \
@@ -71,6 +82,7 @@ ffopt machine configure \
   --backend local \
   --lammps "$(which lmp)" \
   --mpi "$(which mpirun)" \
+  --mpi-flavor openmpi \
   --workers 4 \
   --mpi-ranks 4 \
   --omp-threads 1 \
@@ -85,7 +97,8 @@ ffopt machine configure \
   --backend slurm \
   --lammps "$(which lmp)" \
   --mpi "$(which mpirun)" \
-  --partition CPU \
+  --mpi-flavor openmpi \
+  --partition YOUR_PARTITION \
   --nodes 1 \
   --total-cores 48 \
   --workers 12 \
@@ -135,6 +148,29 @@ audit/finalization, validation-only adsorption, restart state, and final
 validation work together. It does not independently validate a new material.
 
 ## 4. Start your own molecular project
+
+First verify the packaged BTAH data without locating any repository files:
+
+```bash
+ffopt inspect builtin:data/bulk/BTAH_822_bulk.data
+ffopt data check \
+  --bulk builtin:data/bulk/BTAH_822_bulk.data \
+  --single builtin:data/molecule/BTAH_822_single.data \
+  --strict
+```
+
+To create a visible, editable copy of the complete BTAH example instead:
+
+```bash
+ffopt self-test --prepare-only --workdir ./ffopt-btah-example
+cd ./ffopt-btah-example
+```
+
+Ordinary relative paths passed to `inspect`, `data check`, or `init` are
+resolved from the shell's current directory. Relative paths written inside
+`ffopt.in` are resolved from the directory containing that input file.
+
+For your own data:
 
 ```bash
 ffopt data check --bulk crystal.data --single molecule.data

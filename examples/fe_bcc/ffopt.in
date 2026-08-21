@@ -1,0 +1,156 @@
+# FFOpt elemental BCC example: two ordered Fe basis labels, three free LJ values.
+ffopt 1
+project fe_bcc
+material elemental Fe
+crystal bcc
+workflow bo sample audit screen nn al finalists validate
+
+parameters
+    range epsilon absolute 0.001 10.0
+    range sigma   absolute 0.001 5.0
+    mixing default
+
+    # Corner/body are an ordered two-sublattice surrogate.  Keep their well
+    # depth identical and bound the artificial size contrast.
+    tie epsilon all
+    difference sigma Fe_corner Fe_body max 0.75 A
+
+    # id  label       epsilon(kcal/mol)  sigma(A)
+    # Charge is implicitly disabled for an elemental material.  The initial
+    # values are one previously measured structural-feasible point, used only
+    # as the single BO warm start.  The broad ranges and all BO/Sample/AL
+    # evaluations remain new calculations.
+    type 1 Fe_corner 5.9464626141 2.0046831130
+    type 2 Fe_body   5.9464626141 2.6112575897
+end
+
+property bulk
+    data data/Fe_a_2type_555.data
+    cells_in_data 5 5 5
+    replicate 2 2 2
+    temperature 300 K
+    pressure 1 atm
+    tdamp 100 fs
+    pdamp 1000 fs
+    equilibration 20000
+    production 40000
+
+    target a        2.8665 A      weight 1.0 tolerance 0.028665
+    target b        2.8665 A      weight 1.0 tolerance 0.028665
+    target c        2.8665 A      weight 1.0 tolerance 0.028665
+    target alpha   90.0000 degree weight 1.0 tolerance 1.0
+    target beta    90.0000 degree weight 1.0 tolerance 1.0
+    target gamma   90.0000 degree weight 1.0 tolerance 1.0
+    target density  7.8740 g/cm3  weight 1.0 tolerance 0.078740
+end
+
+property surface
+    complete data/Fe_a_2type_555_complete.data
+    split    data/Fe_a_2type_555_split.data
+    facet 110
+    replicate 2 2 1
+    target 2.340 J/m2 weight 1.0 tolerance 0.117
+end
+
+property elasticity
+    # Static and finite-temperature evidence have independent experimental
+    # targets; no universal 0 K -> 300 K scale factor is assumed.
+    # Static: Rayne & Chandrasekhar, Phys. Rev. 122, 1714 (1961),
+    # DOI 10.1103/PhysRev.122.1714 (low-temperature extrapolation to 0 K).
+    module static objective
+    target static B       173.10 GPa
+    target static Cprime   52.50 GPa
+    target static C44     121.90 GPa
+
+    # Dynamic: Adams et al., J. Appl. Phys. 100, 113530 (2006),
+    # DOI 10.1063/1.2365714 (one internally consistent 300 K data set and an
+    # independent experimental validation, not a fitted 0-to-300 K scale law).
+    module dynamic promotion
+    target dynamic B       166.20 GPa
+    target dynamic Cprime   48.15 GPa
+    target dynamic C44     115.87 GPa
+
+    gate lattice 1 percent
+    gate angles 1 degree
+    gate density 1 percent
+    gate surface 5 percent
+    born required
+    r2 0.98
+    tier 20 percent
+
+    strain 0.002 0.004 0.006
+    replicate 2 2 2
+    temperature 300 K
+    timestep 1 fs
+    equilibration 20000
+    production 40000
+    # Promotion and final validation use disjoint deterministic trajectories.
+    seeds 101 202 303
+    validation_seeds 404 505 606
+end
+
+bo
+    method auto
+    objective feasible_coverage
+    # The public audit stage below is the sole replicated structural audit.
+    # Disable the optimizer's legacy internal audit to avoid duplicate LAMMPS work.
+    stability_audit off
+    initial_points 76
+    batch_size 38
+    max_rounds 40
+    coverage archive 96 pool 16384 feasible 0.50 boundary 0.25 uncertainty 0.15 global 0.10
+end
+
+sample
+    points 1520
+    centers 48
+    center_selection diverse
+    radii 0.010 0.020 0.050 0.100
+    boundary_fraction 0.20
+    global_fraction 0.10
+    seeds 101
+    design_seed 20260809
+end
+
+audit
+    top_k 160
+    seeds 101 202 303
+    max_workers 38
+end
+
+screen
+    minimum 480
+    per_dimension 160
+    maximum 1200
+    core_fraction 0.75
+    buffer_multiplier 1.50
+    elite_fraction 0.10
+end
+
+nn
+    method gp
+end
+
+al
+    acquisition constrained_minimax
+    rounds 8
+    candidates 76
+    static_candidates 38
+    candidate_pool 65536
+    improvement_fraction 0.50
+    boundary_fraction 0.30
+    global_fraction 0.20
+    early_stop patience 3
+    early_stop improvement 0.5
+end
+
+finalists
+    minimum 10
+    maximum 20
+    window 1.0
+    diverse 1
+end
+
+validate
+    require_tolerances yes
+end

@@ -32,6 +32,20 @@ def test_builtin_local_profile_is_listed_and_showable(tmp_path, monkeypatch, cap
     assert '"max_workers": 1' in output
 
 
+def test_machine_configure_rejects_ambiguous_parallel_mpi_before_saving(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FFOPT_CONFIG_DIR", str(tmp_path / "config"))
+    args = build_parser().parse_args([
+        "machine", "configure", "--name", "ambiguous", "--backend", "local",
+        "--lammps", "/env/bin/lmp", "--mpi", "/env/bin/mpiexec",
+        "--workers", "1", "--mpi-ranks", "2",
+    ])
+    with pytest.raises(SystemExit, match="--mpi-flavor"):
+        args.function(args)
+    assert not (tmp_path / "config" / "machines.toml").exists()
+
+
 def test_format_machine_probe_with_slurm_recommendation():
     text = format_machine_probe({
         "host": "node",
@@ -97,7 +111,8 @@ def test_prepare_slurm_machine_test_uses_profile_resources(tmp_path, monkeypatch
     monkeypatch.setenv("FFOPT_CONFIG_DIR", str(tmp_path / "config"))
     profile = build_machine_profile(
         name="cluster", backend="slurm", lammps="/env/bin/lmp",
-        mpi="/env/bin/mpirun", workers=4, ranks=4, nodes=2,
+        mpi="/env/bin/mpirun", mpi_flavor="openmpi",
+        workers=4, ranks=4, nodes=2,
         cores=16, partition="CPU", memory_per_node="4G",
     )
     result = prepare_machine_test("cluster", profile)
@@ -113,7 +128,61 @@ def test_prepare_slurm_machine_test_uses_profile_resources(tmp_path, monkeypatch
     assert "workflow.machine_test_runner" in script
     assert "--workers 4" in script
     assert "--nodes 2" in script
+    assert "--mpi-flavor openmpi" in script
     assert "FFOPT_MACHINE_TEST_OK" in result["input"].read_text(encoding="ascii")
+
+
+def test_prepare_machine_test_propagates_explicit_intel_mpi_flavor(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FFOPT_CONFIG_DIR", str(tmp_path / "config"))
+    profile = build_machine_profile(
+        name="intel-cluster", backend="slurm", lammps="/env/bin/lmp",
+        mpi="/env/bin/mpiexec", mpi_flavor="intelmpi",
+        workers=1, ranks=2, nodes=1, cores=2,
+    )
+    result = prepare_machine_test("intel-cluster", profile)
+    assert profile["lammps"]["mpi_flavor"] == "intelmpi"
+    assert result["command"][3:7] == [
+        "--launcher", "/env/bin/mpiexec",
+        "--launcher-flavor", "intelmpi",
+    ]
+
+
+def test_single_node_multiworker_machine_test_exercises_full_pool(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FFOPT_CONFIG_DIR", str(tmp_path / "config"))
+    profile = build_machine_profile(
+        name="intel-76", backend="slurm", lammps="/env/bin/lmp",
+        mpi="/env/bin/mpiexec", mpi_flavor="intelmpi",
+        workers=38, ranks=2, nodes=1, cores=76, partition="CPU",
+    )
+    result = prepare_machine_test("intel-76", profile)
+    script = result["script"].read_text(encoding="ascii")
+    assert result["command"][2] == "workflow.machine_test_runner"
+    assert "--workers" in result["command"]
+    assert result["command"][result["command"].index("--workers") + 1] == "38"
+    assert "--nodes" in result["command"]
+    assert result["command"][result["command"].index("--nodes") + 1] == "1"
+    assert "--mpi-flavor" in result["command"]
+    assert result["command"][result["command"].index("--mpi-flavor") + 1] == "intelmpi"
+    assert "#SBATCH --nodes=1" in script
+    assert "#SBATCH --ntasks=38" in script
+    assert "#SBATCH --ntasks-per-node=38" in script
+    assert "#SBATCH --cpus-per-task=2" in script
+
+
+def test_prepare_machine_test_rejects_ambiguous_mpi_without_flavor(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FFOPT_CONFIG_DIR", str(tmp_path / "config"))
+    profile = build_machine_profile(
+        name="ambiguous-cluster", backend="slurm", lammps="/env/bin/lmp",
+        mpi="/env/bin/mpiexec", workers=1, ranks=2, nodes=1, cores=2,
+    )
+    with pytest.raises(ValueError, match="will not guess"):
+        prepare_machine_test("ambiguous-cluster", profile)
 
 
 def test_missing_local_lammps_is_reported_as_failed(tmp_path, monkeypatch):

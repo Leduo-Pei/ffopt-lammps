@@ -1,0 +1,27 @@
+# FFOpt cubic elasticity: one 0 K, zero-pressure reference cell.
+# Every later deformation reads the restart written here; no strain is ever
+# accumulated from a preceding state.
+units ${units}
+dimension 3
+boundary p p p
+atom_style ${atom_style}
+newton on
+
+pair_style lj/cut ${cutoff}
+read_data ${bulk_data}
+replicate ${replicate_x} ${replicate_y} ${replicate_z}
+include ${force_field_file}
+change_box all triclinic
+
+neighbor 2.0 bin
+neigh_modify delay 0 every 1 check yes
+
+fix BOX all box/relax iso ${target_pressure_atm} vmax ${box_vmax}
+min_style cg
+min_modify dmax ${min_dmax} line quadratic
+minimize ${energy_tolerance} ${force_tolerance} ${max_iterations} ${max_evaluations}
+unfix BOX
+run 0
+
+write_restart elastic_reference.restart
+print "FFOPT_STATIC_REFERENCE: $(pe) $(vol) $(lx) $(ly) $(lz) $(density)"

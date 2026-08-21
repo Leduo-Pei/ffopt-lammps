@@ -84,6 +84,7 @@ def test_surface_evaluator_uses_cleavage_energy_conversion() -> None:
     runner.surf_npt_seed = 101
     runner.surf_equil = 10
     runner.surf_prod = 20
+    runner.surf_replicate = (1, 1, 1)
     runner.use_charge = False
     runner.surf_complete = "complete.data"
     runner.surf_split = "split.data"
@@ -113,4 +114,3 @@ def test_missing_target_provider_fails_preflight() -> None:
             {"targets": {"unknown_property": {"value": 1.0, "weight": 1.0}}},
             runner,
         )
-

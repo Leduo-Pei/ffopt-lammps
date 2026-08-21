@@ -1,0 +1,75 @@
+# FFOpt cubic elasticity: one independent fixed-cell NVT microstrain state.
+# direction = zero | x | y | z | xy | xz | yz
+units ${units}
+dimension 3
+boundary p p p
+atom_style ${atom_style}
+newton on
+
+read_restart elastic_reference.restart
+include ${force_field_file}
+neighbor 2.0 bin
+neigh_modify delay 0 every 1 check yes
+
+# Apply F=I+d using the restricted-triclinic representation.  The zero state
+# intentionally executes none of these branches and provides a common offset.
+if "${direction} == x" then &
+  "variable dx equal ${strain}*lx" &
+  "variable dxy equal ${strain}*xy" &
+  "variable dxz equal ${strain}*xz" &
+  "change_box all x delta 0 ${dx} xy delta ${dxy} xz delta ${dxz} remap units box"
+
+if "${direction} == y" then &
+  "variable dy equal ${strain}*ly" &
+  "variable dyz equal ${strain}*yz" &
+  "change_box all y delta 0 ${dy} yz delta ${dyz} remap units box"
+
+if "${direction} == z" then &
+  "variable dz equal ${strain}*lz" &
+  "change_box all z delta 0 ${dz} remap units box"
+
+if "${direction} == xy" then &
+  "variable dxy_s equal ${strain}*ly" &
+  "variable dxz_s equal ${strain}*yz" &
+  "change_box all xy delta ${dxy_s} xz delta ${dxz_s} remap units box"
+
+if "${direction} == xz" then &
+  "variable dxz_s2 equal ${strain}*lz" &
+  "change_box all xz delta ${dxz_s2} remap units box"
+
+if "${direction} == yz" then &
+  "variable dyz_s equal ${strain}*lz" &
+  "change_box all yz delta ${dyz_s} remap units box"
+
+run 0
+fix NVT all nvt temp ${temperature_k} ${temperature_k} ${nvt_damp}
+timestep ${timestep}
+thermo ${thermo_every}
+thermo_style custom step temp press pxx pyy pzz pxy pxz pyz lx ly lz vol density
+run ${nvt_equil_steps}
+reset_timestep 0
+
+variable sxx equal pxx
+variable syy equal pyy
+variable szz equal pzz
+variable sxy equal pxy
+variable sxz equal pxz
+variable syz equal pyz
+variable temp_now equal temp
+variable rho_now equal density
+fix STRESS all ave/time ${sample_every} ${sample_repeat} ${sample_frequency} &
+  v_sxx v_syy v_szz v_sxy v_sxz v_syz v_temp_now v_rho_now
+run ${nvt_prod_steps}
+
+variable sxx_mean equal $(f_STRESS[1])
+variable syy_mean equal $(f_STRESS[2])
+variable szz_mean equal $(f_STRESS[3])
+variable sxy_mean equal $(f_STRESS[4])
+variable sxz_mean equal $(f_STRESS[5])
+variable syz_mean equal $(f_STRESS[6])
+variable temp_mean equal $(f_STRESS[7])
+variable rho_mean equal $(f_STRESS[8])
+unfix STRESS
+unfix NVT
+
+print "FFOPT_DYNAMIC_STRESS: ${sxx_mean} ${syy_mean} ${szz_mean} ${sxy_mean} ${sxz_mean} ${syz_mean} ${temp_mean} ${rho_mean}"

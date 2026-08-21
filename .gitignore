@@ -3,11 +3,13 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+.pytest-tmp-*/
 .ruff_cache/
 .coverage
 htmlcov/
 build/
 dist/
+.build-*/
 .venv/
 venv/
 
@@ -28,6 +30,8 @@ lammps_stdout.log
 slurm-*.out
 
 # Presentation and local analysis products
+/.codex_tmp/
+/reports/
 docs/presentation/outputs/
 docs/presentation/*.pptx
 docs/presentation/*.vsdx

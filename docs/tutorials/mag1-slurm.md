@@ -70,7 +70,7 @@ conda deactivate
 conda activate ffopt
 python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 python -m pip install \
-  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a3/ffopt_lammps-0.3.0a3-py3-none-any.whl"
+  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a4/ffopt_lammps-0.3.0a4-py3-none-any.whl"
 ```
 
 FFOpt also exports `PYTHONNOUSERSITE=1` in generated SLURM scripts so packages
@@ -90,7 +90,7 @@ python -m pip check
 lmp -help | head
 ```
 
-Expected: executable paths contain `/envs/ffopt/`, FFOpt reports `0.3.0a3`,
+Expected: executable paths contain `/envs/ffopt/`, FFOpt reports `0.3.0a4`,
 user-site reports `False`, `pip check` reports no broken requirements, and CPU
 PyTorch reports CUDA `False`.
 
@@ -102,7 +102,7 @@ MPI=/storage/home/liguoling/peizy/software/anaconda3/envs/ffopt/bin/mpirun
 
 ffopt machine configure \
   --name mag1-1node --backend slurm \
-  --lammps "$LMP" --mpi "$MPI" --partition CPU \
+  --lammps "$LMP" --mpi "$MPI" --mpi-flavor openmpi --partition CPU \
   --nodes 1 --total-cores 40 --workers 10 \
   --mpi-ranks 4 --omp-threads 1 \
   --memory-per-node 64G --walltime 06:00:00 \
@@ -110,7 +110,7 @@ ffopt machine configure \
 
 ffopt machine configure \
   --name mag1-2node --backend slurm \
-  --lammps "$LMP" --mpi "$MPI" --partition CPU \
+  --lammps "$LMP" --mpi "$MPI" --mpi-flavor openmpi --partition CPU \
   --nodes 2 --total-cores 80 --workers 20 \
   --mpi-ranks 4 --omp-threads 1 \
   --memory-per-node 64G --walltime 06:00:00 \
@@ -124,7 +124,7 @@ independent LAMMPS workers on each node:
 ```bash
 ffopt machine configure \
   --name mag1-2node-backfill --backend slurm \
-  --lammps "$LMP" --mpi "$MPI" --partition CPU \
+  --lammps "$LMP" --mpi "$MPI" --mpi-flavor openmpi --partition CPU \
   --nodes 2 --total-cores 32 --workers 8 \
   --mpi-ranks 4 --omp-threads 1 \
   --memory-per-node 16G --walltime 06:00:00 \
@@ -148,6 +148,10 @@ ffopt machine show --name mag1-2node
 ffopt machine test --name mag1-1node
 ffopt machine test --name mag1-2node
 ```
+
+Here `CPU` is specifically the SLURM **partition name** on mag1, as reported
+by `sinfo`; it is not a universal FFOpt value and it is not a node name. Users
+on another cluster must substitute that site's partition.
 
 The two-node test must report both allocated hostnames. It uses the full
 20-worker/4-rank topology with a zero-step LAMMPS input, so it checks the

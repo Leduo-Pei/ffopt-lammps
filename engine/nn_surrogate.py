@@ -27,6 +27,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 import time
 import warnings
@@ -63,6 +64,105 @@ warnings.filterwarnings("ignore", category=UserWarning, module="torch")
 # Physics feature builder  (unchanged from previous version)
 # ============================================================================
 
+_PAIR_STYLE_RE = re.compile(r"^\s*pair_style\s+(\S+)", re.IGNORECASE)
+
+
+def _uses_geometric_default(pair_style: str) -> bool:
+    """Whether a LAMMPS pair style has the LJ geometric mixing default."""
+    style = str(pair_style).strip().lower().replace("_", "/")
+    return style == "lj/cut" or style.startswith("lj/cut/coul")
+
+
+def _pair_styles_from_input(path: str) -> List[str]:
+    """Read declared pair styles from a LAMMPS input, if it is available."""
+    try:
+        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except (OSError, TypeError):
+        return []
+    styles: List[str] = []
+    for line in lines:
+        match = _PAIR_STYLE_RE.match(line.split("#", 1)[0])
+        if match:
+            styles.append(match.group(1))
+    return styles
+
+
+def _configured_lammps_input_paths(config: dict) -> List[str]:
+    """Collect configured LAMMPS input paths without assuming one property."""
+    paths: List[str] = []
+
+    def walk(value, input_context: bool = False):
+        if isinstance(value, dict):
+            for child_key, child in value.items():
+                walk(
+                    child,
+                    input_context or "input" in str(child_key).lower(),
+                )
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                walk(child, input_context)
+        elif isinstance(value, (str, os.PathLike)) and input_context:
+            paths.append(os.fspath(value))
+
+    for section in ("lammps", "adsorption", "sublimation"):
+        walk(config.get(section, {}))
+    return list(dict.fromkeys(paths))
+
+
+def _resolve_default_mixing_rule(config: dict) -> str:
+    """Resolve ``mixing default`` for NN features, or fail closed.
+
+    The LAMMPS writer must leave ``default`` untouched.  The surrogate, on the
+    other hand, needs the effective rule to construct the same cross features
+    as the simulator.  Only pair styles whose default is known here are
+    accepted; silently guessing for a new pair style would train on the wrong
+    physics embedding.
+    """
+    persisted = config.get("physics_feature_mixing_rule")
+    if persisted is not None:
+        if persisted != "geometric":
+            raise ValueError(
+                "invalid persisted NN default mixing rule "
+                f"{persisted!r}; expected 'geometric'"
+            )
+        return "geometric"
+
+    explicit_styles: List[str] = []
+    pair_cfg = config.get("pair_params", {})
+    lammps_cfg = config.get("lammps", {})
+    for value in (pair_cfg.get("pair_style"), lammps_cfg.get("pair_style")):
+        if isinstance(value, str) and value.strip():
+            explicit_styles.append(value)
+    if explicit_styles:
+        styles = explicit_styles
+    else:
+        styles = []
+        for path in _configured_lammps_input_paths(config):
+            styles.extend(_pair_styles_from_input(path))
+
+    # Compatibility with the material extension used by the elemental branch.
+    # It is deliberately only a fallback: a concrete LAMMPS pair_style is a
+    # stronger statement than a high-level force-field family label.
+    if not styles:
+        force_field = config.get("material", {}).get("force_field")
+        if isinstance(force_field, str) and force_field.strip():
+            styles = [force_field]
+
+    if not styles:
+        raise ValueError(
+            "NN physics features cannot resolve LAMMPS 'mixing default': "
+            "no pair_style was declared in the runtime config or its LAMMPS "
+            "input files"
+        )
+
+    unknown = sorted({style for style in styles if not _uses_geometric_default(style)})
+    if unknown:
+        raise ValueError(
+            "NN physics features cannot resolve LAMMPS default mixing for "
+            f"pair style(s): {', '.join(unknown)}"
+        )
+    return "geometric"
+
 class PhysicsFeatureBuilder:
     """
     Pre-compute physically meaningful derived features from raw BO parameters.
@@ -78,7 +178,14 @@ class PhysicsFeatureBuilder:
         # Saved legacy models do not contain pair_params.  Their feature schema
         # used geometric epsilon plus arithmetic sigma, so keep that default for
         # backward-compatible loading.  New recipes persist the actual rule.
-        self.mixing_rule = config.get("pair_params", {}).get("mixing_rule", "arithmetic")
+        configured_mixing_rule = config.get("pair_params", {}).get(
+            "mixing_rule", "arithmetic"
+        )
+        self.mixing_rule = (
+            _resolve_default_mixing_rule(config)
+            if configured_mixing_rule == "default"
+            else configured_mixing_rule
+        )
         self._name_to_idx: Dict[str, int] = {n: i for i, n in enumerate(param_names)}
         self._type_eps_idx: List[Optional[int]] = []
         self._type_sig_idx: List[Optional[int]] = []
@@ -1627,6 +1734,14 @@ class NNSurrogate:
             "atom_types":      self.config["atom_types"],
             "charge_cfg":      self.config["charge"],
             "pair_params":     self.config.get("pair_params", {}),
+            # A loaded model may no longer have access to the original LAMMPS
+            # input path.  Persist the already validated effective rule so its
+            # feature schema remains reproducible.
+            "physics_feature_mixing_rule": (
+                self.feat_builder.mixing_rule
+                if self.config.get("pair_params", {}).get("mixing_rule") == "default"
+                else None
+            ),
             "targets":         self.config["targets"],
             "compute_surface": self.config["lammps"]["compute_surface"],
         }
@@ -1738,6 +1853,7 @@ def load_ensemble_from_file(
         "atom_types": meta["atom_types"],
         "charge": meta["charge_cfg"],
         "pair_params": meta.get("pair_params", {}),
+        "physics_feature_mixing_rule": meta.get("physics_feature_mixing_rule"),
     }
     feat_builder   = PhysicsFeatureBuilder(meta["param_names"], partial_config)
 

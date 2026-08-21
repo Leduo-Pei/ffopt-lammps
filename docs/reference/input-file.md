@@ -30,7 +30,7 @@ end
 |---|---|
 | `ffopt 1` | Input schema version. It is not an on/off switch. |
 | `project NAME` | Portable result identifier; letters first, then letters, numbers, `.`, `_`, or `-`. |
-| `workflow ...` | Ordered stages to execute. Common values are `bo` or `bo sample nn al audit finalize validate`. |
+| `workflow ...` | Ordered stages. Molecular production uses `bo sample nn al audit finalize validate`; material production uses `bo sample audit screen nn al finalists validate`. |
 
 Results are written below `runs/<project>/`. The project name has no
 molecule-specific meaning.
@@ -146,6 +146,17 @@ mixing epsilon geometric
 mixing sigma geometric
 ```
 
+Elemental and interoperable material models may instead use:
+
+```text
+mixing default
+```
+
+`default` does not write `pair_modify mix`; LAMMPS therefore applies the
+default of the selected pair style. For `lj/cut`, that default is geometric.
+The resolved rule is recorded for surrogate features and provenance, but the
+mixing rule and cross coefficients never become optimization dimensions.
+
 The current backend always uses geometric epsilon mixing. Sigma may use
 `geometric` or `arithmetic`, matching LAMMPS `pair_modify mix geometric` or
 `pair_modify mix arithmetic`. For unlike types `i,j`:
@@ -182,6 +193,30 @@ states how many crystallographic unit cells are already present in the data
 file; it does not replicate the file. Reported `a`, `b`, and `c` are divided by
 these values.
 
+For `material elemental` with `crystal bcc`, `cells_in_data` is mandatory and
+the bulk block may additionally request one runtime supercell expansion:
+
+```text
+property bulk
+    data data/Fe_555.data
+    cells_in_data 5 5 5
+    replicate 2 2 2
+    tdamp 100 fs
+    pdamp 1000 fs
+    # targets ...
+end
+```
+
+Here the input file remains a 5x5x5 box, LAMMPS executes exactly one
+`replicate 2 2 2`, and the reported lattice constants are divided by effective
+counts 10x10x10. FFOpt derives those effective counts; users never enter them
+separately. The BCC protocol uses `lj/cut`, zero-kelvin triclinic box relaxation,
+and fully flexible triclinic NPT. Its pair style and LJ force-field family are
+recorded in the scientific configuration for model-form auditing. Molecular
+schema-1 bulk retains its original behavior: `cells_in_data` only normalizes
+the existing box, and `replicate`, `tdamp`, and `pdamp` are rejected rather than
+accepted and ignored.
+
 | Setting | Meaning | Default |
 |---|---|---|
 | `cells_in_data` | Unit-cell repeats already contained in the data file | `1 1 1` |
@@ -192,6 +227,14 @@ these values.
 | `equilibration` | Discarded NPT timesteps | `20000` |
 | `production` | Averaged NPT timesteps | `40000` |
 | `seed` | Velocity-initialization seed | `101` |
+
+BCC-only settings are:
+
+| Setting | Meaning | Default |
+|---|---|---|
+| `replicate` | One LAMMPS runtime replication of the input box | `1 1 1` |
+| `tdamp` | Nose-Hoover temperature damping time | `100 fs` |
+| `pdamp` | Nose-Hoover pressure damping time | `1000 fs` |
 
 There is no bulk `protocol` switch in schema 1: minimization followed by NPT
 is the fixed, tested workflow. `production` must be at least 5000 timesteps,
@@ -271,6 +314,67 @@ types shared by the complex and isolated-molecule files. A charged,
 multicomponent, or independently optimized substrate requires a future property
 contract and must not be represented by relabeling it as this fixed metal.
 
+## Cubic elasticity property
+
+```text
+property elasticity
+    module static objective
+    target static B       173.10 GPa
+    target static Cprime   52.50 GPa
+    target static C44     121.90 GPa
+
+    module dynamic promotion
+    target dynamic B       166.20 GPa
+    target dynamic Cprime   48.15 GPa
+    target dynamic C44     115.87 GPa
+
+    gate lattice 1 percent
+    gate angles  1 degree
+    gate density 1 percent
+    gate surface 5 percent
+    born required
+    r2 0.98
+    tier 20 percent
+    strain 0.002 0.004 0.006
+    replicate 2 2 2
+    temperature 300 K
+    timestep 1 fs
+    equilibration 20000
+    production 40000
+    seeds 101 202 303
+    validation_seeds 404 505 606
+end
+```
+
+The schema-1 contract is for `crystal bcc` and reuses the structure declared by
+`property bulk`. The static module is required and has role `objective`. The
+dynamic module is optional and must have role `promotion` or `validation`.
+Every declared module has its own complete `B`, `Cprime`, and `C44` target
+triplet in GPa; a 0 K target is never silently reused at 300 K. `K`, `G`, `E`,
+and `nu` are rejected as fit targets. Hill `G`, Hill `E`, and Poisson's ratio
+are derived once and reported as diagnostics.
+
+Static elasticity is ranked by maximum relative error inside the declared
+structural gates, not added to the first-stage weighted structural RMSE. The
+`r2` and optional Born-stability requirement are eligibility checks. `tier` is
+a reporting band only: missing the requested band does not discard the best
+structurally feasible mechanical compromise.
+
+`strain` lists positive magnitudes; the evaluator generates the symmetric
+positive/negative perturbations and the undeformed reference. At least two
+strictly increasing magnitudes in `(0, 0.05]` are required. `replicate` belongs
+to the elasticity calculation and is distinct from bulk `cells_in_data`.
+Dynamic-only settings have deterministic defaults of `300 K`, `1 fs`, 20000
+equilibration steps, 40000 production steps, and seeds `101 202 303`; supplying
+them without a dynamic module is an error. `seeds` are the finite-temperature
+promotion trajectories. Optional `validation_seeds` declare a disjoint holdout
+set for final validation; overlap is rejected because replaying the promotion
+trajectories is not independent evidence. Older inputs without
+`validation_seeds` retain their previous compiled shape, and the validation
+report explicitly identifies any compatibility fallback that reuses promotion
+seeds. All explicit values and defaults are part of the scientific
+configuration hash.
+
 ## Targets, weights, and tolerances
 
 General form:
@@ -326,6 +430,16 @@ end
 | `early_stop patience` | Stop after this many non-improving rounds | 30 |
 | `early_stop min_improvement` | Minimum objective decrease counted as improvement | 0.001 |
 
+Elemental material workflows may declare `objective feasible_coverage`. Each
+structural gate then has zero violation everywhere inside its tolerance; BO
+uses feasible-interior, boundary, uncertainty, and global-novelty acquisition
+instead of preferring the experimental centre. The concise allocation syntax
+is:
+
+```text
+coverage archive 96 pool 16384 feasible 0.50 boundary 0.25 uncertainty 0.15 global 0.10
+```
+
 The explicit initial parameter vector from the `type` rows is evaluated once
 as a warm-start centre in addition to the Latin-hypercube points. Therefore,
 with `initial_points 48` the initial stage contains 49 LAMMPS evaluations.
@@ -363,6 +477,7 @@ sample
     centers 24
     center_selection diverse
     radii 0.01 0.025 0.05
+    boundary_fraction 0.20
     global_fraction 0.10
     seeds 101 202 303
     design_seed 20260727
@@ -372,9 +487,14 @@ end
 `points` is the number of distinct parameter vectors, not the total number of
 LAMMPS jobs. The total is `points * number_of_seeds`. Centers are selected from
 successful BO data; `diverse` avoids choosing only near-duplicates. Radii are
-fractions of each full parameter bound, not charge units. `global_fraction`
-reserves part of the design for the full configured bounds. Three seeds allow
-the training table to include mean response and simulation variability.
+fractions of each full parameter bound, not charge units. In a material
+workflow, `boundary_fraction` samples around measured near-boundary coverage
+anchors, `global_fraction` reserves points across the full configured bounds,
+and the remainder samples around the exact feasible archive. Requested and
+realized allocations, including any fallback when one archive is empty, are
+recorded in `metadata.json`. Molecular workflows retain the original
+local/global design. Three seeds allow the training table to include mean
+response and simulation variability.
 
 ## ANN block
 
@@ -423,6 +543,51 @@ ranks candidates using predicted objective and ensemble uncertainty, evaluates
 the selected candidates with LAMMPS, and adds those labels to the training
 data. `candidates` is the number of expensive LAMMPS points per round.
 
+For a material workflow with a static mechanical objective, the block becomes:
+
+```text
+al
+    acquisition constrained_minimax
+    rounds 8
+    candidates 76
+    static_candidates 38
+    candidate_pool 65536
+    improvement_fraction 0.50
+    boundary_fraction 0.30
+    global_fraction 0.20
+    early_stop patience 3
+    early_stop improvement 0.5
+end
+```
+
+The incumbent is the smallest measured mechanical maximum relative error among
+exactly structure-feasible, stable, adequately fitted candidates. Predicted
+feasibility never promotes a candidate by itself. `rounds` is a campaign
+budget: the managed pipeline expands it into restartable jobs and advances the
+rounds from one public `ffopt run ... --watch` command.
+
+`screen` controls the initial exact-static design; `finalists` controls the
+costly finite-temperature promotion set:
+
+```text
+screen
+    minimum 480
+    per_dimension 160
+    maximum 1200
+end
+
+finalists
+    minimum 10
+    maximum 20
+    window 1.0
+    diverse 1
+end
+```
+
+Finalists are selected by exact 0 K minimax rank plus a reserved diverse
+branch. Their finite-temperature order is recomputed and may differ from the
+static order; both ranks and evidence levels remain in the result bundle.
+
 ## Robust audit and finalization
 
 ```text
@@ -469,6 +634,7 @@ workflow validate                 # evaluate initial type values
 workflow bo                       # Bayesian optimization only
 workflow bo validate              # BO then physical validation
 workflow bo sample nn al audit finalize validate # production workflow
+workflow bo sample audit screen nn al finalists validate # material workflow
 ```
 
 Use the workflow line for persistent stage selection. Use `ffopt run ...

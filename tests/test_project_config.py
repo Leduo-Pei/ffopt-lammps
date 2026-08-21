@@ -6,6 +6,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10
+    import tomli as tomllib
+
 from engine.lammps_interface import LAMMPSRunner
 from workflow.cli import _free_parameter_count
 from workflow.input_compiler import compile_input
@@ -116,6 +121,98 @@ class ProjectConfigTests(unittest.TestCase):
         self.assertTrue(profile["cluster"]["nn"]["distributed_steps"])
         self.assertNotIn("gpu", profile["cluster"]["nn"])
         self.assertEqual(profile["cluster"]["validate"]["tasks"], 1)
+
+    def test_slurm_profile_is_stored_concisely_and_expanded_when_loaded(self) -> None:
+        profile = build_machine_profile(
+            name="compact-2node",
+            backend="slurm",
+            lammps="/opt/ffopt/bin/lmp",
+            mpi="/opt/ffopt/bin/mpirun",
+            mpi_flavor="openmpi",
+            workers=20,
+            ranks=4,
+            nodes=2,
+            cores=80,
+            partition="CPU",
+            memory_per_node="64G",
+            walltime="06:00:00",
+            timeout=7200,
+        )
+        path = save_machine_profile("compact-2node", profile)
+        with path.open("rb") as handle:
+            stored = tomllib.load(handle)["machines"]["compact-2node"]
+
+        self.assertEqual(stored["format"], 2)
+        self.assertEqual(stored["backend"], "slurm")
+        self.assertNotIn("cluster", stored)
+        self.assertEqual(stored["parallel"]["workers"], 20)
+        self.assertEqual(stored["parallel"]["mpi_ranks"], 4)
+        self.assertEqual(stored["slurm"]["total_cores"], 80)
+
+        loaded = load_machine_profile("compact-2node")
+        self.assertEqual(loaded["cluster"]["bo"]["tasks"], 20)
+        self.assertEqual(loaded["cluster"]["nn"]["nodes"], 1)
+        self.assertEqual(loaded["cluster"]["validate"]["tasks"], 1)
+
+    def test_legacy_expanded_machine_profile_remains_supported(self) -> None:
+        path = Path(self.temp_config.name) / "machines.toml"
+        path.write_text(
+            """
+[machines.legacy.machine]
+name = "legacy"
+backend = "slurm"
+
+[machines.legacy.cluster.bo]
+partition = "CPU"
+nodes = 1
+cores = 4
+tasks = 1
+cpus_per_task = 4
+""".strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        loaded = load_machine_profile("legacy")
+        self.assertEqual(loaded["machine"]["backend"], "slurm")
+        self.assertEqual(loaded["cluster"]["bo"]["cores"], 4)
+
+    def test_compact_stage_overrides_use_public_field_names(self) -> None:
+        path = Path(self.temp_config.name) / "machines.toml"
+        path.write_text(
+            """
+[machines.custom]
+format = 2
+backend = "slurm"
+
+[machines.custom.lammps]
+executable = "/opt/ffopt/bin/lmp"
+mpiexec = "/opt/ffopt/bin/mpirun"
+mpi_flavor = "openmpi"
+timeout = 3600
+
+[machines.custom.parallel]
+workers = 4
+mpi_ranks = 2
+omp_threads = 1
+
+[machines.custom.slurm]
+partition = "compute"
+nodes = 1
+total_cores = 8
+walltime = "02:00:00"
+
+[machines.custom.stages.nn]
+walltime = "01:00:00"
+memory_per_node = "32G"
+gpus = 1
+""".strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        loaded = load_machine_profile("custom")
+        self.assertEqual(loaded["cluster"]["nn"]["time"], "01:00:00")
+        self.assertEqual(loaded["cluster"]["nn"]["mem"], "32G")
+        self.assertEqual(loaded["cluster"]["nn"]["gpu"], 1)
 
     def test_machine_worker_count_does_not_change_bo_batch_size(self) -> None:
         one = build_machine_profile(

@@ -23,6 +23,8 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10
 
 import tomli_w
 
+from .mpi_local_exec import launcher_flavor_from_version, resolve_launcher_flavor
+
 
 def config_home() -> Path:
     """Return the FFOpt user configuration directory.
@@ -74,6 +76,60 @@ def _machine_document() -> dict[str, Any]:
     return data
 
 
+def _expand_compact_machine_profile(
+    name: str, data: dict[str, Any]
+) -> dict[str, Any]:
+    """Expand the concise on-disk schema into the existing runtime schema."""
+    backend = str(data.get("backend", "local"))
+    lammps = dict(data.get("lammps", {}))
+    parallel = dict(data.get("parallel", {}))
+    slurm = dict(data.get("slurm", {}))
+    profile = build_machine_profile(
+        name=name,
+        backend=backend,
+        lammps=lammps.get("executable"),
+        mpi=lammps.get("mpiexec"),
+        mpi_flavor=lammps.get("mpi_flavor"),
+        workers=parallel.get("workers"),
+        ranks=parallel.get("mpi_ranks", 1),
+        omp_threads=parallel.get("omp_threads", 1),
+        timeout=lammps.get("timeout", 21600),
+        partition=slurm.get("partition"),
+        qos=slurm.get("qos"),
+        cores=slurm.get("total_cores"),
+        nodes=slurm.get("nodes", 1),
+        gpus=slurm.get("gpus", 0),
+        walltime=slurm.get("walltime", "24:00:00"),
+        memory_per_node=slurm.get("memory_per_node"),
+    )
+    if parallel.get("launcher"):
+        profile["parallel"]["scheduler_launcher"] = str(parallel["launcher"])
+    if isinstance(data.get("machine_learning"), dict):
+        profile["machine_learning"].update(data["machine_learning"])
+    if backend == "slurm":
+        if isinstance(slurm.get("env_setup"), list):
+            profile["cluster"]["env_setup"] = list(slurm["env_setup"])
+        for stage, override in dict(data.get("stages", {})).items():
+            if not isinstance(override, dict):
+                raise TypeError(
+                    f"Machine profile stage override {stage!r} must be a table"
+                )
+            if stage not in profile["cluster"]:
+                raise ValueError(f"Unknown machine-profile stage override: {stage!r}")
+            normalized = dict(override)
+            for concise, runtime in (
+                ("walltime", "time"),
+                ("memory_per_node", "mem"),
+                ("gpus", "gpu"),
+                ("total_cores", "cores"),
+            ):
+                if concise in normalized:
+                    normalized[runtime] = normalized.pop(concise)
+            profile["cluster"][stage].update(normalized)
+    profile["_storage_profile"] = dict(data)
+    return profile
+
+
 def load_machine_profile(name: str) -> dict[str, Any] | None:
     path = machine_path(name)
     document = _machine_document()
@@ -88,9 +144,13 @@ def load_machine_profile(name: str) -> dict[str, Any] | None:
     if not isinstance(data, dict):
         raise TypeError(f"Machine profile must contain a mapping: {path}")
     data = dict(data)
-    data.setdefault("machine", {})["name"] = name
-    data["_machine_profile_path"] = str(path)
-    return data
+    if int(data.get("format", 0) or 0) == 2:
+        expanded = _expand_compact_machine_profile(name, data)
+    else:
+        expanded = data
+        expanded.setdefault("machine", {})["name"] = name
+    expanded["_machine_profile_path"] = str(path)
+    return expanded
 
 
 def available_machine_profiles() -> list[str]:
@@ -230,6 +290,7 @@ def probe_machine_environment(partition: str | None = None) -> dict[str, Any]:
             gpu_name = torch.cuda.get_device_name(0)
     except ImportError:
         pass
+    mpi_version = _version_line(mpi, ["--version"])
     return {
         "host": platform.node(),
         "platform": platform.platform(),
@@ -245,7 +306,8 @@ def probe_machine_environment(partition: str | None = None) -> dict[str, Any]:
         "mpi": {
             "path": mpi_path or mpi,
             "available": mpi_path is not None,
-            "version": _version_line(mpi, ["--version"]),
+            "version": mpi_version,
+            "flavor": launcher_flavor_from_version(mpi_version),
         },
         "slurm": {
             "sbatch": sbatch,
@@ -278,6 +340,7 @@ def format_machine_probe(report: dict[str, Any]) -> str:
             f"{' [NOT FOUND]' if not report['mpi'].get('available', True) else ''}"
         ),
         f"             {report['mpi']['version']}",
+        f"MPI flavor : {report['mpi'].get('flavor') or 'unresolved'}",
         f"Torch CUDA : {report['torch_cuda']['available']} "
         f"{report['torch_cuda']['device'] or ''}".rstrip(),
     ]
@@ -335,6 +398,7 @@ def prepare_machine_test(name: str, profile: dict[str, Any]) -> dict[str, Any]:
     input_path.write_text(_machine_test_input(), encoding="ascii", newline="\n")
     lammps = str(profile["lammps"]["executable"])
     mpi = str(profile["lammps"].get("mpiexec", "mpiexec"))
+    configured_mpi_flavor = profile["lammps"].get("mpi_flavor")
     parallel = profile.get("parallel", {})
     ranks = max(1, int(parallel.get("cores_per_worker", 1)))
     omp_threads = max(1, int(parallel.get("omp_threads_per_worker", 1)))
@@ -343,10 +407,12 @@ def prepare_machine_test(name: str, profile: dict[str, Any]) -> dict[str, Any]:
         if Path(mpi).name.lower().startswith("srun"):
             command = [mpi, "--ntasks", str(ranks), "--cpus-per-task", str(omp_threads), lammps]
         elif backend == "slurm":
+            mpi_flavor = resolve_launcher_flavor(mpi, configured_mpi_flavor)
             command = [
                 sys.executable,
                 "-m", "workflow.mpi_local_exec",
                 "--launcher", mpi,
+                "--launcher-flavor", mpi_flavor,
                 "--ranks", str(ranks),
                 "--slots", "1",
                 "--", lammps,
@@ -366,19 +432,27 @@ def prepare_machine_test(name: str, profile: dict[str, Any]) -> dict[str, Any]:
     if backend == "slurm":
         cluster = profile.get("cluster", {})
         distributed_nodes = int(parallel.get("scheduler_nodes", 1))
-        distributed = distributed_nodes > 1
+        workers = int(parallel.get("max_workers", 1))
+        # A machine acceptance must exercise the production worker pool even
+        # when all workers fit on one node.  Otherwise a nominal 38x2 profile
+        # would only test one two-rank launch and miss pool/affinity failures.
+        distributed = workers > 1 or distributed_nodes > 1
         resources = cluster.get(
             "bo" if distributed else "validate",
             cluster.get("bo", {}),
         )
         if distributed:
-            workers = int(parallel.get("max_workers", 1))
+            mpi_flavor = (
+                resolve_launcher_flavor(mpi, configured_mpi_flavor)
+                if ranks > 1 else None
+            )
             command = [
                 sys.executable,
                 "-m", "workflow.machine_test_runner",
                 "--root", str(root / "distributed"),
                 "--lammps", lammps,
                 "--mpi", mpi,
+                *(["--mpi-flavor", mpi_flavor] if mpi_flavor else []),
                 "--input", str(input_path),
                 "--workers", str(workers),
                 "--nodes", str(distributed_nodes),
@@ -496,6 +570,7 @@ def build_machine_profile(
     backend: str,
     lammps: str | None = None,
     mpi: str | None = None,
+    mpi_flavor: str | None = None,
     workers: int | None = None,
     ranks: int = 1,
     omp_threads: int = 1,
@@ -523,6 +598,23 @@ def build_machine_profile(
     if not memory:
         memory = "0"
     workers = max(1, int(workers or max(1, cpu_count // (ranks * omp_threads))))
+    mpi_executable = mpi or _detect_mpi()
+    resolved_mpi_flavor = None
+    if ranks > 1 and not Path(mpi_executable).name.lower().startswith("srun"):
+        try:
+            resolved_mpi_flavor = resolve_launcher_flavor(
+                mpi_executable, mpi_flavor
+            )
+        except ValueError:
+            # Preserve profile construction for offline editing and legacy
+            # callers.  Machine-test/runtime still fail closed before launch;
+            # an explicitly supplied invalid value is always rejected here.
+            if mpi_flavor:
+                raise
+    elif mpi_flavor:
+        resolved_mpi_flavor = resolve_launcher_flavor(
+            mpi_executable, mpi_flavor
+        )
     profile: dict[str, Any] = {
         "machine": {
             "name": name,
@@ -531,7 +623,8 @@ def build_machine_profile(
         },
         "lammps": {
             "executable": lammps or _detect_lammps(),
-            "mpiexec": mpi or _detect_mpi(),
+            "mpiexec": mpi_executable,
+            **({"mpi_flavor": resolved_mpi_flavor} if resolved_mpi_flavor else {}),
             "timeout": timeout,
         },
         "parallel": {
@@ -633,6 +726,36 @@ def build_machine_profile(
             "validate": dict(single_lammps),
             "finalize": {**single_python, "cores": 1},
         }
+    storage: dict[str, Any] = {
+        "format": 2,
+        "backend": backend,
+        "lammps": {
+            "executable": profile["lammps"]["executable"],
+            "mpiexec": profile["lammps"]["mpiexec"],
+            **(
+                {"mpi_flavor": profile["lammps"]["mpi_flavor"]}
+                if profile["lammps"].get("mpi_flavor")
+                else {}
+            ),
+            "timeout": timeout,
+        },
+        "parallel": {
+            "workers": workers,
+            "mpi_ranks": ranks,
+            "omp_threads": omp_threads,
+        },
+    }
+    if backend == "slurm":
+        storage["slurm"] = {
+            **({"partition": partition} if partition else {}),
+            **({"qos": qos} if qos else {}),
+            "nodes": nodes,
+            "total_cores": allocated_cpus,
+            "walltime": walltime,
+            **({"memory_per_node": memory} if memory != "0" else {}),
+            **({"gpus": gpus} if gpus else {}),
+        }
+    profile["_storage_profile"] = storage
     return profile
 
 
@@ -650,9 +773,12 @@ def save_machine_profile(
             f"Machine profile {name!r} already exists in {path}. Pass --force to replace it."
         )
     path.parent.mkdir(parents=True, exist_ok=True)
-    serializable = {
-        key: value for key, value in profile.items() if not key.startswith("_")
-    }
+    stored = profile.get("_storage_profile")
+    serializable = (
+        dict(stored)
+        if isinstance(stored, dict)
+        else {key: value for key, value in profile.items() if not key.startswith("_")}
+    )
     machines[name] = serializable
     payload = tomli_w.dumps(document).encode("utf-8")
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")

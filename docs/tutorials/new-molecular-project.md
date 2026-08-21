@@ -40,6 +40,23 @@ Check files before creating a project:
 ffopt data check --bulk crystal.data --single molecule.data
 ```
 
+Those relative paths start from the shell's current directory. Paths stored in
+the generated `ffopt.in` instead start from the directory containing that
+input file. Quote paths containing spaces.
+
+The BTAH regression files are packaged with FFOpt and can be referenced from
+any directory:
+
+```bash
+ffopt inspect builtin:data/bulk/BTAH_822_bulk.data
+ffopt data check \
+  --bulk builtin:data/bulk/BTAH_822_bulk.data \
+  --single builtin:data/molecule/BTAH_822_single.data --strict
+```
+
+Create a visible copy with
+`ffopt self-test --prepare-only --workdir ./ffopt-btah-example`.
+
 ## Initialization
 
 ```bash
@@ -83,7 +100,10 @@ limit, for example `1.0 e` for many neutral organic force fields.
 
 The optional fourth target field is the absolute final-validation tolerance:
 `NAME=VALUE,WEIGHT,UNIT,TOLERANCE`. When it is omitted, the initializer writes
-the effective default explicitly so it cannot remain a hidden assumption.
+the effective default, `max(3% of |target|, 1e-6)`, explicitly so it cannot
+remain a hidden assumption. `weight` contributes to the optimization objective;
+`tolerance` does not. It is a same-unit final acceptance gate. Thus
+`a=4.2422,1.0,A,0.15` requires `|a_calc - 4.2422| <= 0.15 A`.
 
 `--cells NX NY NZ` describes repeats already present in the bulk data file. It
 does not replicate the box. Incorrect values systematically distort reported

@@ -8,11 +8,85 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import pandas as pd
+
 from engine import optimizer as optimizer_module
-from engine.optimizer import ForceFieldOptimizer
+from engine.optimizer import ForceFieldOptimizer, property_report_flag
 
 
 class OptimizerProgressTests(unittest.TestCase):
+    def test_property_report_flag_prefers_exact_recorded_structural_gate(self) -> None:
+        target = {"value": 2.34, "tolerance": 0.117}
+
+        self.assertEqual(
+            property_report_flag(
+                {
+                    "structural_pass_surf_energy": True,
+                    "calc_surf_energy": 99.0,
+                    "error_surf_energy": 999.0,
+                },
+                "surf_energy",
+                target,
+            ),
+            "OK",
+        )
+        self.assertEqual(
+            property_report_flag(
+                {
+                    "structural_pass_surf_energy": "false",
+                    "calc_surf_energy": 2.34,
+                    "error_surf_energy": 0.0,
+                },
+                "surf_energy",
+                target,
+            ),
+            "!!",
+        )
+
+    def test_property_report_flag_rejects_ambiguous_recorded_gate_values(self) -> None:
+        target = {"value": 2.34, "tolerance": 0.117}
+
+        for ambiguous in (float("nan"), pd.NA, "unknown", 2):
+            with self.subTest(ambiguous=ambiguous):
+                self.assertEqual(
+                    property_report_flag(
+                        {
+                            "structural_pass_surf_energy": ambiguous,
+                            "calc_surf_energy": 2.34,
+                            "error_surf_energy": 0.0,
+                        },
+                        "surf_energy",
+                        target,
+                    ),
+                    "!!",
+                )
+
+    def test_property_report_flag_uses_tolerance_in_target_units(self) -> None:
+        target = {"value": 90.0, "tolerance": 1.0}
+
+        self.assertEqual(
+            property_report_flag(
+                {"calc_alpha": 90.9, "error_alpha": 8.0}, "alpha", target
+            ),
+            "OK",
+        )
+        self.assertEqual(
+            property_report_flag(
+                {"calc_alpha": 91.1, "error_alpha": 0.1}, "alpha", target
+            ),
+            "!!",
+        )
+
+    def test_property_report_flag_keeps_legacy_five_percent_fallback(self) -> None:
+        target = {"value": 2.0}
+
+        self.assertEqual(
+            property_report_flag({"error_a": 4.99}, "a", target), "OK"
+        )
+        self.assertEqual(
+            property_report_flag({"error_a": 5.0}, "a", target), "!!"
+        )
+
     def test_warm_start_is_counted_as_an_additional_evaluation(self) -> None:
         optimizer = ForceFieldOptimizer.__new__(ForceFieldOptimizer)
         optimizer.param_names = ["N_charge"]

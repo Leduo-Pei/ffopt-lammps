@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
 from pathlib import Path
 
 import numpy as np
@@ -12,13 +13,21 @@ import pandas as pd
 
 from .config_loader import load_config
 from .lammps_interface import LAMMPSRunner
-from .local_sampling import atomic_csv, evaluate_candidate, valid_source_rows
+from .local_sampling import (
+    atomic_csv,
+    atomic_json,
+    completed_candidate_ids,
+    evaluate_candidate,
+    file_identity,
+    read_candidate_source,
+    valid_source_rows,
+)
 from .parameter_space import build_parameter_space
 
 
 def unique_top(frame: pd.DataFrame, names: list[str], top_k: int) -> pd.DataFrame:
     """Return the best distinct parameter vectors with audit metadata."""
-    frame = frame.sort_values("objective").copy()
+    frame = frame.sort_values("objective", kind="stable").copy()
     keys = frame[names].round(12).astype(str).agg("|".join, axis=1)
     frame = frame.loc[~keys.duplicated()].head(top_k).reset_index(drop=True)
     if "candidate_id" in frame.columns:
@@ -32,10 +41,56 @@ def unique_top(frame: pd.DataFrame, names: list[str], top_k: int) -> pd.DataFram
     return frame
 
 
+def load_audit_sources(
+    paths: list[Path], names: list[str], label: str | None = None
+) -> pd.DataFrame:
+    """Load an explicit, provenance-preserving union of measured candidates."""
+    source_frames = []
+    for source_index, source_path in enumerate(paths):
+        source_frame = read_candidate_source(source_path, names)
+        if label is not None:
+            if "label" not in source_frame.columns:
+                raise ValueError(
+                    f"--label {label!r} requested but source "
+                    f"{source_path} has no label column"
+                )
+            source_frame = source_frame.loc[
+                source_frame["label"].astype(str).eq(label)
+            ].copy()
+            if source_frame.empty:
+                raise ValueError(
+                    f"No source rows in {source_path} matched label {label!r}"
+                )
+            # active_learning.evaluate_batch preserves this order, so the
+            # index maps directly to lammps_round_N/eval_NNNN for reuse.
+            source_frame["source_eval_index"] = np.arange(len(source_frame))
+        source_frame = source_frame.reset_index(drop=True)
+        source_frame["source_path"] = str(source_path.resolve())
+        source_frame["source_index"] = int(source_index)
+        source_frame["source_row_index"] = np.arange(len(source_frame))
+        if "candidate_id" in source_frame.columns:
+            if "source_candidate_id" not in source_frame.columns:
+                source_frame["source_candidate_id"] = source_frame["candidate_id"]
+            source_frame = source_frame.drop(columns="candidate_id")
+        source_frames.append(source_frame)
+    return valid_source_rows(
+        pd.concat(source_frames, ignore_index=True, sort=False), names
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
-    parser.add_argument("--source", required=True, type=Path)
+    parser.add_argument(
+        "--source",
+        required=True,
+        action="append",
+        type=Path,
+        help=(
+            "Measured candidate table. Repeat --source to audit the unique "
+            "union of explicitly declared BO and Sample evidence."
+        ),
+    )
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--top-k", type=int, default=8)
     parser.add_argument(
@@ -65,35 +120,65 @@ def main() -> None:
     work_root = args.output_dir / "work"
     work_root.mkdir(exist_ok=True)
     design_path = args.output_dir / "design.csv"
+    metadata_path = args.output_dir / "audit_metadata.json"
     result_path = args.output_dir / "stable_results.csv"
     replicate_path = args.output_dir / "stability_replicates.csv"
+    design_contract = {
+        "schema_version": 1,
+        "algorithm": "explicit_source_union_v1",
+        "config": file_identity(Path(args.config)),
+        "sources": [file_identity(path) for path in args.source],
+        "parameter_space": [list(item) for item in space],
+        "top_k": int(args.top_k),
+        "label": args.label,
+    }
 
     if design_path.exists():
-        design = pd.read_csv(design_path)
-        if len(design) != args.top_k:
+        if not metadata_path.is_file():
             raise ValueError(
-                f"Existing design has {len(design)} rows, requested {args.top_k}."
+                f"Existing audit design {design_path} has no audit_metadata.json; "
+                "it cannot be reused safely. Use a new output directory."
             )
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"Cannot validate existing audit metadata {metadata_path}: {exc}"
+            ) from exc
+        if metadata.get("design_contract") != design_contract:
+            raise ValueError(
+                "Existing audit design does not match the current config, "
+                "source contents, label, or top-k. Use a new output directory."
+            )
+        if metadata.get("design_artifact") != file_identity(design_path):
+            raise ValueError(
+                f"Existing audit design failed its content hash: {design_path}"
+            )
+        design = pd.read_csv(design_path)
+        selected_count = int(metadata.get("selected_count", -1))
+        if len(design) != selected_count or not 0 < selected_count <= args.top_k:
+            raise ValueError(
+                "Existing audit design row count does not match its metadata or "
+                f"top-k: rows={len(design)}, recorded={selected_count}, "
+                f"top_k={args.top_k}."
+            )
+        metadata["seeds"] = [int(seed) for seed in args.seeds]
+        atomic_json(metadata, metadata_path)
     else:
-        source_frame = pd.read_csv(args.source)
-        if args.label is not None:
-            if "label" not in source_frame.columns:
-                raise ValueError(
-                    f"--label {args.label!r} requested but source has no label column"
-                )
-            source_frame = source_frame.loc[
-                source_frame["label"].astype(str).eq(args.label)
-            ].copy()
-            if source_frame.empty:
-                raise ValueError(
-                    f"No source rows matched label {args.label!r}"
-                )
-            # active_learning.evaluate_batch preserves this order, so the
-            # index maps directly to lammps_round_N/eval_NNNN for seed reuse.
-            source_frame["source_eval_index"] = np.arange(len(source_frame))
-        source = valid_source_rows(source_frame, names)
+        source = load_audit_sources(args.source, names, args.label)
         design = unique_top(source, names, args.top_k)
+        if design.empty:
+            raise ValueError(
+                "The declared audit sources contain no successful finite "
+                "candidate with the required parameters and objective."
+            )
         atomic_csv(design, design_path)
+        atomic_json({
+            "design_contract": design_contract,
+            "design_artifact": file_identity(design_path),
+            "selected_count": int(len(design)),
+            "seeds": [int(seed) for seed in args.seeds],
+        }, metadata_path)
 
     if args.design_only:
         print(f"Design-only complete: {len(design)} candidates -> {design_path}")
@@ -105,9 +190,11 @@ def main() -> None:
     if result_path.exists():
         old = pd.read_csv(result_path)
         summaries = old.to_dict("records")
-        completed = set(old.loc[old["n_seeds"] == len(args.seeds), "candidate_id"])
     if replicate_path.exists():
         replicates = pd.read_csv(replicate_path).to_dict("records")
+        completed = completed_candidate_ids(
+            pd.DataFrame(replicates), args.seeds
+        )
 
     pending = [
         row for row in design.to_dict("records")

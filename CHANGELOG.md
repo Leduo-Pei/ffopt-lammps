@@ -6,8 +6,38 @@ expectations while the public API remains in alpha.
 
 ## Unreleased
 
+### Fixed
+
+- Select the nested single-node MPI launcher dialect explicitly and fail on
+  ambiguous `mpiexec`/`mpirun` paths instead of passing Open MPI-only flags to
+  Intel MPI/Hydra. Machine acceptance now exercises every configured worker
+  even when the complete worker pool fits on one SLURM node.
+- Store newly configured machines in a concise profile schema while expanding
+  the existing stage-specific runtime resources internally; legacy expanded
+  TOML and YAML profiles remain readable.
+- Let `init`, `inspect`, and `data check` consume packaged `builtin:data/...`
+  references, document the exact BTAH example paths, and distinguish shell-
+  relative paths from paths relative to `ffopt.in`.
+- Separate local-workstation and SLURM instructions in generated projects,
+  clarify that `local` bypasses the scheduler, and identify `--partition` as a
+  site-specific SLURM partition rather than a node name.
+
+## 0.3.0a4 - 2026-08-21
+
 ### Added
 
+- Add an experimental, opt-in elemental-BCC workflow to the common one-input
+  pipeline: structural feasible-region BO, multi-centre sampling, replicated
+  audit, exact 0 K cubic elasticity, constrained-minimax GP active learning,
+  finite-temperature finalists, independent holdout validation, and Top-N
+  reporting.
+- Add typed material/crystal declarations, zero-charge elemental atom types,
+  parameter ties and bounded same-element differences, native LAMMPS default
+  mixing, and role/fidelity/cost property contracts without changing legacy
+  molecular input semantics.
+- Add content-addressed candidate/stage manifests and explicit multi-round
+  material-stage graphs so one `ffopt run ... --watch` command advances AL and
+  the same command safely resumes an interrupted campaign.
 - Make `ffopt doctor` validate all active bulk, isolated-molecule, adsorption
   complex, slab, and adsorbate data files as one cross-file physical contract.
 - Add `ffopt --debug ...` and concise default CLI errors so input and machine
@@ -15,6 +45,12 @@ expectations while the public API remains in alpha.
 
 ### Fixed
 
+- Honor the elemental-material sampling split exactly: feasible local centers,
+  measured boundary centers, and global coverage now receive their declared
+  quotas, and the replicated audit ranks the explicit BO+Sample union rather
+  than silently ignoring Sample evidence.
+- Report the effective LAMMPS `lj/cut` default as geometric epsilon and sigma
+  mixing in `ffopt explain`; execution already delegated this rule correctly.
 - Preserve active SLURM stages when `squeue` or `sacct` is temporarily
   unavailable or has not yet indexed a job, preventing an inconclusive query
   from triggering a duplicate expensive submission.

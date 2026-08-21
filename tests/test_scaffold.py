@@ -22,6 +22,38 @@ def test_sublimation_target_alias():
     assert target.name == "esub_proxy"
 
 
+def test_cli_inspects_packaged_btah_data(capsys):
+    parser = build_parser()
+    args = parser.parse_args([
+        "inspect", "builtin:data/bulk/BTAH_822_bulk.data"
+    ])
+    args.function(args)
+    output = capsys.readouterr().out
+    assert "Atoms         : 4480" in output
+    assert "Atom types    : 14" in output
+
+
+def test_cli_init_accepts_packaged_data_and_separates_machine_guidance(
+    tmp_path, capsys
+):
+    destination = tmp_path / "btah_builtin"
+    parser = build_parser()
+    args = parser.parse_args([
+        "init", "btah_builtin",
+        "--bulk-data", "builtin:data/bulk/BTAH_822_bulk.data",
+        "--single-data", "builtin:data/molecule/BTAH_822_single.data",
+        "--destination", str(destination),
+        "--mode", "charge_only",
+        "--target", "density=1.3285,1.0,g/cm3,0.03",
+    ])
+    args.function(args)
+    output = capsys.readouterr().out
+    assert (destination / "data" / "bulk" / "BTAH_822_bulk.data").exists()
+    assert "Local workstation only" in output
+    assert "SLURM cluster" in output
+    assert "--machine PROFILE --watch" in output
+
+
 def test_charge_only_btah_scaffold_is_external_and_13_dimensional(tmp_path):
     output = tmp_path / "molecule_project"
     result = create_project(
@@ -173,7 +205,7 @@ def test_explain_reports_effective_pipeline_settings(capsys):
     ) in output
     assert "audit=off top_k=20 seeds=[101, 202, 303] audit_max_evaluations=0" in output
     assert "Sampling              : 48 points x 1 seeds" in output
-    assert "ANN                   : method=mlp_ensemble ensemble=2" in output
+    assert "Surrogate             : method=mlp_ensemble ensemble=2" in output
     assert "Active learning       : rounds=1 LAMMPS candidates/round=4" in output
     assert "Final acceptance      : tolerances=required objective_max=0.03" in output
 

@@ -1,0 +1,36 @@
+# FFOpt cubic elasticity: one independent 0 K deformation.
+# This input always starts from elastic_reference.restart.
+units ${units}
+dimension 3
+boundary p p p
+atom_style ${atom_style}
+newton on
+
+read_restart elastic_reference.restart
+include ${force_field_file}
+neighbor 2.0 bin
+neigh_modify delay 0 every 1 check yes
+
+# Hydrostatic strain F=(1+d)I; the even energy curvature gives B.
+if "${mode} == hydro" then &
+  "variable scale_h equal 1.0+${strain}" &
+  "change_box all x scale ${scale_h} y scale ${scale_h} z scale ${scale_h} remap units box"
+
+# Volume-conserving orthorhombic strain; the curvature gives C'=(C11-C12)/2.
+if "${mode} == orthorhombic" then &
+  "variable scale_x equal 1.0+${strain}" &
+  "variable scale_y equal 1.0-${strain}" &
+  "variable scale_z equal 1.0/(1.0-${strain}*${strain})" &
+  "change_box all x scale ${scale_x} y scale ${scale_y} z scale ${scale_z} remap units box"
+
+# Engineering shear gamma_xy=d; the even energy curvature gives C44.
+if "${mode} == shear" then &
+  "variable delta_xy equal ${strain}*ly" &
+  "change_box all xy delta ${delta_xy} remap units box"
+
+min_style cg
+min_modify dmax ${min_dmax} line quadratic
+minimize ${energy_tolerance} ${force_tolerance} ${max_iterations} ${max_evaluations}
+run 0
+
+print "FFOPT_STATIC_STRAIN: $(pe) $(vol) $(pxx) $(pyy) $(pzz) $(pxy) $(density)"

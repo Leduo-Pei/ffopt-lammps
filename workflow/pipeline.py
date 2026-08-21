@@ -11,26 +11,36 @@ import shlex
 import subprocess
 import sys
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 import uuid
 
 from ffopt import __version__
+from engine.parameter_space import build_parameter_space
 
 from .project import Project, compose_config
+from .material_pipeline import (
+    MATERIAL_EXECUTABLE_KINDS,
+    build_refinement_spec,
+    load_refinement_state,
+    validate_material_al_stage_outputs,
+    write_skipped_refinement_stage,
+)
+from .stage_registry import (
+    LEGACY_PIPELINE_STAGES,
+    StageGraph,
+    StageNode,
+    StageRegistry,
+    legacy_stage_registry,
+    material_stage_registry,
+)
 from .state import StageRecord, WorkflowState, canonical_hash
 
-PIPELINE_STAGES = (
-    "bo",
-    "sample",
-    "nn",
-    "al",
-    "audit",
-    "finalize",
-    "validate",
-)
+# Public compatibility alias.  The executable definitions, dependencies, command
+# tokens, and artifacts live in ``workflow.stage_registry``.
+PIPELINE_STAGES = LEGACY_PIPELINE_STAGES
 
 
 @dataclass(frozen=True)
@@ -40,6 +50,9 @@ class StageSpec:
     command: list[str]
     output_dir: Path
     artifacts: list[Path]
+    kind: str = ""
+    command_token: str = ""
+    dependencies: tuple[str, ...] = ()
 
 
 def _serializable_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -65,10 +78,46 @@ def _scientific_config(config: dict[str, Any]) -> dict[str, Any]:
         if key not in excluded
     }
     lammps = dict(result.get("lammps", {}))
-    for key in ("executable", "mpiexec", "timeout"):
+    for key in ("executable", "mpiexec", "mpi_flavor", "timeout"):
         lammps.pop(key, None)
     result["lammps"] = lammps
     return result
+
+
+def _initial_free_parameters(config: dict[str, Any]) -> dict[str, float]:
+    """Extract public input initial values for validation-only material runs."""
+
+    names = {name for name, _lower, _upper in build_parameter_space(config)}
+    values: dict[str, float] = {}
+    for atom_type in config.get("atom_types", []):
+        label = str(atom_type["label"])
+        for parameter, specification in atom_type.get("params", {}).items():
+            name = f"{label}_{parameter}"
+            if name not in names or not isinstance(specification, Mapping):
+                continue
+            initial = specification.get("init")
+            if initial is None:
+                initial = (
+                    float(specification["min"]) + float(specification["max"])
+                ) / 2.0
+            values[name] = float(initial)
+    for pair in config.get("pair_params", {}).get("explicit_pairs", []):
+        first, second = pair["types"]
+        for parameter in ("epsilon", "sigma"):
+            name = f"cross_{first}_{second}_{parameter}"
+            if name not in names:
+                continue
+            specification = pair[parameter]
+            initial = specification.get("init")
+            if initial is None:
+                initial = (
+                    float(specification["min"]) + float(specification["max"])
+                ) / 2.0
+            values[name] = float(initial)
+    missing = sorted(names - set(values))
+    if missing:
+        raise ValueError(f"Initial material parameters are missing: {missing}")
+    return {name: values[name] for name, _low, _high in build_parameter_space(config)}
 
 
 def _command_text(command: Iterable[str]) -> str:
@@ -120,6 +169,7 @@ class PipelineRunner:
         poll_seconds: int = 60,
         from_stage: str | None = None,
         until: str | None = None,
+        stage_registry: StageRegistry | None = None,
     ) -> None:
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", run_id):
             raise ValueError("run_id may contain only letters, numbers, '.', '_' and '-'")
@@ -161,6 +211,7 @@ class PipelineRunner:
             "backend": self.backend,
             "lammps_executable": self.config.get("lammps", {}).get("executable"),
             "mpi_launcher": self.config.get("lammps", {}).get("mpiexec"),
+            "mpi_launcher_flavor": self.config.get("lammps", {}).get("mpi_flavor"),
         }
         environment_text = json.dumps(
             environment, indent=2, ensure_ascii=False, sort_keys=True
@@ -170,12 +221,74 @@ class PipelineRunner:
         self._environment_snapshot = environment_text
         self.state_path = self.root / "state.sqlite"
         pipeline_cfg = project.data.get("pipeline", {})
+        self.pipeline_cfg = pipeline_cfg
         configured_stages = pipeline_cfg.get("stages", PIPELINE_STAGES)
-        unknown = [name for name in configured_stages if name not in PIPELINE_STAGES]
-        if unknown:
-            raise ValueError(f"Unknown pipeline stages: {unknown}")
-        self.stage_names = self._active_stages(list(configured_stages))
-        self._validate_stage_dependencies()
+        active_tokens = self._active_stages(list(configured_stages))
+        material_config = self.config.get("material")
+        compiled_material = bool(
+            isinstance(material_config, Mapping)
+            and material_config.get("kind") not in {None, "molecular"}
+        )
+        material_requested = compiled_material or bool(
+            set(active_tokens) & ({"screen"} | MATERIAL_EXECUTABLE_KINDS)
+        )
+        self.stage_registry = stage_registry or (
+            material_stage_registry() if material_requested else legacy_stage_registry()
+        )
+        repetitions = dict(pipeline_cfg.get("stage_repetitions", {}))
+        if "constrained_al" in active_tokens and "constrained_al" not in repetitions:
+            round_settings = pipeline_cfg.get("constrained_al", {})
+            repetitions["constrained_al"] = int(
+                round_settings.get(
+                    "max_rounds",
+                    self.config.get("elasticity", {})
+                    .get("refinement", {})
+                    .get("maximum_rounds", 8),
+                )
+            )
+        graph_mode = str(pipeline_cfg.get("graph_mode", "linear")).strip().lower()
+        if graph_mode not in {"linear", "dag"}:
+            raise ValueError("pipeline.graph_mode must be 'linear' or 'dag'")
+        self.stage_graph: StageGraph = self.stage_registry.expand(
+            active_tokens,
+            repetitions=repetitions,
+            legacy_linear=graph_mode == "linear",
+        )
+        self.stage_names = list(self.stage_graph.names)
+        self._stage_nodes = {node.name: node for node in self.stage_graph.nodes}
+        self.material_workflow = material_requested
+        self.refinement_spec_path: Path | None = None
+        self._refinement_spec_snapshot: str | None = None
+        self.refinement_maximum_rounds: int | None = None
+        if self._has_kind("constrained_al"):
+            number_of_rounds = sum(
+                node.kind == "constrained_al" for node in self.stage_graph.nodes
+            )
+            refinement_settings = dict(pipeline_cfg.get("constrained_al", {}))
+            search_maximum = int(
+                refinement_settings.get("maximum_rounds", number_of_rounds)
+            )
+            if search_maximum < 1 or search_maximum > number_of_rounds:
+                raise ValueError(
+                    "pipeline.constrained_al.maximum_rounds must lie between 1 "
+                    "and the predeclared constrained_al stage repetitions"
+                )
+            self.refinement_maximum_rounds = search_maximum
+            refinement_spec = build_refinement_spec(
+                self.config,
+                maximum_rounds=search_maximum,
+                settings=refinement_settings,
+            )
+            refinement_text = json.dumps(
+                refinement_spec, indent=2, ensure_ascii=False, sort_keys=True
+            ) + "\n"
+            refinement_hash = hashlib.sha256(
+                refinement_text.encode("utf-8")
+            ).hexdigest()
+            self.refinement_spec_path = (
+                provenance / f"refinement_{refinement_hash[:16]}.json"
+            )
+            self._refinement_spec_snapshot = refinement_text
         self.from_stage = from_stage
         self.until = until
         self._validate_bounds()
@@ -184,6 +297,11 @@ class PipelineRunner:
         _write_immutable(self.config_path, self._config_snapshot)
         _write_immutable_bytes(self.input_snapshot_path, self._input_snapshot)
         _write_immutable(self.environment_path, self._environment_snapshot)
+        if self.refinement_spec_path is not None:
+            assert self._refinement_spec_snapshot is not None
+            _write_immutable(
+                self.refinement_spec_path, self._refinement_spec_snapshot
+            )
 
     def _active_stages(self, stages: list[str]) -> list[str]:
         if not self.config.get("nn", {}).get("enabled", True):
@@ -206,23 +324,14 @@ class PipelineRunner:
         ):
             raise ValueError("--from-stage must not come after --until")
 
-    def _validate_stage_dependencies(self) -> None:
-        required = {
-            "sample": {"bo"},
-            "nn": {"bo"},
-            "al": {"bo", "nn"},
-            "audit": {"bo"},
-            "finalize": {"audit"},
-        }
-        active = set(self.stage_names)
-        for stage, dependencies in required.items():
-            if stage not in active:
-                continue
-            missing = dependencies - active
-            if missing:
-                raise ValueError(
-                    f"Pipeline stage {stage!r} requires {sorted(missing)}"
-                )
+    def _node(self, name: str) -> StageNode:
+        try:
+            return self._stage_nodes[name]
+        except KeyError as exc:
+            raise ValueError(f"Unknown expanded pipeline stage: {name!r}") from exc
+
+    def _has_kind(self, kind: str) -> bool:
+        return any(node.kind == kind for node in self.stage_graph.nodes)
 
     def _selected_names(self) -> list[str]:
         start = self.stage_names.index(self.from_stage) if self.from_stage else 0
@@ -230,27 +339,41 @@ class PipelineRunner:
         return self.stage_names[start:stop]
 
     def _stage_settings(self, name: str) -> dict[str, Any]:
-        if name == "bo":
+        node = self._node(name)
+        kind = node.kind
+        if kind == "bo":
             return {
                 "optimization": self.config.get("optimization", {}),
                 "checkpoint": self.config.get("checkpoint", {}),
             }
-        if name == "sample":
-            return dict(self.project.data.get("stages", {}).get("sample", {}))
-        if name == "nn":
+        if kind == "sample":
+            return dict(self.project.data.get("stages", {}).get(name, {}) or
+                        self.project.data.get("stages", {}).get(kind, {}))
+        if kind == "nn":
             return {"nn": self.config.get("nn", {})}
-        if name == "al":
+        if kind == "al":
             return {
                 "nn": self.config.get("nn", {}),
                 "active_learning": self.config.get("active_learning", {}),
             }
-        if name == "audit":
+        if kind == "audit":
             configured = self.project.data.get("pipeline", {}).get("audit")
             return dict(
                 configured
                 or self.config.get("optimization", {}).get("stability_audit", {})
             )
-        return dict(self.project.data.get("pipeline", {}).get(name, {}))
+        pipeline = self.project.data.get("pipeline", {})
+        stage_blocks = self.project.data.get("stages", {})
+        public_stage = (
+            "screen" if kind in {"candidates", "static"} else kind
+        )
+        settings: dict[str, Any] = {}
+        if kind == "constrained_al":
+            settings.update(self.config.get("active_learning", {}))
+        settings.update(stage_blocks.get(public_stage, {}) or {})
+        settings.update(pipeline.get(kind, {}) or {})
+        settings.update(pipeline.get(name, {}) or {})
+        return settings
 
     def _signature(self, name: str, upstream: str) -> str:
         return canonical_hash({
@@ -265,9 +388,18 @@ class PipelineRunner:
 
     def _sample_command(self, output: Path) -> list[str]:
         settings = self._stage_settings("sample")
-        source = self.root / "bo" / "stable_results.csv"
-        if not source.exists():
-            source = self.root / "bo" / "all_results.csv"
+        if self.material_workflow:
+            # Material sampling has separate, explicit interior and boundary
+            # evidence.  Never choose either source by directory age or
+            # runtime existence.
+            source = self.root / "bo" / "feasible_archive.csv"
+            boundary_source = self.root / "bo" / "coverage_anchors.csv"
+        else:
+            # Preserve the prerelease molecular compatibility behaviour.
+            source = self.root / "bo" / "stable_results.csv"
+            if not source.exists():
+                source = self.root / "bo" / "all_results.csv"
+            boundary_source = None
         command = self._python_module(
             "engine.local_sampling",
             "--config", self.config_path,
@@ -282,6 +414,12 @@ class PipelineRunner:
             "--seeds", *settings.get("seeds", [101, 202, 303]),
             "--design-seed", settings.get("design_seed", 20260709),
         )
+        if boundary_source is not None:
+            command.extend([
+                "--boundary-source", str(boundary_source),
+                "--boundary-fraction",
+                str(settings.get("boundary_fraction", 0.0)),
+            ])
         max_workers = settings.get("max_workers")
         if max_workers:
             command.extend(["--max-workers", str(max_workers)])
@@ -306,30 +444,134 @@ class PipelineRunner:
         max_workers = settings.get("max_workers")
         return top_k, seeds, int(max_workers) if max_workers else None
 
+    def _material_candidate_sources(self) -> tuple[Path, ...]:
+        """Return the declared evidence set; no filesystem discovery is used."""
+        sources = [
+            self.root / "bo" / "all_results.csv",
+            self.root / "bo" / "feasible_archive.csv",
+            self.root / "bo" / "coverage_anchors.csv",
+        ]
+        if self._has_kind("sample"):
+            sources.append(self.root / "sample" / "local_results.csv")
+        if self._has_kind("audit"):
+            sources.append(self.root / "audit" / "stable_results.csv")
+        return tuple(sources)
+
+    def _constrained_nodes(self) -> list[StageNode]:
+        return [
+            node for node in self.stage_graph.nodes if node.kind == "constrained_al"
+        ]
+
+    def _constrained_round_number(self, name: str) -> int:
+        for index, node in enumerate(self._constrained_nodes(), start=1):
+            if node.name == name:
+                return index
+        raise ValueError(f"Stage {name!r} is not a constrained-refinement round")
+
+    def _previous_constrained_name(self, name: str) -> str | None:
+        round_number = self._constrained_round_number(name)
+        return (
+            None
+            if round_number == 1
+            else self._constrained_nodes()[round_number - 2].name
+        )
+
+    def _elastic_batch_resource_args(self, name: str) -> list[str]:
+        profile = self._slurm_profile(name)
+        parallel = self.config.get("parallel", {})
+        mpi_ranks = max(1, int(parallel.get("cores_per_worker", 1)))
+        omp_threads = max(
+            1, int(parallel.get("omp_threads_per_worker", 1))
+        )
+        configured_candidates = max(1, int(parallel.get("max_workers", 1)))
+        if self.backend == "slurm":
+            available = int(
+                profile.get(
+                    "cores",
+                    int(profile.get("tasks", 1))
+                    * int(profile.get("cpus_per_task", 1)),
+                )
+            )
+        else:
+            available = configured_candidates * mpi_ranks * omp_threads
+        state_cpu_cost = mpi_ranks * omp_threads
+        if available < state_cpu_cost:
+            raise ValueError(
+                f"Machine profile allocates {available} CPUs for {name}, but one "
+                f"elastic state needs {mpi_ranks} MPI ranks x {omp_threads} OMP "
+                "threads"
+            )
+        candidate_workers = min(
+            configured_candidates, available // state_cpu_cost
+        )
+        command = [
+            "--available-cores", str(available),
+            "--cores-per-state", str(mpi_ranks),
+            "--omp-threads-per-state", str(omp_threads),
+            "--candidate-workers", str(candidate_workers),
+        ]
+        return command
+
+    def _finalist_selection_args(self, name: str) -> list[str]:
+        settings = self._stage_settings(name)
+        command: list[str] = []
+        for option, keys, converter in (
+            ("--minimum", ("minimum",), int),
+            ("--top-n", ("top_n", "maximum"), int),
+            (
+                "--near-optimal-window-percent",
+                ("near_optimal_window_percent",),
+                float,
+            ),
+            ("--diversity-slots", ("diversity_slots", "diverse_reserve"), int),
+        ):
+            value = next(
+                (settings[key] for key in keys if settings.get(key) is not None),
+                None,
+            )
+            if value is not None:
+                command.extend([option, str(converter(value))])
+        return command
+
     def _stage_command(self, name: str, output: Path) -> list[str]:
+        command_token = self._node(name).command_token
         bo_dir = self.root / "bo"
         sample_file = self.root / "sample" / "local_results.csv"
         nn_dir = self.root / "nn"
-        if name == "bo":
+        if command_token == "bo":
             command = self._python_module(
                 "engine.run", "--config", self.config_path, "--output-dir", output
             )
             if self.resume:
                 command.append("--resume")
             return command
-        if name == "sample":
+        if command_token == "sample":
             return self._sample_command(output)
-        if name == "nn":
+        if command_token == "nn":
             command = self._python_module(
                 "engine.nn_surrogate",
                 "--config", self.config_path,
                 "--bo-dir", bo_dir,
                 "--output-dir", output,
             )
-            if "sample" in self.stage_names:
+            if self._has_kind("sample"):
                 command.extend(["--additional-core-file", sample_file])
             return command
-        if name == "al":
+        if command_token == "material-nn":
+            if self.refinement_spec_path is None:
+                raise ValueError("Material surrogate preflight requires a refinement spec")
+            return self._python_module(
+                "engine.material_surrogate_preflight",
+                "--config", self.config_path,
+                "--refinement-config", self.refinement_spec_path,
+                "--structural-observations",
+                self.root / "candidates" / "candidates.csv",
+                "--static-observations", self.root / "static" / "static_results.csv",
+                "--candidate-pool", self.root / "candidates" / "candidate_pool.csv",
+                "--output-dir", output,
+                "--seed", self._stage_settings(name).get("seed", 20260820),
+            )
+        if command_token == "al":
             command = self._python_module(
                 "engine.active_learning",
                 "--config", self.config_path,
@@ -337,41 +579,171 @@ class PipelineRunner:
                 "--nn-dir", nn_dir,
                 "--output-dir", output,
             )
-            if "sample" in self.stage_names:
+            if self._has_kind("sample"):
                 command.extend(["--additional-core-file", sample_file])
             if self.resume:
                 command.append("--resume")
             return command
-        if name == "audit":
-            source = self._latest_al_data() if "al" in self.stage_names else bo_dir / "all_results.csv"
+        if command_token == "audit":
+            if self.material_workflow:
+                sources = [bo_dir / "all_results.csv"]
+                if self._has_kind("sample"):
+                    sources.append(sample_file)
+            else:
+                sources = [
+                    self._latest_al_data()
+                    if self._has_kind("al")
+                    else bo_dir / "all_results.csv"
+                ]
             top_k, seeds, max_workers = self._audit_settings()
             command = self._python_module(
                 "engine.stability_audit",
                 "--config", self.config_path,
-                "--source", source,
                 "--output-dir", output,
                 "--top-k", top_k,
                 "--seeds", *seeds,
             )
+            for source in sources:
+                command.extend(["--source", str(source)])
             if max_workers:
                 command.extend(["--max-workers", str(max_workers)])
             return command
-        if name == "finalize":
+        if command_token == "candidates":
+            command = self._python_module(
+                "workflow.material_candidates",
+                "--config", self.config_path,
+            )
+            for source in self._material_candidate_sources():
+                command.extend(["--source", str(source)])
+            screen = self._stage_settings("static")
+            for option, key in (
+                ("--screen-minimum", "minimum"),
+                ("--screen-per-dimension", "per_dimension"),
+                ("--screen-maximum", "maximum"),
+                ("--screen-core-fraction", "core_fraction"),
+                ("--screen-buffer-multiplier", "buffer_multiplier"),
+                ("--screen-elite-fraction", "objective_elite_fraction"),
+            ):
+                if screen.get(key) is not None:
+                    command.extend([option, str(screen[key])])
+            command.extend(["--output-dir", str(output)])
+            return command
+        if command_token == "static":
+            return self._python_module(
+                "engine.cubic_elastic_batch",
+                "--config", self.config_path,
+                "--parameters",
+                self.root / "candidates" / "static_screen_candidates.csv",
+                "--output-dir", output,
+                "--protocol", "static",
+                "--evaluate-structural-failures",
+                *self._elastic_batch_resource_args(name),
+                *self._finalist_selection_args(name),
+            )
+        if command_token == "constrained-al":
+            if self.refinement_spec_path is None:
+                raise ValueError("Constrained AL requires a refinement spec snapshot")
+            round_number = self._constrained_round_number(name)
+            command = self._python_module(
+                "engine.material_al_round",
+                "--config", self.config_path,
+                "--refinement-config", self.refinement_spec_path,
+                "--candidate-pool",
+                self.root / "nn" / "candidate_pool.csv",
+                "--output-dir", output,
+                "--round", round_number,
+                "--max-rounds", self.refinement_maximum_rounds,
+                "--seed", self._stage_settings(name).get("seed", 20260820),
+                "--structural-seeds",
+                *self._stage_settings(name).get(
+                    "structural_seeds",
+                    [self.config.get("lammps", {}).get("bulk", {}).get("npt_seed", 101)],
+                ),
+                *self._elastic_batch_resource_args(name),
+            )
+            previous = self._previous_constrained_name(name)
+            if previous is None:
+                command.extend([
+                    "--structural-observations",
+                    str(self.root / "candidates" / "candidates.csv"),
+                    "--static-observations",
+                    str(self.root / "static" / "static_results.csv"),
+                ])
+            else:
+                command.extend([
+                    "--previous-state",
+                    str(self.root / previous / "refinement_state.json"),
+                    "--previous-evidence",
+                    str(self.root / previous / "round_evidence.json"),
+                ])
+            return command
+        if command_token == "finalists":
+            constrained = self._constrained_nodes()
+            if not constrained:
+                raise ValueError("Finalists require at least one constrained AL round")
+            parameters = (
+                self.root
+                / constrained[-1].name
+                / "exact_structural_mechanical_ranking.csv"
+            )
+            return self._python_module(
+                "engine.cubic_elastic_batch",
+                "--config", self.config_path,
+                "--parameters", parameters,
+                "--output-dir", output,
+                "--protocol", "dynamic",
+                *self._elastic_batch_resource_args(name),
+                *self._finalist_selection_args(name),
+            )
+        if command_token == "finalize":
             return self._python_module(
                 "engine.finalize_al",
                 "--config", self.config_path,
                 "--audit", self.root / "audit",
                 "--output-dir", output,
             )
-        if name == "validate":
+        if command_token == "material-validate":
+            command = self._python_module(
+                "engine.material_validation",
+                "--config", self.config_path,
+                "--output-dir", output,
+                *self._elastic_batch_resource_args(name),
+            )
+            constrained = self._constrained_nodes()
+            if self._has_kind("finalists") and constrained:
+                finalists = self._stage_settings("finalists")
+                top_n = int(finalists.get("maximum", finalists.get("top_n", 20)))
+                command.extend([
+                    "--parameters", str(self.root / "finalists" / "best_candidate.json"),
+                    "--static-ranking",
+                    str(
+                        self.root
+                        / constrained[-1].name
+                        / "exact_structural_mechanical_ranking.csv"
+                    ),
+                    "--dynamic-ranking",
+                    str(self.root / "finalists" / "dynamic_results.csv"),
+                    "--top-n", str(top_n),
+                ])
+            elif self._has_kind("bo"):
+                command.extend([
+                    "--parameters", str(self.root / "bo" / "best_parameters.txt")
+                ])
+            else:
+                for parameter, value in _initial_free_parameters(self.config).items():
+                    command.extend(["--parameter", f"{parameter}={value:.17g}"])
+            return command
+        if command_token == "validate":
             parameters = None
-            if "finalize" in self.stage_names:
+            if self._has_kind("finalists"):
+                parameters = self.root / "finalists" / "best_candidate.json"
+            elif self._has_kind("finalize"):
                 parameters = self.root / "finalize" / "final_summary.json"
-            elif "al" in self.stage_names:
+            elif self._has_kind("al"):
                 parameters = self.root / "al" / "final_parameters.json"
-            elif "nn" in self.stage_names:
+            elif self._has_kind("nn"):
                 parameters = self.root / "nn" / "nn_optimize_result.json"
-            elif "bo" in self.stage_names:
+            elif self._has_kind("bo"):
                 parameters = self.root / "bo" / "best_parameters.txt"
             command = self._python_module(
                 "engine.validate_final_parameters",
@@ -380,36 +752,35 @@ class PipelineRunner:
                 "--overwrite",
             )
             if parameters is not None:
-                command.extend(["--parameters", parameters])
+                command.extend(["--parameters", str(parameters)])
             else:
                 command.append("--initial")
             return command
-        raise ValueError(f"Unsupported stage: {name}")
+        raise ValueError(
+            f"No command builder is installed for stage {name!r} "
+            f"(command token {command_token!r})"
+        )
 
-    @staticmethod
-    def _stage_artifacts(name: str, output: Path) -> list[Path]:
-        names = {
-            "bo": ["all_results.csv"],
-            "sample": ["local_results.csv", "local_replicates.csv"],
-            "nn": ["forward_nn.pt", "nn_optimize_result.json"],
-            "al": ["active_learning_history.json", "final_parameters.json"],
-            "audit": ["stable_results.csv", "stability_replicates.csv"],
-            "finalize": ["final_summary.json", "final_parameters.lammps"],
-            "validate": [
-                "validation_summary.json",
-                "computed_properties.csv",
-                "final_atom_parameters.csv",
-                "final_parameters.lammps",
-                "final_parameters.json",
-            ],
-        }[name]
-        return [output / item for item in names]
+    def _stage_artifacts(self, name: str, output: Path) -> list[Path]:
+        return [output / item for item in self._node(name).expected_artifacts]
 
     def build_specs(self) -> list[StageSpec]:
         specs: list[StageSpec] = []
-        upstream = "root"
-        for name in self.stage_names:
+        signatures: dict[str, str] = {}
+        for node in self.stage_graph.nodes:
+            name = node.name
             output = self.root / name
+            if not node.dependencies:
+                upstream = "root"
+            elif len(node.dependencies) == 1:
+                upstream = signatures[node.dependencies[0]]
+            else:
+                upstream = canonical_hash({
+                    "dependencies": [
+                        (dependency, signatures[dependency])
+                        for dependency in node.dependencies
+                    ]
+                })
             signature = self._signature(name, upstream)
             specs.append(StageSpec(
                 name=name,
@@ -417,8 +788,11 @@ class PipelineRunner:
                 command=self._stage_command(name, output),
                 output_dir=output,
                 artifacts=self._stage_artifacts(name, output),
+                kind=node.kind,
+                command_token=node.command_token,
+                dependencies=node.dependencies,
             ))
-            upstream = signature
+            signatures[name] = signature
         return specs
 
     def _print_plan(self, specs: list[StageSpec]) -> None:
@@ -431,13 +805,133 @@ class PipelineRunner:
 
     def _slurm_profile(self, stage: str) -> dict[str, Any]:
         cluster = self.config.get("cluster", {})
-        fallback = {
-            "sample": "bo",
-            "audit": "bo",
-            "validate": "bo",
-            "finalize": "nn",
-        }.get(stage, stage)
-        profile = dict(cluster.get(stage, cluster.get(fallback, {})))
+        node = self._node(stage)
+        kind = node.kind
+        cpu_material = self.material_workflow and node.command_token in {
+            "candidates", "static", "constrained-al", "finalists", "material-validate",
+        }
+        if kind == "candidates":
+            fallback = "bo"
+        elif cpu_material:
+            fallback = "al" if cluster.get("al") else "bo"
+        elif node.command_token == "material-nn":
+            fallback = "al" if cluster.get("al") else "bo"
+        else:
+            fallback = {
+                "sample": "bo",
+                "audit": "bo",
+                "validate": "bo",
+                "finalize": "nn",
+            }.get(kind, kind)
+        if node.command_token == "material-validate":
+            # The legacy validate profile is intentionally one LAMMPS-sized
+            # job.  Material validation composes structural, static and
+            # dynamic batches, so it needs the material AL allocation unless
+            # the operator supplies a dedicated override.
+            profile = dict(
+                cluster.get(
+                    "material_validate",
+                    cluster.get("al", cluster.get("bo", {})),
+                )
+            )
+        elif node.command_token == "material-nn":
+            profile = dict(cluster.get(stage, cluster.get(fallback, {})))
+        else:
+            profile = dict(
+                cluster.get(stage, cluster.get(kind, cluster.get(fallback, {})))
+            )
+        if not profile and fallback != kind:
+            profile = dict(cluster.get(fallback, {}))
+        if cpu_material or (
+            node.command_token == "material-nn"
+        ):
+            profile["gpu"] = 0
+        persistent_material = node.command_token in {
+            "constrained-al", "material-validate",
+        }
+        if persistent_material and self.backend == "slurm":
+            parallel = self.config.get("parallel", {})
+            configured_workers = max(
+                1, int(parallel.get("max_workers", 1))
+            )
+            worker_cpu_cost = max(
+                1,
+                int(parallel.get("cores_per_worker", 1))
+                * int(parallel.get("omp_threads_per_worker", 1)),
+            )
+            total_cores = int(
+                profile.get(
+                    "cores",
+                    int(profile.get("tasks", 1))
+                    * int(profile.get("cpus_per_task", 1)),
+                )
+            )
+            if total_cores % worker_cpu_cost:
+                raise ValueError(
+                    f"Machine profile for {stage} allocates {total_cores} CPUs, "
+                    f"which is not divisible by one persistent LAMMPS worker "
+                    f"({worker_cpu_cost} CPUs)"
+                )
+            workers = total_cores // worker_cpu_cost
+            if workers != configured_workers:
+                raise ValueError(
+                    f"Machine profile for {stage} yields {workers} persistent "
+                    f"LAMMPS workers from {total_cores} CPUs, but "
+                    f"parallel.max_workers={configured_workers}; make the total "
+                    f"allocation {configured_workers * worker_cpu_cost} CPUs"
+                )
+            # Mixed structural/elastic controllers first launch one persistent
+            # worker per structural candidate slot.  Normalize legacy profiles
+            # such as 16x1 into the worker-shaped 8x2 allocation before writing
+            # the job; the pool is released before nested elastic srun steps.
+            profile.update({
+                "cores": total_cores,
+                "tasks": workers,
+                "cpus_per_task": worker_cpu_cost,
+                "distributed_steps": True,
+            })
+            nodes = max(1, int(profile.get("nodes", 1)))
+            if workers % nodes == 0:
+                profile["tasks_per_node"] = workers // nodes
+            else:
+                profile.pop("tasks_per_node", None)
+        elastic_material = node.command_token in {
+            "static", "finalists",
+        }
+        if elastic_material and self.backend == "slurm":
+            parallel = self.config.get("parallel", {})
+            omp_threads = max(
+                1, int(parallel.get("omp_threads_per_worker", 1))
+            )
+            total_cores = int(
+                profile.get(
+                    "cores",
+                    int(profile.get("tasks", 1))
+                    * int(profile.get("cpus_per_task", 1)),
+                )
+            )
+            usable_cores = total_cores - total_cores % omp_threads
+            if usable_cores < omp_threads:
+                raise ValueError(
+                    f"Machine profile does not allocate one OMP rank for {stage}: "
+                    f"cores={total_cores}, omp_threads={omp_threads}"
+                )
+            # These stages are one Python controller launching many exclusive
+            # nested srun steps.  Expose the complete CPU allocation as
+            # one-rank slots; the scientific candidate/state budget is derived
+            # separately from max_workers, MPI ranks and OMP threads.
+            tasks = usable_cores // omp_threads
+            profile.update({
+                "cores": usable_cores,
+                "tasks": tasks,
+                "cpus_per_task": omp_threads,
+                "distributed_steps": True,
+            })
+            nodes = max(1, int(profile.get("nodes", 1)))
+            if tasks % nodes == 0:
+                profile["tasks_per_node"] = tasks // nodes
+            else:
+                profile.pop("tasks_per_node", None)
         if "env_setup" not in profile:
             profile["env_setup"] = cluster.get("env_setup", [])
         return profile
@@ -630,7 +1124,21 @@ class PipelineRunner:
         print(f"[{spec.name}] submitted as SLURM job {job_id}")
 
     def _run_local(self, state: WorkflowState, spec: StageSpec) -> None:
-        spec.output_dir.mkdir(parents=True, exist_ok=True)
+        if self.material_workflow and spec.command_token in {
+            "candidates",
+            "static",
+            "material-nn",
+            "constrained-al",
+            "finalists",
+            "material-validate",
+        }:
+            # Material-stage publishers atomically install their complete
+            # directory and therefore own that path themselves.
+            spec.output_dir.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            # Preserve the legacy molecular runner contract: historical stage
+            # entry points are handed an output directory that already exists.
+            spec.output_dir.mkdir(parents=True, exist_ok=True)
         state.transition(spec.name, "running", increment_attempt=True)
         print(f"\n[{spec.name}] > {_command_text(spec.command)}", flush=True)
         try:
@@ -657,6 +1165,53 @@ class PipelineRunner:
         state.transition(spec.name, "completed")
         print(f"[{spec.name}] completed")
 
+    def _terminal_refinement_predecessor(
+        self, spec: StageSpec
+    ) -> tuple[str, dict[str, Any]] | None:
+        if spec.kind != "constrained_al":
+            return None
+        previous = self._previous_constrained_name(spec.name)
+        if previous is None:
+            return None
+        state_path = self.root / previous / "refinement_state.json"
+        if not state_path.is_file():
+            return None
+        previous_state = load_refinement_state(state_path)
+        if previous_state["status"] not in {"converged", "budget_exhausted"}:
+            return None
+        return previous, previous_state
+
+    def _skip_terminal_refinement_round(
+        self,
+        state: WorkflowState,
+        spec: StageSpec,
+        previous_name: str,
+        previous_state: Mapping[str, Any],
+    ) -> None:
+        round_number = self._constrained_round_number(spec.name)
+        seed = int(self._stage_settings(spec.name).get("seed", 20260820))
+        write_skipped_refinement_stage(
+            stage_name=spec.name,
+            round_number=round_number,
+            previous_stage_name=previous_name,
+            previous_dir=self.root / previous_name,
+            output_dir=spec.output_dir,
+            config_path=self.config_path,
+            scientific_config={
+                "pipeline_stage_signature": spec.signature,
+                "scientific_hash": self.scientific_hash,
+            },
+            seed=seed,
+        )
+        missing = [str(path) for path in spec.artifacts if not path.is_file()]
+        if missing:
+            raise RuntimeError(
+                f"Skipped refinement stage {spec.name!r} did not create: {missing}"
+            )
+        reason = f"terminal predecessor {previous_name}: {previous_state['status']}"
+        state.transition(spec.name, "skipped", message=reason)
+        print(f"[{spec.name}] skipped ({reason})")
+
     def _run_once(self, state: WorkflowState, specs: list[StageSpec]) -> str:
         selected = set(self._selected_names())
         for spec in specs:
@@ -681,7 +1236,37 @@ class PipelineRunner:
                     )
                 continue
             if state.is_complete(spec.name, spec.signature):
-                print(f"[{spec.name}] complete; reusing verified artifacts")
+                if spec.command_token == "constrained-al":
+                    valid, reason = validate_material_al_stage_outputs(
+                        spec.output_dir
+                    )
+                    if not valid:
+                        state.transition(
+                            spec.name,
+                            "pending",
+                            message=f"Material AL manifest verification failed: {reason}",
+                        )
+                    else:
+                        existing = state.get(spec.name)
+                        disposition = (
+                            "skipped"
+                            if existing and existing.status == "skipped"
+                            else "complete"
+                        )
+                        print(
+                            f"[{spec.name}] {disposition}; reusing verified artifacts"
+                        )
+                        continue
+                else:
+                    existing = state.get(spec.name)
+                    disposition = "skipped" if existing and existing.status == "skipped" else "complete"
+                    print(f"[{spec.name}] {disposition}; reusing verified artifacts")
+                    continue
+            terminal = self._terminal_refinement_predecessor(spec)
+            if terminal is not None:
+                self._skip_terminal_refinement_round(
+                    state, spec, terminal[0], terminal[1]
+                )
                 continue
             if record.status == "completed":
                 state.transition(spec.name, "pending", message="Completed artifacts are missing")

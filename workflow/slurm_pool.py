@@ -105,21 +105,7 @@ class SlurmCommandPool:
 
         self._stdout_handle = (self.root / "workers.out").open("a", encoding="utf-8")
         self._stderr_handle = (self.root / "workers.err").open("a", encoding="utf-8")
-        command = [
-            self.launcher,
-            "--exact",
-            f"--nodes={self.nodes}",
-            f"--ntasks={self.workers}",
-            f"--cpus-per-task={self.cpus_per_worker}",
-        ]
-        if self.workers % self.nodes == 0:
-            command.append(f"--ntasks-per-node={self.workers // self.nodes}")
-        command.extend([
-            "--distribution=block:block",
-            sys.executable,
-            "-m", "workflow.slurm_worker",
-            "--root", str(self.root),
-        ])
+        command = self._worker_launch_command()
         self._process = subprocess.Popen(
             command,
             stdout=self._stdout_handle,
@@ -148,6 +134,26 @@ class SlurmCommandPool:
             f"SLURM command workers did not become ready: {detail.strip()}"
         )
 
+    def _worker_launch_command(self) -> list[str]:
+        """Return the exact persistent-worker step used by machine acceptance."""
+        command = [
+            self.launcher,
+            "--exact",
+            f"--nodes={self.nodes}",
+            f"--ntasks={self.workers}",
+            f"--cpus-per-task={self.cpus_per_worker}",
+            "--cpu-bind=cores",
+        ]
+        if self.workers % self.nodes == 0:
+            command.append(f"--ntasks-per-node={self.workers // self.nodes}")
+        command.extend([
+            "--distribution=block:block",
+            sys.executable,
+            "-m", "workflow.slurm_worker",
+            "--root", str(self.root),
+        ])
+        return command
+
     def _acquire_slot(self, deadline: float):
         while time.monotonic() < deadline:
             for rank in range(self.workers):
@@ -170,6 +176,7 @@ class SlurmCommandPool:
         env: dict[str, str],
         timeout: int,
         mpi_launcher: str | None = None,
+        mpi_launcher_flavor: str | None = None,
         mpi_ranks: int = 1,
     ) -> CommandResult:
         deadline = time.monotonic() + max(1, int(timeout))
@@ -187,6 +194,9 @@ class SlurmCommandPool:
                 "env": {str(key): str(value) for key, value in env.items()},
                 "timeout": int(timeout),
                 "mpi_launcher": str(mpi_launcher) if mpi_launcher else "",
+                "mpi_launcher_flavor": (
+                    str(mpi_launcher_flavor) if mpi_launcher_flavor else ""
+                ),
                 "mpi_ranks": int(mpi_ranks),
             })
             while time.monotonic() < deadline:

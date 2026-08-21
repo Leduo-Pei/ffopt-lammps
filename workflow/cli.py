@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ffopt import __version__
+from engine.resources import resolve_config_reference
 
 from .input_file import PROPERTY_NAMES
 from .lammps_data import inspect_lammps_data
@@ -26,6 +27,7 @@ from .machine import (
     resolve_executable,
     save_machine_profile,
 )
+from .mpi_local_exec import resolve_launcher_flavor
 from .project import (
     Project,
     compose_config,
@@ -34,6 +36,13 @@ from .project import (
 )
 
 DEFAULT_PROJECT = "ffopt.in"
+
+
+def _resolve_cli_data_reference(value: str | None) -> str | None:
+    """Resolve a CLI data path from CWD or from the packaged resource bundle."""
+    if value is None:
+        return None
+    return str(resolve_config_reference(value, base=Path.cwd()))
 
 
 def _planned_bo_method(
@@ -195,28 +204,6 @@ def _free_parameter_count(config: dict) -> int:
 def cmd_status(args: argparse.Namespace) -> None:
     project, machine = _common(args)
     run_root = project.run_root
-    nn_defaults = _stage_defaults(project, "nn")
-    preferred_bo = nn_defaults.get("bo_dir")
-    preferred_bo_path = resolve_path(preferred_bo) if preferred_bo else None
-    configured_stable = (
-        preferred_bo_path / "stable_results.csv"
-        if preferred_bo_path and (preferred_bo_path / "stable_results.csv").exists()
-        else None
-    )
-    configured_checkpoint = (
-        preferred_bo_path / "checkpoints" / "latest.json"
-        if preferred_bo_path
-        and (preferred_bo_path / "checkpoints" / "latest.json").exists()
-        else None
-    )
-    artifacts = [
-        ("BO stable", configured_stable or _newest([f"runs/{project.name}/bo_*/stable_results.csv", f"runs/{project.name}/legacy/**/stable_results.csv", "bo_*/stable_results.csv"])),
-        ("BO checkpoint", configured_checkpoint or _newest([f"runs/{project.name}/bo_*/checkpoints/latest.json", f"runs/{project.name}/legacy/**/checkpoints/latest.json", "bo_*/checkpoints/latest.json"])),
-        ("Sampling", _latest_sample(project)),
-        ("NN model", _newest([f"runs/{project.name}/nn_*/forward_nn.pt", f"runs/{project.name}/legacy/**/forward_nn.pt", "nn_output_*/forward_nn.pt"])),
-        ("AL history", _newest([f"runs/{project.name}/al_*/active_learning_history.json", f"runs/{project.name}/legacy/**/active_learning_history.json", "active_learning_output_*/active_learning_history.json"])),
-        ("Validation", _newest([f"runs/{project.name}/validation_*/validation_summary.json", "outputs/**/validation_summary.json"])),
-    ]
     from .pipeline import load_pipeline_status
 
     pipeline = load_pipeline_status(project, args.run_id)
@@ -259,6 +246,30 @@ def cmd_status(args: argparse.Namespace) -> None:
                     print(f"  {'':10s} {'':10s} {checkpoint}")
         print(f"\nUse 'ffopt results {project.path} --run-id {args.run_id}' for exact paths.")
         return
+    # Compatibility view for historical unmanaged runs.  Managed pipelines
+    # return above and therefore never mix their state with glob/mtime guesses.
+    nn_defaults = _stage_defaults(project, "nn")
+    preferred_bo = nn_defaults.get("bo_dir")
+    preferred_bo_path = resolve_path(preferred_bo) if preferred_bo else None
+    configured_stable = (
+        preferred_bo_path / "stable_results.csv"
+        if preferred_bo_path and (preferred_bo_path / "stable_results.csv").exists()
+        else None
+    )
+    configured_checkpoint = (
+        preferred_bo_path / "checkpoints" / "latest.json"
+        if preferred_bo_path
+        and (preferred_bo_path / "checkpoints" / "latest.json").exists()
+        else None
+    )
+    artifacts = [
+        ("BO stable", configured_stable or _newest([f"runs/{project.name}/bo_*/stable_results.csv", f"runs/{project.name}/legacy/**/stable_results.csv", "bo_*/stable_results.csv"])),
+        ("BO checkpoint", configured_checkpoint or _newest([f"runs/{project.name}/bo_*/checkpoints/latest.json", f"runs/{project.name}/legacy/**/checkpoints/latest.json", "bo_*/checkpoints/latest.json"])),
+        ("Sampling", _latest_sample(project)),
+        ("NN model", _newest([f"runs/{project.name}/nn_*/forward_nn.pt", f"runs/{project.name}/legacy/**/forward_nn.pt", "nn_output_*/forward_nn.pt"])),
+        ("AL history", _newest([f"runs/{project.name}/al_*/active_learning_history.json", f"runs/{project.name}/legacy/**/active_learning_history.json", "active_learning_output_*/active_learning_history.json"])),
+        ("Validation", _newest([f"runs/{project.name}/validation_*/validation_summary.json", "outputs/**/validation_summary.json"])),
+    ]
     for label, path in artifacts:
         print(f"{label:15s}: {path if path else '-'}")
 
@@ -271,10 +282,51 @@ def cmd_results(args: argparse.Namespace) -> None:
         report = collect_pipeline_results(project, args.run_id)
     except FileNotFoundError as exc:
         raise SystemExit(str(exc)) from exc
+    _include_material_top_results(report)
     print(
         json.dumps(report, indent=2, ensure_ascii=False)
         if args.json else format_pipeline_results(report)
     )
+
+
+def _include_material_top_results(report: dict) -> None:
+    """Expose manifest-declared Top-N products through ``ffopt results``.
+
+    Top-N products are conditional: validation-only and BO+validate workflows
+    do not create them, so they cannot be unconditional stage-registry
+    artifacts.  A full material validation records their exact paths in its
+    persisted summary.  Reading only that state-addressed file keeps results
+    discovery deterministic and avoids directory glob/mtime heuristics.
+    """
+
+    for stage in report.get("stages", []):
+        if stage.get("name") != "validate" or not stage.get("output_dir"):
+            continue
+        summary_path = Path(stage["output_dir"]) / "validation_summary.json"
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        top = summary.get("top_parameters_report", {})
+        if not isinstance(top, dict) or not top.get("enabled"):
+            continue
+        artifacts = stage.setdefault("artifacts", [])
+        recorded = {
+            str(item.get("path"))
+            for item in artifacts
+            if isinstance(item, dict) and item.get("path")
+        }
+        for key in ("csv", "json", "markdown", "manifest"):
+            raw_path = top.get(key)
+            if not raw_path or str(raw_path) in recorded:
+                continue
+            path = Path(raw_path)
+            artifacts.append({
+                "path": str(path),
+                "exists": path.is_file(),
+                "role": f"top_parameters_{key}",
+            })
+            recorded.add(str(path))
 
 
 def cmd_logs(args: argparse.Namespace) -> None:
@@ -297,6 +349,45 @@ def cmd_logs(args: argparse.Namespace) -> None:
                 print(content)
 
 
+def _resolve_run_stage_bound(
+    project: Project,
+    value: str | None,
+    *,
+    upper: bool,
+) -> str | None:
+    """Map concise public material stages to concrete executable nodes.
+
+    Material command files deliberately expose ``screen`` and ``al`` while the
+    recoverable runtime graph expands them to ``candidates``/``static`` and
+    numbered constrained-AL rounds.  CLI bounds must preserve that public
+    vocabulary: starting from a macro selects its first node and stopping at a
+    macro selects its last node.  Exact expanded names remain valid and are
+    checked by :class:`workflow.pipeline.PipelineRunner`.
+    """
+
+    if value is None:
+        return None
+    pipeline = project.data.get("pipeline", {})
+    stages = [str(stage) for stage in pipeline.get("stages", [])]
+    if value == "screen" and "screen" in stages:
+        return "static" if upper else "candidates"
+    if value == "al" and "constrained_al" in stages:
+        repetitions = pipeline.get("stage_repetitions", {})
+        count = int(repetitions.get("constrained_al", 1))
+        return f"constrained_al_{count if upper else 1:02d}"
+    return value
+
+
+def _public_workflow(project: Project) -> list[str]:
+    """Return the user-authored workflow rather than compiler-only tokens."""
+
+    compilation = project.compilation
+    document = getattr(compilation, "document", None)
+    if document is not None:
+        return [str(stage) for stage in document.workflow]
+    return [str(stage) for stage in project.data.get("pipeline", {}).get("stages", [])]
+
+
 def cmd_run(args: argparse.Namespace) -> None:
     project, machine = _common(args)
     from .pipeline import PipelineRunner
@@ -312,8 +403,8 @@ def cmd_run(args: argparse.Namespace) -> None:
         dry_run=args.dry_run,
         watch=args.watch,
         poll_seconds=args.poll_seconds,
-        from_stage=args.from_stage,
-        until=args.until,
+        from_stage=_resolve_run_stage_bound(project, args.from_stage, upper=False),
+        until=_resolve_run_stage_bound(project, args.until, upper=True),
     )
     outcome = runner.run()
     if outcome == "waiting":
@@ -393,6 +484,18 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         mpi_name = str(config["lammps"].get("mpiexec", "mpiexec"))
         mpi_launcher = resolve_executable(mpi_name)
         checks.append(("MPI launcher", mpi_launcher is not None, mpi_launcher or mpi_name))
+        if (
+            bool(config.get("parallel", {}).get("use_mpi", False))
+            and int(config.get("parallel", {}).get("cores_per_worker", 1)) > 1
+        ):
+            try:
+                flavor = resolve_launcher_flavor(
+                    mpi_name, config["lammps"].get("mpi_flavor")
+                )
+            except ValueError as exc:
+                checks.append(("MPI launcher flavor", False, str(exc)))
+            else:
+                checks.append(("MPI launcher flavor", True, flavor))
         step_name = str(config.get("parallel", {}).get("scheduler_launcher", "srun"))
         step_launcher = shutil.which(step_name)
         checks.append((
@@ -610,6 +713,7 @@ def cmd_machine(args: argparse.Namespace) -> None:
     backend = args.backend or "local"
     lammps = args.lammps
     mpi = args.mpi
+    mpi_flavor = args.mpi_flavor
     workers = args.workers
     ranks = args.ranks or 1
     omp_threads = args.omp_threads or 1
@@ -646,12 +750,14 @@ def cmd_machine(args: argparse.Namespace) -> None:
                 "MPI was not found on PATH. Pass --mpi /absolute/path/to/mpirun."
             )
         mpi = mpi or probe["mpi"]["path"]
+        mpi_flavor = mpi_flavor or probe["mpi"].get("flavor")
         print("Using conservative values from 'ffopt machine probe'.")
     profile = build_machine_profile(
         name=args.name,
         backend=backend,
         lammps=lammps,
         mpi=mpi,
+        mpi_flavor=mpi_flavor,
         workers=workers,
         ranks=ranks,
         omp_threads=omp_threads,
@@ -664,12 +770,31 @@ def cmd_machine(args: argparse.Namespace) -> None:
         walltime=args.walltime,
         memory_per_node=memory_per_node,
     )
+    if (
+        ranks > 1
+        and not Path(str(profile["lammps"]["mpiexec"])).name.lower().startswith("srun")
+        and not profile["lammps"].get("mpi_flavor")
+    ):
+        raise SystemExit(
+            "MPI launcher flavor is ambiguous. Pass --mpi-flavor openmpi or "
+            "--mpi-flavor intelmpi; FFOpt will store the selection in the "
+            "machine profile."
+        )
     path = save_machine_profile(args.name, profile, overwrite=args.force)
     print(f"Machine profile saved: {path}")
 
 
 def cmd_inspect(args: argparse.Namespace) -> None:
-    summary = inspect_lammps_data(args.data_file)
+    try:
+        data_file = _resolve_cli_data_reference(args.data_file)
+        summary = inspect_lammps_data(data_file)
+    except (FileNotFoundError, TypeError, ValueError) as exc:
+        raise SystemExit(
+            f"Data inspection failed: {exc}\n"
+            "Relative paths are resolved from the current directory. For the "
+            "packaged BTAH example, use "
+            "'builtin:data/bulk/BTAH_822_bulk.data'."
+        ) from exc
     if args.json:
         print(json.dumps(summary.to_dict(), indent=2, ensure_ascii=False))
         return
@@ -702,13 +827,20 @@ def cmd_data(args: argparse.Namespace) -> None:
 
     try:
         report = check_data_files(
-            bulk=args.bulk,
-            single=args.single,
-            complex=args.complex,
-            slab=args.slab,
-            molecule=args.molecule,
+            bulk=_resolve_cli_data_reference(args.bulk),
+            single=_resolve_cli_data_reference(args.single),
+            complex=_resolve_cli_data_reference(args.complex),
+            slab=_resolve_cli_data_reference(args.slab),
+            molecule=_resolve_cli_data_reference(args.molecule),
         )
-    except (FileNotFoundError, TypeError, ValueError) as exc:
+    except FileNotFoundError as exc:
+        raise SystemExit(
+            f"Data check failed: {exc}\n"
+            "Relative paths are resolved from the current directory. Packaged "
+            "BTAH files use 'builtin:data/bulk/BTAH_822_bulk.data' and "
+            "'builtin:data/molecule/BTAH_822_single.data'."
+        ) from exc
+    except (TypeError, ValueError) as exc:
         raise SystemExit(f"Data check failed: {exc}") from exc
     if args.json:
         print(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
@@ -729,7 +861,17 @@ def cmd_check(args: argparse.Namespace) -> None:
     print(f"Free dimensions       : {compilation.dimensions}")
     print(f"Fitted properties     : {', '.join(compilation.fitted_properties) or '-'}")
     print(f"Validation-only       : {', '.join(compilation.validation_properties) or '-'}")
-    print(f"Workflow              : {' -> '.join(project.data['pipeline']['stages'])}")
+    print(f"Workflow              : {' -> '.join(_public_workflow(project))}")
+
+
+def _mixing_rule_description(rule: str) -> str:
+    if rule in {"default", "geometric"}:
+        return "epsilon geometric, sigma geometric"
+    if rule == "arithmetic":
+        return "epsilon geometric, sigma arithmetic"
+    if rule == "none":
+        return "explicit unlike-pair coefficients"
+    raise ValueError(f"Unsupported LAMMPS mixing rule: {rule!r}")
 
 
 def cmd_explain(args: argparse.Namespace) -> None:
@@ -741,33 +883,118 @@ def cmd_explain(args: argparse.Namespace) -> None:
     config = project.runtime_config
     free = []
     fixed = []
+    charge_enabled = bool(config["charge"].get("enabled", False))
     for atom_type in config["atom_types"]:
         for name, value in atom_type["params"].items():
+            if name == "charge" and not charge_enabled:
+                continue
             label = f"{atom_type['label']}_{name}"
             (free if isinstance(value, dict) else fixed).append(label)
+    derived_parameters = []
+    derived_targets = set()
+    for item in config["pair_params"].get("derived_params", []):
+        target = str(item["target"])
+        expression = str(item["expression"])
+        comment = str(item.get("comment", "")).strip()
+        description = f"{target} <- {expression}"
+        if comment:
+            description += f" ({comment})"
+        derived_parameters.append(description)
+        derived_targets.add(target)
     neutrality = config["charge"]["neutrality_constraint"]
-    derived = "-"
     if neutrality.get("enabled"):
         type_id = neutrality.get("derive_from_type")
         atom_type = next(item for item in config["atom_types"] if item["type"] == type_id)
-        derived = f"{atom_type['label']}_charge"
-        free = [name for name in free if name != derived]
+        target = f"{atom_type['label']}_charge"
+        if target not in derived_targets:
+            derived_parameters.append(f"{target} <- charge neutrality")
+            derived_targets.add(target)
+    free = [name for name in free if name not in derived_targets]
+    fixed = [name for name in fixed if name not in derived_targets]
     print(f"Input                 : {project.path}")
     print(f"Project               : {project.name}")
-    print(f"Workflow              : {' -> '.join(project.data['pipeline']['stages'])}")
+    print(f"Workflow              : {' -> '.join(_public_workflow(project))}")
     print(f"Independent dimensions: {compilation.dimensions}")
     print(f"Free parameters       : {len(free)}")
+    print(f"  {', '.join(free) or '-'}")
     print(f"Fixed parameters      : {len(fixed)}")
-    print(f"Derived parameter     : {derived}")
+    print(f"  {', '.join(fixed) or '-'}")
+    print("Derived parameters    :")
+    for item in derived_parameters or ["-"]:
+        print(f"  {item}")
     mixing = config["pair_params"]["mixing_rule"]
-    mixing_detail = (
-        "epsilon geometric, sigma geometric"
-        if mixing == "geometric"
-        else "epsilon geometric, sigma arithmetic"
-    )
+    mixing_detail = _mixing_rule_description(mixing)
     print(f"LAMMPS mixing rule    : {mixing} ({mixing_detail})")
     print("\nProperties:")
     for prop in compilation.document.properties:
+        if prop.name == "elasticity":
+            elasticity = config.get("elasticity", {})
+            modules = elasticity.get("modules", {})
+            evaluators = [
+                str(module.get("evaluator", fidelity))
+                for fidelity, module in modules.items()
+            ]
+            print(
+                f"  {prop.name:14s} {'role-aware modules':24s} "
+                f"protocol={' + '.join(evaluators) or 'module default'}"
+            )
+            for fidelity, module in modules.items():
+                print(
+                    f"    module {fidelity}: role={module.get('role', '-')} "
+                    f"fidelity={module.get('fidelity', '-')} "
+                    f"cost={module.get('cost_class', '-')}"
+                )
+                targets = module.get("targets", {})
+                target_text = ", ".join(
+                    f"{name}={float(target['value']):g} {target.get('unit', 'GPa')}"
+                    for name, target in targets.items()
+                )
+                print(f"      targets: {target_text or '-'}")
+
+            selection = elasticity.get("selection", {})
+            gates = selection.get("structural_gates", {})
+            gate_text = []
+            for name, gate in gates.items():
+                if "maximum_relative_error_percent" in gate:
+                    limit = gate["maximum_relative_error_percent"]
+                    gate_text.append(f"{name}<={float(limit):g}%")
+                elif "maximum_absolute_error_degree" in gate:
+                    limit = gate["maximum_absolute_error_degree"]
+                    gate_text.append(f"{name}<={float(limit):g} degree")
+            print(f"    structural gates: {', '.join(gate_text) or '-'}")
+
+            reporting = elasticity.get("reporting", {})
+            tier = reporting.get("mechanical_tier_percent", "-")
+            tier_kind = (
+                "hard gate"
+                if reporting.get("tier_is_hard_gate", False)
+                else "soft/reporting only"
+            )
+            born = selection.get("born_stability", {}).get("required", False)
+            minimum_r2 = selection.get("fit_quality", {}).get("minimum_r2", "-")
+            print(
+                "    quality controls: "
+                f"tier={tier}% ({tier_kind}), "
+                f"Born={'required' if born else 'off'}, R2>={minimum_r2}"
+            )
+
+            static_protocol = modules.get("static", {}).get("protocol", {})
+            dynamic_module = modules.get("dynamic", {})
+            dynamic_protocol = dynamic_module.get("protocol", {})
+            strains = static_protocol.get(
+                "strain_magnitudes", dynamic_protocol.get("strain_magnitudes", [])
+            )
+            promotion_seeds = dynamic_protocol.get("seeds", [])
+            validation_seeds = dynamic_module.get("validation_protocol", {}).get(
+                "seeds", []
+            )
+            print(
+                "    protocols: "
+                f"strains={list(strains)}, "
+                f"promotion_seeds={list(promotion_seeds)}, "
+                f"validation_seeds={list(validation_seeds)}"
+            )
+            continue
         role = "fit + final validation" if prop.fitted else "final validation only"
         protocol = prop.settings.get("protocol")
         if prop.name == "bulk":
@@ -845,18 +1072,47 @@ def cmd_explain(args: argparse.Namespace) -> None:
     if "sample" in stages:
         seeds = sample.get("seeds", [])
         points = int(sample.get("n_points", 0))
+        boundary_fraction = float(sample.get("boundary_fraction", 0.0))
+        global_fraction = float(sample.get("global_fraction", 0.0))
+        local_fraction = max(0.0, 1.0 - boundary_fraction - global_fraction)
         print(
             f"Sampling              : {points} points x {len(seeds)} seeds; "
-            f"centers={sample.get('elite_centers')} radii={sample.get('radii')}"
+            f"centers={sample.get('elite_centers')} radii={sample.get('radii')} "
+            f"local/boundary/global="
+            f"{local_fraction:.2f}/{boundary_fraction:.2f}/{global_fraction:.2f}"
         )
     if "nn" in stages:
         nn = config["nn"]
+        model = str(nn.get("model"))
+        details = [f"method={model}"]
+        if model == "mlp_ensemble":
+            details.extend([
+                f"ensemble={nn.get('ensemble_size')}",
+                f"layers={nn.get('hidden_layers')}",
+                f"epochs={nn.get('max_epochs')}",
+            ])
+        print(f"Surrogate             : {' '.join(details)}")
+    if "constrained_al" in stages:
+        refinement = project.data.get("pipeline", {}).get("constrained_al", {})
         print(
-            "ANN                   : "
-            f"method={nn.get('model')} ensemble={nn.get('ensemble_size')} "
-            f"layers={nn.get('hidden_layers')} epochs={nn.get('max_epochs')}"
+            "Constrained AL        : "
+            f"rounds<={refinement.get('maximum_rounds')} auto_advance=yes "
+            "structural/static candidates="
+            f"{refinement.get('structural_proposals_per_round')}/"
+            f"{refinement.get('mechanical_proposals_per_round')} "
+            f"pool={refinement.get('candidate_pool')}"
         )
-    if "al" in stages:
+        print(
+            "AL acquisition/stop   : "
+            "constrained_minimax; improvement/boundary/global="
+            f"{float(refinement.get('improvement_fraction', 0.0)):.2f}/"
+            f"{float(refinement.get('boundary_fraction', 0.0)):.2f}/"
+            f"{float(refinement.get('global_fraction', 0.0)):.2f}; "
+            f"patience={refinement.get('patience')} "
+            "min_improvement="
+            f"{refinement.get('minimum_improvement_percent_points')} pp"
+        )
+    elif "al" in stages:
         active_learning = config["active_learning"]
         print(
             "Active learning       : "
@@ -910,11 +1166,11 @@ def cmd_init(args: argparse.Namespace) -> None:
         targets = [parse_target_spec(value) for value in args.target]
         result = create_project(
             name=args.name,
-            data_file=args.data_file,
-            single_data=args.single_data,
-            complex_data=args.complex_data,
-            slab_data=args.slab_data,
-            molecule_data=args.molecule_data,
+            data_file=_resolve_cli_data_reference(args.data_file),
+            single_data=_resolve_cli_data_reference(args.single_data),
+            complex_data=_resolve_cli_data_reference(args.complex_data),
+            slab_data=_resolve_cli_data_reference(args.slab_data),
+            molecule_data=_resolve_cli_data_reference(args.molecule_data),
             project_type=args.project_type,
             metal_label=args.metal_label,
             destination=args.destination or args.name,
@@ -929,7 +1185,13 @@ def cmd_init(args: argparse.Namespace) -> None:
             charge_limit=args.charge_limit,
             force=args.force,
         )
-    except (FileNotFoundError, FileExistsError, TypeError, ValueError) as exc:
+    except FileNotFoundError as exc:
+        raise SystemExit(
+            f"Project initialization failed: {exc}\n"
+            "Relative data paths are resolved from the current directory. "
+            "The packaged BTAH example may be referenced with builtin:data/..."
+        ) from exc
+    except (FileExistsError, TypeError, ValueError) as exc:
         raise SystemExit(f"Project initialization failed: {exc}") from exc
 
     print(f"Project created : {result.root}")
@@ -951,9 +1213,15 @@ def cmd_init(args: argparse.Namespace) -> None:
     print(f"  cd {result.root}")
     print("  ffopt check ffopt.in")
     print("  ffopt explain ffopt.in")
+    print("\nLocal workstation only (direct execution; no scheduler):")
     print("  ffopt doctor ffopt.in --machine local")
     print("  ffopt run ffopt.in --machine local --dry-run")
     print("  ffopt run ffopt.in --machine local")
+    print("\nSLURM cluster (replace PROFILE with a configured profile name):")
+    print("  ffopt machine list")
+    print("  ffopt doctor ffopt.in --machine PROFILE")
+    print("  ffopt run ffopt.in --machine PROFILE --dry-run")
+    print("  ffopt run ffopt.in --machine PROFILE --watch")
 
 
 def cmd_self_test(args: argparse.Namespace) -> None:
@@ -1045,7 +1313,10 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("name", help="Project and system name.")
     init.add_argument(
         "--bulk-data", dest="data_file",
-        help="Bulk molecular-crystal data file.",
+        help=(
+            "Bulk molecular-crystal data file. Relative paths use the current "
+            "directory; packaged files may use builtin:data/..."
+        ),
     )
     init.add_argument("--data-file", dest="data_file", help=argparse.SUPPRESS)
     init.add_argument(
@@ -1056,7 +1327,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init.add_argument(
         "--single-data",
-        help="Isolated molecule data file for the sublimation-enthalpy estimate.",
+        help=(
+            "Isolated molecule data file for the sublimation-enthalpy estimate; "
+            "accepts a path or builtin:data/..."
+        ),
     )
     init.add_argument("--destination", help="Output directory; defaults to NAME.")
     init.add_argument(
@@ -1172,18 +1446,28 @@ def build_parser() -> argparse.ArgumentParser:
     self_test.set_defaults(function=cmd_self_test)
 
     inspect = sub.add_parser("inspect", help="Inspect atom types and parameters in a LAMMPS data file.")
-    inspect.add_argument("data_file", help="LAMMPS data file to inspect.")
+    inspect.add_argument(
+        "data_file",
+        help=(
+            "LAMMPS data path relative to the current directory, or a packaged "
+            "reference such as builtin:data/bulk/BTAH_822_bulk.data."
+        ),
+    )
     inspect.add_argument("--json", action="store_true", help="Emit a machine-readable summary.")
     inspect.set_defaults(function=cmd_inspect)
     data = sub.add_parser(
         "data", help="Validate LAMMPS data files and cross-file compatibility."
     )
     data.add_argument("action", choices=["check"], help="Data operation to perform.")
-    data.add_argument("--bulk", help="Periodic molecular-crystal data file.")
-    data.add_argument("--single", help="Isolated molecule used with --bulk.")
-    data.add_argument("--complex", help="Adsorbate+slab data file.")
-    data.add_argument("--slab", help="Clean slab data file.")
-    data.add_argument("--molecule", help="Isolated adsorbate data file.")
+    data.add_argument(
+        "--bulk", help="Periodic molecular-crystal data path or builtin:data/..."
+    )
+    data.add_argument(
+        "--single", help="Isolated molecule path or builtin:data/..."
+    )
+    data.add_argument("--complex", help="Adsorbate+slab path or builtin:data/...")
+    data.add_argument("--slab", help="Clean slab path or builtin:data/...")
+    data.add_argument("--molecule", help="Isolated adsorbate path or builtin:data/...")
     data.add_argument("--strict", action="store_true", help="Treat warnings as failures.")
     data.add_argument("--json", action="store_true", help="Emit a machine-readable report.")
     data.set_defaults(function=cmd_data)
@@ -1210,6 +1494,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     machine.add_argument("--lammps", help="LAMMPS executable; auto-detected when omitted.")
     machine.add_argument("--mpi", help="MPI launcher; auto-detected when omitted.")
+    machine.add_argument(
+        "--mpi-flavor", choices=("openmpi", "intelmpi"),
+        help=(
+            "MPI command-line dialect. Required when --mpi-ranks is greater "
+            "than one and the launcher path is ambiguous."
+        ),
+    )
     machine.add_argument(
         "--workers",
         type=int,
@@ -1309,8 +1600,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--run-id", default="default", help="Pipeline identifier (default: default)."
     )
     logs.add_argument(
-        "--stage", choices=["bo", "sample", "nn", "al", "audit", "finalize", "validate"],
-        help="Stage to inspect; defaults to the most recent logged stage.",
+        "--stage",
+        help=(
+            "Concrete stage to inspect (for example constrained_al_02); "
+            "defaults to the most recent logged stage."
+        ),
     )
     logs.add_argument(
         "--lines", type=int, default=80, help="Lines read from each log (default: 80)."
@@ -1321,8 +1615,8 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser(
         "run",
         help=(
-            "Run the restartable BO -> sampling -> ANN -> AL -> audit -> "
-            "finalize -> validation pipeline."
+            "Run the configured molecular or material workflow as one "
+            "restartable local/SLURM pipeline."
         ),
     )
     _add_context(run)
@@ -1346,12 +1640,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--poll-seconds", type=int, default=60,
         help="SLURM polling interval used with --watch (default: 60).",
     )
-    run.add_argument("--from-stage", choices=[
-        "bo", "sample", "nn", "al", "audit", "finalize", "validate"
-    ], help="Begin at a previously reached stage; completed upstream artifacts are required.")
-    run.add_argument("--until", choices=[
-        "bo", "sample", "nn", "al", "audit", "finalize", "validate"
-    ], help="Stop after this stage while retaining the configured full workflow.")
+    run.add_argument(
+        "--from-stage",
+        help=(
+            "Begin at a public stage (including screen/al) or a concrete expanded "
+            "stage; completed upstream artifacts are required."
+        ),
+    )
+    run.add_argument(
+        "--until",
+        help=(
+            "Stop after a public stage (including screen/al) or a concrete expanded "
+            "stage while retaining the configured full workflow."
+        ),
+    )
     run.set_defaults(function=cmd_run)
     return parser
 
