@@ -149,6 +149,10 @@ ffopt machine test --name mag1-1node
 ffopt machine test --name mag1-2node
 ```
 
+Here `CPU` is specifically the SLURM **partition name** on mag1, as reported
+by `sinfo`; it is not a universal FFOpt value and it is not a node name. Users
+on another cluster must substitute that site's partition.
+
 The two-node test must report both allocated hostnames. It uses the full
 20-worker/4-rank topology with a zero-step LAMMPS input, so it checks the
 cross-node command queue in minutes before the scientific acceptance begins.

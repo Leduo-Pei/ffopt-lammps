@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ffopt import __version__
+from engine.resources import resolve_config_reference
 
 from .input_file import PROPERTY_NAMES
 from .lammps_data import inspect_lammps_data
@@ -35,6 +36,13 @@ from .project import (
 )
 
 DEFAULT_PROJECT = "ffopt.in"
+
+
+def _resolve_cli_data_reference(value: str | None) -> str | None:
+    """Resolve a CLI data path from CWD or from the packaged resource bundle."""
+    if value is None:
+        return None
+    return str(resolve_config_reference(value, base=Path.cwd()))
 
 
 def _planned_bo_method(
@@ -777,7 +785,16 @@ def cmd_machine(args: argparse.Namespace) -> None:
 
 
 def cmd_inspect(args: argparse.Namespace) -> None:
-    summary = inspect_lammps_data(args.data_file)
+    try:
+        data_file = _resolve_cli_data_reference(args.data_file)
+        summary = inspect_lammps_data(data_file)
+    except (FileNotFoundError, TypeError, ValueError) as exc:
+        raise SystemExit(
+            f"Data inspection failed: {exc}\n"
+            "Relative paths are resolved from the current directory. For the "
+            "packaged BTAH example, use "
+            "'builtin:data/bulk/BTAH_822_bulk.data'."
+        ) from exc
     if args.json:
         print(json.dumps(summary.to_dict(), indent=2, ensure_ascii=False))
         return
@@ -810,13 +827,20 @@ def cmd_data(args: argparse.Namespace) -> None:
 
     try:
         report = check_data_files(
-            bulk=args.bulk,
-            single=args.single,
-            complex=args.complex,
-            slab=args.slab,
-            molecule=args.molecule,
+            bulk=_resolve_cli_data_reference(args.bulk),
+            single=_resolve_cli_data_reference(args.single),
+            complex=_resolve_cli_data_reference(args.complex),
+            slab=_resolve_cli_data_reference(args.slab),
+            molecule=_resolve_cli_data_reference(args.molecule),
         )
-    except (FileNotFoundError, TypeError, ValueError) as exc:
+    except FileNotFoundError as exc:
+        raise SystemExit(
+            f"Data check failed: {exc}\n"
+            "Relative paths are resolved from the current directory. Packaged "
+            "BTAH files use 'builtin:data/bulk/BTAH_822_bulk.data' and "
+            "'builtin:data/molecule/BTAH_822_single.data'."
+        ) from exc
+    except (TypeError, ValueError) as exc:
         raise SystemExit(f"Data check failed: {exc}") from exc
     if args.json:
         print(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
@@ -1142,11 +1166,11 @@ def cmd_init(args: argparse.Namespace) -> None:
         targets = [parse_target_spec(value) for value in args.target]
         result = create_project(
             name=args.name,
-            data_file=args.data_file,
-            single_data=args.single_data,
-            complex_data=args.complex_data,
-            slab_data=args.slab_data,
-            molecule_data=args.molecule_data,
+            data_file=_resolve_cli_data_reference(args.data_file),
+            single_data=_resolve_cli_data_reference(args.single_data),
+            complex_data=_resolve_cli_data_reference(args.complex_data),
+            slab_data=_resolve_cli_data_reference(args.slab_data),
+            molecule_data=_resolve_cli_data_reference(args.molecule_data),
             project_type=args.project_type,
             metal_label=args.metal_label,
             destination=args.destination or args.name,
@@ -1161,7 +1185,13 @@ def cmd_init(args: argparse.Namespace) -> None:
             charge_limit=args.charge_limit,
             force=args.force,
         )
-    except (FileNotFoundError, FileExistsError, TypeError, ValueError) as exc:
+    except FileNotFoundError as exc:
+        raise SystemExit(
+            f"Project initialization failed: {exc}\n"
+            "Relative data paths are resolved from the current directory. "
+            "The packaged BTAH example may be referenced with builtin:data/..."
+        ) from exc
+    except (FileExistsError, TypeError, ValueError) as exc:
         raise SystemExit(f"Project initialization failed: {exc}") from exc
 
     print(f"Project created : {result.root}")
@@ -1183,9 +1213,15 @@ def cmd_init(args: argparse.Namespace) -> None:
     print(f"  cd {result.root}")
     print("  ffopt check ffopt.in")
     print("  ffopt explain ffopt.in")
+    print("\nLocal workstation only (direct execution; no scheduler):")
     print("  ffopt doctor ffopt.in --machine local")
     print("  ffopt run ffopt.in --machine local --dry-run")
     print("  ffopt run ffopt.in --machine local")
+    print("\nSLURM cluster (replace PROFILE with a configured profile name):")
+    print("  ffopt machine list")
+    print("  ffopt doctor ffopt.in --machine PROFILE")
+    print("  ffopt run ffopt.in --machine PROFILE --dry-run")
+    print("  ffopt run ffopt.in --machine PROFILE --watch")
 
 
 def cmd_self_test(args: argparse.Namespace) -> None:
@@ -1277,7 +1313,10 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("name", help="Project and system name.")
     init.add_argument(
         "--bulk-data", dest="data_file",
-        help="Bulk molecular-crystal data file.",
+        help=(
+            "Bulk molecular-crystal data file. Relative paths use the current "
+            "directory; packaged files may use builtin:data/..."
+        ),
     )
     init.add_argument("--data-file", dest="data_file", help=argparse.SUPPRESS)
     init.add_argument(
@@ -1288,7 +1327,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init.add_argument(
         "--single-data",
-        help="Isolated molecule data file for the sublimation-enthalpy estimate.",
+        help=(
+            "Isolated molecule data file for the sublimation-enthalpy estimate; "
+            "accepts a path or builtin:data/..."
+        ),
     )
     init.add_argument("--destination", help="Output directory; defaults to NAME.")
     init.add_argument(
@@ -1404,18 +1446,28 @@ def build_parser() -> argparse.ArgumentParser:
     self_test.set_defaults(function=cmd_self_test)
 
     inspect = sub.add_parser("inspect", help="Inspect atom types and parameters in a LAMMPS data file.")
-    inspect.add_argument("data_file", help="LAMMPS data file to inspect.")
+    inspect.add_argument(
+        "data_file",
+        help=(
+            "LAMMPS data path relative to the current directory, or a packaged "
+            "reference such as builtin:data/bulk/BTAH_822_bulk.data."
+        ),
+    )
     inspect.add_argument("--json", action="store_true", help="Emit a machine-readable summary.")
     inspect.set_defaults(function=cmd_inspect)
     data = sub.add_parser(
         "data", help="Validate LAMMPS data files and cross-file compatibility."
     )
     data.add_argument("action", choices=["check"], help="Data operation to perform.")
-    data.add_argument("--bulk", help="Periodic molecular-crystal data file.")
-    data.add_argument("--single", help="Isolated molecule used with --bulk.")
-    data.add_argument("--complex", help="Adsorbate+slab data file.")
-    data.add_argument("--slab", help="Clean slab data file.")
-    data.add_argument("--molecule", help="Isolated adsorbate data file.")
+    data.add_argument(
+        "--bulk", help="Periodic molecular-crystal data path or builtin:data/..."
+    )
+    data.add_argument(
+        "--single", help="Isolated molecule path or builtin:data/..."
+    )
+    data.add_argument("--complex", help="Adsorbate+slab path or builtin:data/...")
+    data.add_argument("--slab", help="Clean slab path or builtin:data/...")
+    data.add_argument("--molecule", help="Isolated adsorbate path or builtin:data/...")
     data.add_argument("--strict", action="store_true", help="Treat warnings as failures.")
     data.add_argument("--json", action="store_true", help="Emit a machine-readable report.")
     data.set_defaults(function=cmd_data)

@@ -22,6 +22,38 @@ def test_sublimation_target_alias():
     assert target.name == "esub_proxy"
 
 
+def test_cli_inspects_packaged_btah_data(capsys):
+    parser = build_parser()
+    args = parser.parse_args([
+        "inspect", "builtin:data/bulk/BTAH_822_bulk.data"
+    ])
+    args.function(args)
+    output = capsys.readouterr().out
+    assert "Atoms         : 4480" in output
+    assert "Atom types    : 14" in output
+
+
+def test_cli_init_accepts_packaged_data_and_separates_machine_guidance(
+    tmp_path, capsys
+):
+    destination = tmp_path / "btah_builtin"
+    parser = build_parser()
+    args = parser.parse_args([
+        "init", "btah_builtin",
+        "--bulk-data", "builtin:data/bulk/BTAH_822_bulk.data",
+        "--single-data", "builtin:data/molecule/BTAH_822_single.data",
+        "--destination", str(destination),
+        "--mode", "charge_only",
+        "--target", "density=1.3285,1.0,g/cm3,0.03",
+    ])
+    args.function(args)
+    output = capsys.readouterr().out
+    assert (destination / "data" / "bulk" / "BTAH_822_bulk.data").exists()
+    assert "Local workstation only" in output
+    assert "SLURM cluster" in output
+    assert "--machine PROFILE --watch" in output
+
+
 def test_charge_only_btah_scaffold_is_external_and_13_dimensional(tmp_path):
     output = tmp_path / "molecule_project"
     result = create_project(

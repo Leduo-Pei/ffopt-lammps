@@ -153,11 +153,14 @@ cp -a "$HOME/.config/ffopt" "$HOME/.config/ffopt.backup"
 
 ```bash
 ffopt machine probe
-ffopt machine probe --partition CPU
+ffopt machine probe --partition YOUR_PARTITION
 ```
 
 该命令只读取环境，不修改配置。它会报告 Python、LAMMPS、MPI、CPU、GPU 和
-SLURM 分区，并给出保守建议。建议仍需结合本集群的节点共享和内存规则审核。
+SLURM 分区，并给出保守建议。`YOUR_PARTITION` 必须替换成用户所在集群的
+**SLURM 分区名**，不是节点名；先运行 `sinfo` 查看，例如 mag1 集群的分区名才是
+`CPU`。若不确定，直接运行不带 `--partition` 的第一条命令即可。建议仍需结合
+本集群的节点共享和内存规则审核。
 
 只有 `local` 有内置零配置 profile；集群必须先执行 `machine configure` 并使用
 明确名称，不能依赖隐藏的通用 `cluster`。profile 名必须以英文字母开头，后面只
@@ -172,6 +175,10 @@ SLURM 分区，并给出保守建议。建议仍需结合本集群的节点共�
 ffopt doctor ffopt.in --machine local
 ffopt run ffopt.in --machine local
 ```
+
+这里的 `local` 不是“服务器”的同义词，而是**绕过调度器，直接在执行命令的当前
+主机上运行**。它适合个人工作站；若在超算登录节点执行，计算也会落在登录节点，
+因此正式集群任务必须使用配置好的 SLURM profile。
 
 这个零配置模式为了稳妥只启用一个串行 worker。需要指定 LAMMPS/MPI 绝对路径或
 充分利用本机多核时，再创建下面的命名 profile：
@@ -210,7 +217,7 @@ ffopt machine configure \
   --lammps /absolute/path/to/lmp \
   --mpi /absolute/path/to/mpirun \
   --mpi-flavor openmpi \
-  --partition CPU \
+  --partition YOUR_PARTITION \
   --nodes 1 \
   --total-cores 48 \
   --workers 12 \
@@ -231,7 +238,7 @@ ffopt machine configure \
   --lammps /absolute/path/to/lmp \
   --mpi /absolute/path/to/mpirun \
   --mpi-flavor openmpi \
-  --partition CPU \
+  --partition YOUR_PARTITION \
   --nodes 2 \
   --total-cores 96 \
   --workers 24 \
@@ -267,6 +274,36 @@ FFOpt 可以及时判失败并继续其他候选，还能留下时间写 checkpo
 
 多次执行 `machine configure` 时，不加 `--force` 会拒绝覆盖；加 `--force`
 只替换同名 profile，不会追加重复表，也不会删除其他机器配置。
+
+配置保存在 `~/.config/ffopt/machines.toml`。新版只保存公共资源一次，不再为
+BO、sample、NN、AL 重复整段 SLURM 参数。一个双节点 profile 的核心内容类似：
+
+```toml
+[machines.cluster-2node]
+format = 2
+backend = "slurm"
+
+[machines.cluster-2node.lammps]
+executable = "/absolute/path/to/lmp"
+mpiexec = "/absolute/path/to/mpirun"
+mpi_flavor = "openmpi"
+timeout = 216000
+
+[machines.cluster-2node.parallel]
+workers = 24
+mpi_ranks = 4
+omp_threads = 1
+
+[machines.cluster-2node.slurm]
+partition = "YOUR_PARTITION"
+nodes = 2
+total_cores = 96
+walltime = "14-00:00:00"
+memory_per_node = "64G"
+```
+
+FFOpt 在运行时自动展开各阶段资源。旧版展开式配置仍可读取；重新执行同名
+`machine configure ... --force` 即可写成简洁格式。
 
 ### 3.5 机器验收
 
@@ -330,10 +367,36 @@ BTAH_Au111_molecule.data
 
 ### 4.4 检查 data
 
+FFOpt 的安装包已经附带 BTAH 回归数据。无需先寻找或下载文件，可以直接检查：
+
 ```bash
-ffopt inspect BTAH_bulk.data
-ffopt data check --bulk BTAH_bulk.data --single BTAH_single.data --strict
+ffopt inspect builtin:data/bulk/BTAH_822_bulk.data
+ffopt data check \
+  --bulk builtin:data/bulk/BTAH_822_bulk.data \
+  --single builtin:data/molecule/BTAH_822_single.data \
+  --strict
 ```
+
+`builtin:` 表示从当前 FFOpt 安装包中读取只读示例资源。若希望看到并修改一份本地
+BTAH 示例，先复制完整验收项目：
+
+```bash
+ffopt self-test --prepare-only --workdir ./ffopt-btah-example
+cd ./ffopt-btah-example
+ffopt inspect data/bulk/BTAH_822_bulk.data
+ffopt data check \
+  --bulk data/bulk/BTAH_822_bulk.data \
+  --single data/molecule/BTAH_822_single.data \
+  --strict
+```
+
+路径规则必须分清：
+
+- `ffopt inspect`、`ffopt data check` 和 `ffopt init` 的普通相对路径，从终端当前
+  目录（`pwd` 显示的位置）开始解析。
+- `ffopt.in` 内的相对路径，从该 `ffopt.in` 所在目录开始解析，与从哪里启动命令
+  无关。
+- 路径含空格时加引号；运行前可用 `pwd` 和 `ls 路径` 确认文件确实存在。
 
 吸附体系：
 
@@ -369,8 +432,8 @@ provenance 自动记录，最终结果由 validation 状态决定。
 
 ```bash
 ffopt init btah_charge_only \
-  --bulk-data BTAH_bulk.data \
-  --single-data BTAH_single.data \
+  --bulk-data builtin:data/bulk/BTAH_822_bulk.data \
+  --single-data builtin:data/molecule/BTAH_822_single.data \
   --cells 8 2 2 \
   --mode charge_only \
   --target a=4.2422,1.0,A \
@@ -400,8 +463,11 @@ ffopt init btah_charge_only \
 
 `--target` 的完整格式为
 `NAME=VALUE[,WEIGHT[,UNIT[,TOLERANCE]]]`。例如
-`density=1.3285,1.0,g/cm3,0.03`。省略 tolerance 时，`ffopt init` 会把当前默认值
-明确写进 `ffopt.in`，用户仍应根据实验误差和拟合用途审核它。
+`density=1.3285,1.0,g/cm3,0.03`。`weight` 决定该性质对 objective 的相对贡献；
+`tolerance` 是最终 LAMMPS 验证使用的**绝对误差门槛**，单位与目标性质相同，
+不参与 objective。例如 `a=4.2422,1.0,A,0.15` 要求最终
+`|a_calc - 4.2422| <= 0.15 A`。省略 tolerance 时，`ffopt init` 会按当前默认规则
+`max(目标绝对值的 3%, 1e-6)` 明确写入 `ffopt.in`；用户仍应按实验误差和用途审核。
 
 ## 6. 编辑 `ffopt.in`
 

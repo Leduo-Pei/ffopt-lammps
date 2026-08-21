@@ -25,6 +25,16 @@ Use `ffopt <command> --help` for every option.
 property. Use `ffopt --debug COMMAND ...` to retain a full traceback while
 diagnosing an unexpected native-installation problem.
 
+`init`, `inspect`, and `data check` accept either ordinary paths or packaged
+references such as `builtin:data/bulk/BTAH_822_bulk.data`. Ordinary relative
+paths start from the current shell directory. Relative paths inside
+`ffopt.in` start from the directory containing that input file. Prepare a
+visible copy of all BTAH files with:
+
+```bash
+ffopt self-test --prepare-only --workdir ./ffopt-btah-example
+```
+
 ## Machine profiles
 
 ```bash
@@ -37,7 +47,10 @@ ffopt machine test --name NAME
 
 `configure --force` replaces the named profile only. Profiles are stored in
 `~/.config/ffopt/machines.toml`. `local` is the only built-in profile; a
-SLURM machine must be configured under an explicit name.
+SLURM machine must be configured under an explicit name. `local` means direct
+execution on the current host without scheduler submission; do not use it for
+production on a cluster login node. A `machine probe --partition NAME` value
+is a site-specific SLURM partition reported by `sinfo`, not a node name.
 
 ## Execution
 

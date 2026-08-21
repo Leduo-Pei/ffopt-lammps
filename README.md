@@ -66,8 +66,9 @@ a calculation. Change `ffopt.in` and start a new campaign when the scientific
 input changes.
 
 When `lmp` is already on `PATH`, `--machine local` works without a profile and
-uses one serial worker. A named profile is only needed for explicit paths or
-parallel resources.
+uses one serial worker. `local` executes directly on the current host and does
+not submit through SLURM, so do not use it for production on a cluster login
+node. A named profile is needed for explicit paths or parallel resources.
 
 ## Install
 
@@ -95,11 +96,14 @@ LAMMPS is an external dependency. A CPU-only PyTorch installation is valid;
 ## Configure and verify a machine
 
 ```bash
-ffopt machine probe --partition CPU
+ffopt machine probe --partition YOUR_PARTITION
 ffopt machine configure --auto --name cluster-1node \
-  --backend slurm --partition CPU --nodes 1 --force
+  --backend slurm --partition YOUR_PARTITION --nodes 1 --force
 ffopt machine test --name cluster-1node
 ```
+
+`YOUR_PARTITION` is a site-specific SLURM partition reported by `sinfo`, not a
+compute-node name. Omit `--partition` from `probe` to list all visible choices.
 
 Before fitting a new material, run the packaged scientific acceptance test:
 
@@ -116,7 +120,22 @@ does not change with the machine.
 
 ## Create a project
 
-Validate the data contract first:
+The BTAH acceptance data is included in every wheel. It can be inspected
+without finding a repository checkout:
+
+```bash
+ffopt inspect builtin:data/bulk/BTAH_822_bulk.data
+ffopt data check \
+  --bulk builtin:data/bulk/BTAH_822_bulk.data \
+  --single builtin:data/molecule/BTAH_822_single.data --strict
+```
+
+Use `ffopt self-test --prepare-only --workdir ./ffopt-btah-example` when you
+want a visible local copy. Ordinary command-line relative paths are resolved
+from the current shell directory; paths inside `ffopt.in` are resolved from
+the input file's directory.
+
+For your own material, validate the data contract first:
 
 ```bash
 ffopt data check --bulk crystal.data --single molecule.data

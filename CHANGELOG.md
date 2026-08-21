@@ -12,6 +12,15 @@ expectations while the public API remains in alpha.
   ambiguous `mpiexec`/`mpirun` paths instead of passing Open MPI-only flags to
   Intel MPI/Hydra. Machine acceptance now exercises every configured worker
   even when the complete worker pool fits on one SLURM node.
+- Store newly configured machines in a concise profile schema while expanding
+  the existing stage-specific runtime resources internally; legacy expanded
+  TOML and YAML profiles remain readable.
+- Let `init`, `inspect`, and `data check` consume packaged `builtin:data/...`
+  references, document the exact BTAH example paths, and distinguish shell-
+  relative paths from paths relative to `ffopt.in`.
+- Separate local-workstation and SLURM instructions in generated projects,
+  clarify that `local` bypasses the scheduler, and identify `--partition` as a
+  site-specific SLURM partition rather than a node name.
 
 ## 0.3.0a4 - 2026-08-21
 

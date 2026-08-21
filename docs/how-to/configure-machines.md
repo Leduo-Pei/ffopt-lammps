@@ -8,11 +8,13 @@ workstation and a cluster without changing its scientific input.
 
 ```bash
 ffopt machine probe
-ffopt machine probe --partition CPU
+ffopt machine probe --partition YOUR_PARTITION
 ```
 
 The probe is advisory. Always verify the scheduler's CPU, memory, MPI, and GPU
 policies with the cluster administrator.
+`YOUR_PARTITION` is a SLURM partition reported by `sinfo`, not a compute-node
+name. Omit the filter when you want the probe to list all visible partitions.
 
 ## Configure profiles
 
@@ -24,7 +26,10 @@ ffopt doctor ffopt.in --machine local
 ffopt run ffopt.in --machine local
 ```
 
-That zero-configuration profile deliberately uses one serial worker. Create a
+`local` means direct execution on the current host, with no `sbatch` or `srun`.
+It is appropriate for a workstation but should not be used for production on
+a cluster login node. That zero-configuration profile deliberately uses one
+serial worker. Create a
 named profile when executable paths are not on `PATH` or when you want
 controlled MPI and parallel-worker settings.
 
@@ -51,7 +56,7 @@ SLURM examples for 48-core nodes:
 ffopt machine configure --name cluster-1node \
   --backend slurm --lammps /path/to/lmp --mpi /path/to/mpirun \
   --mpi-flavor openmpi \
-  --partition CPU --nodes 1 --total-cores 48 \
+  --partition YOUR_PARTITION --nodes 1 --total-cores 48 \
   --workers 12 --mpi-ranks 4 --omp-threads 1 \
   --memory-per-node 64G --walltime 14-00:00:00 \
   --timeout 216000 --force
@@ -59,7 +64,7 @@ ffopt machine configure --name cluster-1node \
 ffopt machine configure --name cluster-2node \
   --backend slurm --lammps /path/to/lmp --mpi /path/to/mpirun \
   --mpi-flavor openmpi \
-  --partition CPU --nodes 2 --total-cores 96 \
+  --partition YOUR_PARTITION --nodes 2 --total-cores 96 \
   --workers 24 --mpi-ranks 4 --omp-threads 1 \
   --memory-per-node 64G --walltime 14-00:00:00 \
   --timeout 216000 --force
@@ -106,6 +111,37 @@ ffopt machine list
 ffopt machine show --name cluster-1node
 ffopt machine test --name cluster-1node
 ```
+
+Current releases store each profile concisely: executable paths, worker
+topology, and common SLURM resources appear once. FFOpt expands them into the
+stage-specific runtime allocation internally. For example:
+
+```toml
+[machines.cluster-2node]
+format = 2
+backend = "slurm"
+
+[machines.cluster-2node.lammps]
+executable = "/path/to/lmp"
+mpiexec = "/path/to/mpirun"
+mpi_flavor = "openmpi"
+timeout = 216000
+
+[machines.cluster-2node.parallel]
+workers = 24
+mpi_ranks = 4
+omp_threads = 1
+
+[machines.cluster-2node.slurm]
+partition = "YOUR_PARTITION"
+nodes = 2
+total_cores = 96
+walltime = "14-00:00:00"
+memory_per_node = "64G"
+```
+
+Legacy expanded profiles remain readable. Re-run `machine configure` with
+`--force` to rewrite one named profile in the compact format.
 
 For a multi-node profile, `machine test` allocates its configured node and
 worker topology and runs one tiny LAMMPS calculation in every worker slot. A

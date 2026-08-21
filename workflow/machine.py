@@ -76,6 +76,60 @@ def _machine_document() -> dict[str, Any]:
     return data
 
 
+def _expand_compact_machine_profile(
+    name: str, data: dict[str, Any]
+) -> dict[str, Any]:
+    """Expand the concise on-disk schema into the existing runtime schema."""
+    backend = str(data.get("backend", "local"))
+    lammps = dict(data.get("lammps", {}))
+    parallel = dict(data.get("parallel", {}))
+    slurm = dict(data.get("slurm", {}))
+    profile = build_machine_profile(
+        name=name,
+        backend=backend,
+        lammps=lammps.get("executable"),
+        mpi=lammps.get("mpiexec"),
+        mpi_flavor=lammps.get("mpi_flavor"),
+        workers=parallel.get("workers"),
+        ranks=parallel.get("mpi_ranks", 1),
+        omp_threads=parallel.get("omp_threads", 1),
+        timeout=lammps.get("timeout", 21600),
+        partition=slurm.get("partition"),
+        qos=slurm.get("qos"),
+        cores=slurm.get("total_cores"),
+        nodes=slurm.get("nodes", 1),
+        gpus=slurm.get("gpus", 0),
+        walltime=slurm.get("walltime", "24:00:00"),
+        memory_per_node=slurm.get("memory_per_node"),
+    )
+    if parallel.get("launcher"):
+        profile["parallel"]["scheduler_launcher"] = str(parallel["launcher"])
+    if isinstance(data.get("machine_learning"), dict):
+        profile["machine_learning"].update(data["machine_learning"])
+    if backend == "slurm":
+        if isinstance(slurm.get("env_setup"), list):
+            profile["cluster"]["env_setup"] = list(slurm["env_setup"])
+        for stage, override in dict(data.get("stages", {})).items():
+            if not isinstance(override, dict):
+                raise TypeError(
+                    f"Machine profile stage override {stage!r} must be a table"
+                )
+            if stage not in profile["cluster"]:
+                raise ValueError(f"Unknown machine-profile stage override: {stage!r}")
+            normalized = dict(override)
+            for concise, runtime in (
+                ("walltime", "time"),
+                ("memory_per_node", "mem"),
+                ("gpus", "gpu"),
+                ("total_cores", "cores"),
+            ):
+                if concise in normalized:
+                    normalized[runtime] = normalized.pop(concise)
+            profile["cluster"][stage].update(normalized)
+    profile["_storage_profile"] = dict(data)
+    return profile
+
+
 def load_machine_profile(name: str) -> dict[str, Any] | None:
     path = machine_path(name)
     document = _machine_document()
@@ -90,9 +144,13 @@ def load_machine_profile(name: str) -> dict[str, Any] | None:
     if not isinstance(data, dict):
         raise TypeError(f"Machine profile must contain a mapping: {path}")
     data = dict(data)
-    data.setdefault("machine", {})["name"] = name
-    data["_machine_profile_path"] = str(path)
-    return data
+    if int(data.get("format", 0) or 0) == 2:
+        expanded = _expand_compact_machine_profile(name, data)
+    else:
+        expanded = data
+        expanded.setdefault("machine", {})["name"] = name
+    expanded["_machine_profile_path"] = str(path)
+    return expanded
 
 
 def available_machine_profiles() -> list[str]:
@@ -668,6 +726,36 @@ def build_machine_profile(
             "validate": dict(single_lammps),
             "finalize": {**single_python, "cores": 1},
         }
+    storage: dict[str, Any] = {
+        "format": 2,
+        "backend": backend,
+        "lammps": {
+            "executable": profile["lammps"]["executable"],
+            "mpiexec": profile["lammps"]["mpiexec"],
+            **(
+                {"mpi_flavor": profile["lammps"]["mpi_flavor"]}
+                if profile["lammps"].get("mpi_flavor")
+                else {}
+            ),
+            "timeout": timeout,
+        },
+        "parallel": {
+            "workers": workers,
+            "mpi_ranks": ranks,
+            "omp_threads": omp_threads,
+        },
+    }
+    if backend == "slurm":
+        storage["slurm"] = {
+            **({"partition": partition} if partition else {}),
+            **({"qos": qos} if qos else {}),
+            "nodes": nodes,
+            "total_cores": allocated_cpus,
+            "walltime": walltime,
+            **({"memory_per_node": memory} if memory != "0" else {}),
+            **({"gpus": gpus} if gpus else {}),
+        }
+    profile["_storage_profile"] = storage
     return profile
 
 
@@ -685,9 +773,12 @@ def save_machine_profile(
             f"Machine profile {name!r} already exists in {path}. Pass --force to replace it."
         )
     path.parent.mkdir(parents=True, exist_ok=True)
-    serializable = {
-        key: value for key, value in profile.items() if not key.startswith("_")
-    }
+    stored = profile.get("_storage_profile")
+    serializable = (
+        dict(stored)
+        if isinstance(stored, dict)
+        else {key: value for key, value in profile.items() if not key.startswith("_")}
+    )
     machines[name] = serializable
     payload = tomli_w.dumps(document).encode("utf-8")
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
