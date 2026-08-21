@@ -859,29 +859,118 @@ def cmd_explain(args: argparse.Namespace) -> None:
     config = project.runtime_config
     free = []
     fixed = []
+    charge_enabled = bool(config["charge"].get("enabled", False))
     for atom_type in config["atom_types"]:
         for name, value in atom_type["params"].items():
+            if name == "charge" and not charge_enabled:
+                continue
             label = f"{atom_type['label']}_{name}"
             (free if isinstance(value, dict) else fixed).append(label)
+    derived_parameters = []
+    derived_targets = set()
+    for item in config["pair_params"].get("derived_params", []):
+        target = str(item["target"])
+        expression = str(item["expression"])
+        comment = str(item.get("comment", "")).strip()
+        description = f"{target} <- {expression}"
+        if comment:
+            description += f" ({comment})"
+        derived_parameters.append(description)
+        derived_targets.add(target)
     neutrality = config["charge"]["neutrality_constraint"]
-    derived = "-"
     if neutrality.get("enabled"):
         type_id = neutrality.get("derive_from_type")
         atom_type = next(item for item in config["atom_types"] if item["type"] == type_id)
-        derived = f"{atom_type['label']}_charge"
-        free = [name for name in free if name != derived]
+        target = f"{atom_type['label']}_charge"
+        if target not in derived_targets:
+            derived_parameters.append(f"{target} <- charge neutrality")
+            derived_targets.add(target)
+    free = [name for name in free if name not in derived_targets]
+    fixed = [name for name in fixed if name not in derived_targets]
     print(f"Input                 : {project.path}")
     print(f"Project               : {project.name}")
     print(f"Workflow              : {' -> '.join(_public_workflow(project))}")
     print(f"Independent dimensions: {compilation.dimensions}")
     print(f"Free parameters       : {len(free)}")
+    print(f"  {', '.join(free) or '-'}")
     print(f"Fixed parameters      : {len(fixed)}")
-    print(f"Derived parameter     : {derived}")
+    print(f"  {', '.join(fixed) or '-'}")
+    print("Derived parameters    :")
+    for item in derived_parameters or ["-"]:
+        print(f"  {item}")
     mixing = config["pair_params"]["mixing_rule"]
     mixing_detail = _mixing_rule_description(mixing)
     print(f"LAMMPS mixing rule    : {mixing} ({mixing_detail})")
     print("\nProperties:")
     for prop in compilation.document.properties:
+        if prop.name == "elasticity":
+            elasticity = config.get("elasticity", {})
+            modules = elasticity.get("modules", {})
+            evaluators = [
+                str(module.get("evaluator", fidelity))
+                for fidelity, module in modules.items()
+            ]
+            print(
+                f"  {prop.name:14s} {'role-aware modules':24s} "
+                f"protocol={' + '.join(evaluators) or 'module default'}"
+            )
+            for fidelity, module in modules.items():
+                print(
+                    f"    module {fidelity}: role={module.get('role', '-')} "
+                    f"fidelity={module.get('fidelity', '-')} "
+                    f"cost={module.get('cost_class', '-')}"
+                )
+                targets = module.get("targets", {})
+                target_text = ", ".join(
+                    f"{name}={float(target['value']):g} {target.get('unit', 'GPa')}"
+                    for name, target in targets.items()
+                )
+                print(f"      targets: {target_text or '-'}")
+
+            selection = elasticity.get("selection", {})
+            gates = selection.get("structural_gates", {})
+            gate_text = []
+            for name, gate in gates.items():
+                if "maximum_relative_error_percent" in gate:
+                    limit = gate["maximum_relative_error_percent"]
+                    gate_text.append(f"{name}<={float(limit):g}%")
+                elif "maximum_absolute_error_degree" in gate:
+                    limit = gate["maximum_absolute_error_degree"]
+                    gate_text.append(f"{name}<={float(limit):g} degree")
+            print(f"    structural gates: {', '.join(gate_text) or '-'}")
+
+            reporting = elasticity.get("reporting", {})
+            tier = reporting.get("mechanical_tier_percent", "-")
+            tier_kind = (
+                "hard gate"
+                if reporting.get("tier_is_hard_gate", False)
+                else "soft/reporting only"
+            )
+            born = selection.get("born_stability", {}).get("required", False)
+            minimum_r2 = selection.get("fit_quality", {}).get("minimum_r2", "-")
+            print(
+                "    quality controls: "
+                f"tier={tier}% ({tier_kind}), "
+                f"Born={'required' if born else 'off'}, R2>={minimum_r2}"
+            )
+
+            static_protocol = modules.get("static", {}).get("protocol", {})
+            dynamic_module = modules.get("dynamic", {})
+            dynamic_protocol = dynamic_module.get("protocol", {})
+            strains = static_protocol.get(
+                "strain_magnitudes", dynamic_protocol.get("strain_magnitudes", [])
+            )
+            promotion_seeds = dynamic_protocol.get("seeds", [])
+            validation_seeds = dynamic_module.get("validation_protocol", {}).get(
+                "seeds", []
+            )
+            print(
+                "    protocols: "
+                f"strains={list(strains)}, "
+                f"promotion_seeds={list(promotion_seeds)}, "
+                f"validation_seeds={list(validation_seeds)}"
+            )
+            continue
         role = "fit + final validation" if prop.fitted else "final validation only"
         protocol = prop.settings.get("protocol")
         if prop.name == "bulk":
@@ -970,11 +1059,15 @@ def cmd_explain(args: argparse.Namespace) -> None:
         )
     if "nn" in stages:
         nn = config["nn"]
-        print(
-            "ANN                   : "
-            f"method={nn.get('model')} ensemble={nn.get('ensemble_size')} "
-            f"layers={nn.get('hidden_layers')} epochs={nn.get('max_epochs')}"
-        )
+        model = str(nn.get("model"))
+        details = [f"method={model}"]
+        if model == "mlp_ensemble":
+            details.extend([
+                f"ensemble={nn.get('ensemble_size')}",
+                f"layers={nn.get('hidden_layers')}",
+                f"epochs={nn.get('max_epochs')}",
+            ])
+        print(f"Surrogate             : {' '.join(details)}")
     if "al" in stages:
         active_learning = config["active_learning"]
         print(

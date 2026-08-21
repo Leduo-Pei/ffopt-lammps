@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from engine.parameter_space import build_parameter_space
+from workflow.cli import build_parser
 from workflow.input_compiler import compile_input
 from workflow.input_file import InputFileError, parse_input_file
 from workflow.pipeline import PipelineRunner
@@ -119,6 +120,44 @@ def test_packaged_fe_full_and_non_scientific_canary_compile(tmp_path):
     assert canary.config["elasticity"]["modules"]["dynamic"][
         "validation_protocol"
     ]["seeds"] == [404]
+
+
+def test_explain_reports_material_parameter_graph_and_elasticity_contract(
+    tmp_path, capsys
+):
+    source = ROOT / "examples" / "fe_bcc" / "ffopt.in"
+    data = _elemental_data(tmp_path)
+    text = source.read_text(encoding="utf-8")
+    for filename in (
+        "Fe_a_2type_555.data",
+        "Fe_a_2type_555_complete.data",
+        "Fe_a_2type_555_split.data",
+    ):
+        text = text.replace(f"data/{filename}", data.as_posix())
+    input_path = _write(tmp_path, text, "explain.in")
+
+    parser = build_parser()
+    args = parser.parse_args(["explain", str(input_path)])
+    args.function(args)
+    output = capsys.readouterr().out
+
+    assert "Independent dimensions: 3" in output
+    assert "Free parameters       : 3" in output
+    assert "Fe_corner_epsilon, Fe_corner_sigma, Fe_body_sigma" in output
+    assert "Fe_body_epsilon" not in output.split("Fixed parameters", maxsplit=1)[0]
+    assert "Derived parameters    :" in output
+    assert "Fe_body_epsilon <- Fe_corner_epsilon (tie epsilon all)" in output
+    assert "Surrogate             : method=gp" in output
+    assert "Surrogate             : method=gp ensemble=" not in output
+    assert "module static: role=objective fidelity=static_0k cost=low" in output
+    assert "targets: B=173.1 GPa, Cprime=52.5 GPa, C44=121.9 GPa" in output
+    assert "module dynamic: role=promotion fidelity=dynamic_300k cost=high" in output
+    assert "targets: B=166.2 GPa, Cprime=48.15 GPa, C44=115.87 GPa" in output
+    assert "lattice<=1%, angles<=1 degree, density<=1%, surface<=5%" in output
+    assert "tier=20.0% (soft/reporting only), Born=required, R2>=0.98" in output
+    assert "strains=[0.002, 0.004, 0.006]" in output
+    assert "promotion_seeds=[101, 202, 303]" in output
+    assert "validation_seeds=[404, 505, 606]" in output
 
 
 def test_elemental_material_compiles_charge_defaults_and_parameter_graph(tmp_path):

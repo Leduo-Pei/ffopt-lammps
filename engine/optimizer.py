@@ -92,6 +92,64 @@ warnings.filterwarnings("ignore", message=".*A not p.d..*")
 MAX_GP_POINTS = 512
 
 
+def property_report_flag(
+    result: Dict[str, Any],
+    property_name: str,
+    target_info: Dict[str, Any],
+) -> str:
+    """Return an ``OK``/``!!`` report flag using the declared property gate.
+
+    Coverage-mode evaluations persist the exact gate decision, including
+    group-level relative-percent or absolute-degree rules.  Legacy evaluations
+    do not have that field, so their target tolerance is checked in the target's
+    native unit.  The historical five-percent display convention remains only
+    as a final fallback for inputs without a declared tolerance.
+    """
+    gate_key = f"structural_pass_{property_name}"
+    if gate_key in result:
+        value = result[gate_key]
+        if isinstance(value, (bool, np.bool_)):
+            passed = bool(value)
+        elif isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes", "on"}:
+                passed = True
+            elif normalized in {"false", "0", "no", "off"}:
+                passed = False
+            else:
+                return "!!"
+        elif isinstance(value, (int, float, np.integer, np.floating)):
+            numeric = float(value)
+            if not math.isfinite(numeric) or numeric not in {0.0, 1.0}:
+                return "!!"
+            passed = bool(numeric)
+        else:
+            return "!!"
+        return "OK" if passed else "!!"
+
+    tolerance = target_info.get("tolerance")
+    if tolerance is not None:
+        try:
+            calculated = float(result.get(f"calc_{property_name}", float("nan")))
+            target = float(target_info["value"])
+            tolerance_value = float(tolerance)
+        except (TypeError, ValueError):
+            return "!!"
+        passed = (
+            math.isfinite(calculated)
+            and math.isfinite(target)
+            and math.isfinite(tolerance_value)
+            and abs(calculated - target) <= tolerance_value + 1.0e-12
+        )
+        return "OK" if passed else "!!"
+
+    try:
+        error_percent = float(result.get(f"error_{property_name}", float("nan")))
+    except (TypeError, ValueError):
+        return "!!"
+    return "OK" if math.isfinite(error_percent) and error_percent < 5.0 else "!!"
+
+
 # ============================================================================
 # TuRBO
 # ============================================================================
@@ -440,7 +498,7 @@ class ForceFieldOptimizer:
             calc = float(best.get(f"calc_{prop}", float("nan")))
             target = float(info["value"])
             err = float(best.get(f"error_{prop}", float("nan")))
-            flag = "OK" if math.isfinite(err) and err < 5.0 else "!!"
+            flag = property_report_flag(best, prop, info)
             print(
                 f"    {prop:<14} {calc:>12.4f} {target:>10.4f} "
                 f"{err:>7.2f}%  {flag}"
@@ -2029,7 +2087,7 @@ class ForceFieldOptimizer:
             calc   = best.get(f"calc_{prop}", float("nan"))
             target = float(info["value"])
             err    = best.get(f"error_{prop}", float("nan"))
-            flag   = "OK" if err < 5.0 else "!!"
+            flag   = property_report_flag(best, prop, info)
             print(f"  {prop:<14} {calc:>12.4f} {target:>10.4f} {err:>7.2f}%  {flag}")
 
         # Pareto front (post-hoc)

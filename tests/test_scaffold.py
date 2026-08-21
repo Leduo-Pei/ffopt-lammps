@@ -173,7 +173,7 @@ def test_explain_reports_effective_pipeline_settings(capsys):
     ) in output
     assert "audit=off top_k=20 seeds=[101, 202, 303] audit_max_evaluations=0" in output
     assert "Sampling              : 48 points x 1 seeds" in output
-    assert "ANN                   : method=mlp_ensemble ensemble=2" in output
+    assert "Surrogate             : method=mlp_ensemble ensemble=2" in output
     assert "Active learning       : rounds=1 LAMMPS candidates/round=4" in output
     assert "Final acceptance      : tolerances=required objective_max=0.03" in output
 
