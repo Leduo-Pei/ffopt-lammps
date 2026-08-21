@@ -18,7 +18,7 @@ from .parameter_space import build_parameter_space
 
 def unique_top(frame: pd.DataFrame, names: list[str], top_k: int) -> pd.DataFrame:
     """Return the best distinct parameter vectors with audit metadata."""
-    frame = frame.sort_values("objective").copy()
+    frame = frame.sort_values("objective", kind="stable").copy()
     keys = frame[names].round(12).astype(str).agg("|".join, axis=1)
     frame = frame.loc[~keys.duplicated()].head(top_k).reset_index(drop=True)
     if "candidate_id" in frame.columns:
@@ -32,10 +32,56 @@ def unique_top(frame: pd.DataFrame, names: list[str], top_k: int) -> pd.DataFram
     return frame
 
 
+def load_audit_sources(
+    paths: list[Path], names: list[str], label: str | None = None
+) -> pd.DataFrame:
+    """Load an explicit, provenance-preserving union of measured candidates."""
+    source_frames = []
+    for source_index, source_path in enumerate(paths):
+        source_frame = pd.read_csv(source_path)
+        if label is not None:
+            if "label" not in source_frame.columns:
+                raise ValueError(
+                    f"--label {label!r} requested but source "
+                    f"{source_path} has no label column"
+                )
+            source_frame = source_frame.loc[
+                source_frame["label"].astype(str).eq(label)
+            ].copy()
+            if source_frame.empty:
+                raise ValueError(
+                    f"No source rows in {source_path} matched label {label!r}"
+                )
+            # active_learning.evaluate_batch preserves this order, so the
+            # index maps directly to lammps_round_N/eval_NNNN for reuse.
+            source_frame["source_eval_index"] = np.arange(len(source_frame))
+        source_frame = source_frame.reset_index(drop=True)
+        source_frame["source_path"] = str(source_path.resolve())
+        source_frame["source_index"] = int(source_index)
+        source_frame["source_row_index"] = np.arange(len(source_frame))
+        if "candidate_id" in source_frame.columns:
+            if "source_candidate_id" not in source_frame.columns:
+                source_frame["source_candidate_id"] = source_frame["candidate_id"]
+            source_frame = source_frame.drop(columns="candidate_id")
+        source_frames.append(source_frame)
+    return valid_source_rows(
+        pd.concat(source_frames, ignore_index=True, sort=False), names
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
-    parser.add_argument("--source", required=True, type=Path)
+    parser.add_argument(
+        "--source",
+        required=True,
+        action="append",
+        type=Path,
+        help=(
+            "Measured candidate table. Repeat --source to audit the unique "
+            "union of explicitly declared BO and Sample evidence."
+        ),
+    )
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--top-k", type=int, default=8)
     parser.add_argument(
@@ -75,23 +121,7 @@ def main() -> None:
                 f"Existing design has {len(design)} rows, requested {args.top_k}."
             )
     else:
-        source_frame = pd.read_csv(args.source)
-        if args.label is not None:
-            if "label" not in source_frame.columns:
-                raise ValueError(
-                    f"--label {args.label!r} requested but source has no label column"
-                )
-            source_frame = source_frame.loc[
-                source_frame["label"].astype(str).eq(args.label)
-            ].copy()
-            if source_frame.empty:
-                raise ValueError(
-                    f"No source rows matched label {args.label!r}"
-                )
-            # active_learning.evaluate_batch preserves this order, so the
-            # index maps directly to lammps_round_N/eval_NNNN for seed reuse.
-            source_frame["source_eval_index"] = np.arange(len(source_frame))
-        source = valid_source_rows(source_frame, names)
+        source = load_audit_sources(args.source, names, args.label)
         design = unique_top(source, names, args.top_k)
         atomic_csv(design, design_path)
 

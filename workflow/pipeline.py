@@ -388,14 +388,17 @@ class PipelineRunner:
     def _sample_command(self, output: Path) -> list[str]:
         settings = self._stage_settings("sample")
         if self.material_workflow:
-            # The material BO contract always declares this coverage artifact.
-            # Never choose a source by directory age or runtime existence.
-            source = self.root / "bo" / "coverage_anchors.csv"
+            # Material sampling has separate, explicit interior and boundary
+            # evidence.  Never choose either source by directory age or
+            # runtime existence.
+            source = self.root / "bo" / "feasible_archive.csv"
+            boundary_source = self.root / "bo" / "coverage_anchors.csv"
         else:
             # Preserve the prerelease molecular compatibility behaviour.
             source = self.root / "bo" / "stable_results.csv"
             if not source.exists():
                 source = self.root / "bo" / "all_results.csv"
+            boundary_source = None
         command = self._python_module(
             "engine.local_sampling",
             "--config", self.config_path,
@@ -410,6 +413,12 @@ class PipelineRunner:
             "--seeds", *settings.get("seeds", [101, 202, 303]),
             "--design-seed", settings.get("design_seed", 20260709),
         )
+        if boundary_source is not None:
+            command.extend([
+                "--boundary-source", str(boundary_source),
+                "--boundary-fraction",
+                str(settings.get("boundary_fraction", 0.0)),
+            ])
         max_workers = settings.get("max_workers")
         if max_workers:
             command.extend(["--max-workers", str(max_workers)])
@@ -575,20 +584,26 @@ class PipelineRunner:
                 command.append("--resume")
             return command
         if command_token == "audit":
-            source = (
-                self._latest_al_data()
-                if self._has_kind("al")
-                else bo_dir / "all_results.csv"
-            )
+            if self.material_workflow:
+                sources = [bo_dir / "all_results.csv"]
+                if self._has_kind("sample"):
+                    sources.append(sample_file)
+            else:
+                sources = [
+                    self._latest_al_data()
+                    if self._has_kind("al")
+                    else bo_dir / "all_results.csv"
+                ]
             top_k, seeds, max_workers = self._audit_settings()
             command = self._python_module(
                 "engine.stability_audit",
                 "--config", self.config_path,
-                "--source", source,
                 "--output-dir", output,
                 "--top-k", top_k,
                 "--seeds", *seeds,
             )
+            for source in sources:
+                command.extend(["--source", str(source)])
             if max_workers:
                 command.extend(["--max-workers", str(max_workers)])
             return command

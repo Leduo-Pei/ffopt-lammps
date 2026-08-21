@@ -52,7 +52,69 @@ def valid_source_rows(frame: pd.DataFrame, param_names: list[str]) -> pd.DataFra
         ].copy()
     needed = param_names + ["objective"]
     finite = np.isfinite(frame[needed].to_numpy(dtype=float)).all(axis=1)
-    return frame.loc[finite].sort_values("objective").reset_index(drop=True)
+    return frame.loc[finite].sort_values(
+        "objective", kind="stable"
+    ).reset_index(drop=True)
+
+
+def _select_centers(
+    source: pd.DataFrame,
+    names: list[str],
+    lo: np.ndarray,
+    span: np.ndarray,
+    count: int,
+    selection: str,
+    pool_multiplier: int,
+) -> tuple[pd.DataFrame, np.ndarray]:
+    """Select deterministic, optionally diverse normalized sampling centers."""
+    if source.empty or count <= 0:
+        return source.head(0).copy(), np.empty((0, len(names)), dtype=float)
+    if selection == "diverse":
+        pool_count = min(len(source), max(count, count * pool_multiplier))
+        pool = source.head(pool_count).copy()
+        pool_unit = (pool[names].to_numpy(dtype=float) - lo) / span
+        selected = [0]
+        nearest_sq = np.sum((pool_unit - pool_unit[0]) ** 2, axis=1)
+        while len(selected) < min(count, len(pool)):
+            nearest_sq[selected] = -np.inf
+            next_index = int(np.argmax(nearest_sq))
+            selected.append(next_index)
+            distance_sq = np.sum(
+                (pool_unit - pool_unit[next_index]) ** 2, axis=1
+            )
+            nearest_sq = np.minimum(nearest_sq, distance_sq)
+        selected_frame = pool.iloc[selected].copy().reset_index(drop=True)
+    elif selection == "top":
+        selected_frame = source.head(min(count, len(source))).copy()
+    else:
+        raise ValueError("center_selection must be 'top' or 'diverse'")
+    centers = (selected_frame[names].to_numpy(dtype=float) - lo) / span
+    return selected_frame, centers
+
+
+def sampling_allocation(
+    n_points: int, global_fraction: float, boundary_fraction: float
+) -> dict[str, int]:
+    """Return deterministic integer quotas whose sum is exactly ``n_points``."""
+    if n_points < 1:
+        raise ValueError("n_points must be positive")
+    if not 0.0 <= global_fraction <= 1.0:
+        raise ValueError("global_fraction must lie between 0 and 1.")
+    if not 0.0 <= boundary_fraction <= 1.0:
+        raise ValueError("boundary_fraction must lie between 0 and 1.")
+    if global_fraction + boundary_fraction > 1.0 + 1.0e-12:
+        raise ValueError(
+            "global_fraction + boundary_fraction cannot exceed 1."
+        )
+    global_count = int(round(n_points * global_fraction))
+    boundary_count = int(round(n_points * boundary_fraction))
+    if global_count + boundary_count > n_points:
+        boundary_count = n_points - global_count
+    return {
+        "local_elite": n_points - global_count - boundary_count,
+        "boundary_local": boundary_count,
+        "global_sobol": global_count,
+    }
 
 
 def generate_design(
@@ -66,62 +128,77 @@ def generate_design(
     seed: int,
     center_selection: str = "top",
     center_pool_multiplier: int = 5,
+    boundary_source: pd.DataFrame | None = None,
+    boundary_fraction: float = 0.0,
 ) -> pd.DataFrame:
     names = [item[0] for item in param_space]
     lo = np.asarray([item[1] for item in param_space], dtype=float)
     hi = np.asarray([item[2] for item in param_space], dtype=float)
     span = hi - lo
-    if source.empty:
-        raise ValueError("The source BO table contains no successful finite rows.")
-    if center_selection == "diverse":
-        pool_count = min(
-            len(source),
-            max(elite_centers, elite_centers * center_pool_multiplier),
-        )
-        pool = source.head(pool_count).copy()
-        pool_unit = (pool[names].to_numpy(dtype=float) - lo) / span
-        selected = [0]
-        nearest_sq = np.sum((pool_unit - pool_unit[0]) ** 2, axis=1)
-        while len(selected) < min(elite_centers, len(pool)):
-            nearest_sq[selected] = -np.inf
-            next_index = int(np.argmax(nearest_sq))
-            selected.append(next_index)
-            distance_sq = np.sum(
-                (pool_unit - pool_unit[next_index]) ** 2, axis=1
-            )
-            nearest_sq = np.minimum(nearest_sq, distance_sq)
-        elite = pool.iloc[selected].copy().reset_index(drop=True)
-    elif center_selection == "top":
-        elite = source.head(min(elite_centers, len(source))).copy()
-    else:
-        raise ValueError("center_selection must be 'top' or 'diverse'")
-    centers = (elite[names].to_numpy(dtype=float) - lo) / span
-
-    if not 0.0 <= global_fraction <= 1.0:
-        raise ValueError("global_fraction must lie between 0 and 1.")
+    boundary_source = (
+        source.head(0).copy() if boundary_source is None else boundary_source.copy()
+    )
+    if source.empty and boundary_source.empty:
+        raise ValueError("The source tables contain no successful finite rows.")
+    allocation = sampling_allocation(
+        n_points, global_fraction, boundary_fraction
+    )
+    # A campaign may legitimately observe no strict feasible BO point yet.  In
+    # that case the closest measured boundary anchors are the only defensible
+    # local centers.  Conversely, if no near-boundary row exists, reallocate
+    # that requested quota to exact feasible local centers.  The caller records
+    # requested and realized counts in metadata.json.
+    local_source = source if not source.empty else boundary_source
+    boundary_requested = allocation["boundary_local"]
+    if boundary_requested and boundary_source.empty:
+        allocation["local_elite"] += boundary_requested
+        allocation["boundary_local"] = 0
+    elite, centers = _select_centers(
+        local_source, names, lo, span, elite_centers, center_selection,
+        center_pool_multiplier,
+    )
+    boundary_elite, boundary_centers = _select_centers(
+        boundary_source, names, lo, span, elite_centers, center_selection,
+        center_pool_multiplier,
+    )
 
     # A scrambled Sobol sequence gives deterministic, space-filling directions.
     pool_size = max(2048, int(2 ** np.ceil(np.log2(n_points * 4))))
-    global_count = int(round(n_points * global_fraction))
-    local_count = n_points - global_count
+    global_count = allocation["global_sobol"]
+    boundary_count = allocation["boundary_local"]
+    local_count = allocation["local_elite"]
     global_unit = qmc.Sobol(d=len(names), scramble=True, seed=seed).random_base2(
         int(np.log2(pool_size))
     )
     local_unit = qmc.Sobol(d=len(names) + 1, scramble=True, seed=seed + 1).random_base2(
         int(np.log2(pool_size))
     )
+    boundary_unit = qmc.Sobol(
+        d=len(names) + 1, scramble=True, seed=seed + 2
+    ).random_base2(int(np.log2(pool_size)))
     rng = np.random.default_rng(seed)
     radius_order = np.resize(np.asarray(radii, dtype=float), pool_size)
     rng.shuffle(radius_order)
+    boundary_radius_order = np.resize(np.asarray(radii, dtype=float), pool_size)
+    np.random.default_rng(seed + 1).shuffle(boundary_radius_order)
     existing = {
         tuple(np.round(row, 12))
         for row in source[names].to_numpy(dtype=float)
     }
+    existing.update(
+        tuple(np.round(row, 12))
+        for row in boundary_source[names].to_numpy(dtype=float)
+    )
     accepted: list[dict] = []
     seen = set(existing)
 
-    def add_candidate(values: np.ndarray, mode: str, center_index: int | None,
-                      radius: float | None) -> bool:
+    def add_candidate(
+        values: np.ndarray,
+        mode: str,
+        center_index: int | None,
+        radius: float | None,
+        center_frame: pd.DataFrame | None = None,
+    ) -> bool:
         key = tuple(np.round(values, 12))
         if key in seen:
             return False
@@ -134,8 +211,8 @@ def generate_design(
             "sampling_mode": mode,
             "center_rank": center_index + 1 if center_index is not None else 0,
             "center_objective": (
-                float(elite.iloc[center_index]["objective"])
-                if center_index is not None else np.nan
+                float(center_frame.iloc[center_index]["objective"])
+                if center_index is not None and center_frame is not None else np.nan
             ),
             "radius": radius,
         }
@@ -149,25 +226,58 @@ def generate_design(
             if len(accepted) >= global_count:
                 break
 
-    local_added = 0
-    if local_count > 0:
-        for row_index, row in enumerate(local_unit):
-            center_index = min(int(row[0] * len(centers)), len(centers) - 1)
-            direction = 2.0 * row[1:] - 1.0
-            radius = float(radius_order[row_index])
-            normalized = np.clip(
-                centers[center_index] + radius * direction, 0.0, 1.0
+    def add_local_quota(
+        rows: np.ndarray,
+        selected_centers: np.ndarray,
+        selected_frame: pd.DataFrame,
+        radii_order: np.ndarray,
+        count: int,
+        mode: str,
+    ) -> int:
+        added = 0
+        if count <= 0:
+            return added
+        if len(selected_centers) == 0:
+            raise RuntimeError(f"No centers are available for {mode} sampling")
+        for row_index, row in enumerate(rows):
+            center_index = min(
+                int(row[0] * len(selected_centers)), len(selected_centers) - 1
             )
-            if add_candidate(values=lo + normalized * span, mode="local_elite",
-                             center_index=center_index, radius=radius):
-                local_added += 1
-            if local_added >= local_count:
+            direction = 2.0 * row[1:] - 1.0
+            radius = float(radii_order[row_index])
+            normalized = np.clip(
+                selected_centers[center_index] + radius * direction, 0.0, 1.0
+            )
+            if add_candidate(
+                values=lo + normalized * span,
+                mode=mode,
+                center_index=center_index,
+                radius=radius,
+                center_frame=selected_frame,
+            ):
+                added += 1
+            if added >= count:
                 break
+        return added
+
+    local_added = add_local_quota(
+        local_unit, centers, elite, radius_order, local_count, "local_elite"
+    )
+    boundary_added = add_local_quota(
+        boundary_unit,
+        boundary_centers,
+        boundary_elite,
+        boundary_radius_order,
+        boundary_count,
+        "boundary_local",
+    )
 
     if len(accepted) < n_points:
         raise RuntimeError(
             f"Only generated {len(accepted)}/{n_points} feasible unique points "
-            f"({global_count} global requested, {local_count} local requested). "
+            f"({global_count} global, {boundary_count} boundary, "
+            f"{local_count} local requested; realized {local_added} local and "
+            f"{boundary_added} boundary). "
             "Increase the Sobol pool or relax the sampling radii."
         )
     return pd.DataFrame(accepted)
@@ -222,6 +332,16 @@ def evaluate_candidate(
             result.error_msg for result in results if not result.success
         ),
     }
+    for key in (
+        "source_path",
+        "source_index",
+        "source_row_index",
+        "source_candidate_id",
+        "source_label",
+    ):
+        value = row.get(key)
+        if value is not None and not pd.isna(value):
+            summary[key] = value
     summary.update(objective_provenance(runner.targets))
     summary.update(params)
     if successful:
@@ -272,6 +392,18 @@ def main() -> None:
         "--global-fraction", type=float, default=0.50,
         help="Fraction of points sampled across the full feasible parameter box."
     )
+    parser.add_argument(
+        "--boundary-source",
+        type=Path,
+        default=None,
+        help="Optional measured near-boundary centers used by material workflows.",
+    )
+    parser.add_argument(
+        "--boundary-fraction",
+        type=float,
+        default=0.0,
+        help="Fraction of points sampled locally around boundary centers.",
+    )
     parser.add_argument("--seeds", type=int, nargs="+", default=[101, 202, 303])
     parser.add_argument("--max-workers", type=int, default=None)
     parser.add_argument("--design-seed", type=int, default=20260709)
@@ -300,6 +432,27 @@ def main() -> None:
     metadata_path = args.output_dir / "metadata.json"
 
     source = valid_source_rows(pd.read_csv(args.source), param_names)
+    boundary_source = source.head(0).copy()
+    boundary_source_fallback = None
+    if args.boundary_source is not None:
+        raw_boundary = valid_source_rows(
+            pd.read_csv(args.boundary_source), param_names
+        )
+        if "anchor_class" in raw_boundary.columns:
+            near = raw_boundary.loc[
+                raw_boundary["anchor_class"].astype(str).eq("near_boundary")
+            ].copy()
+            if near.empty and not raw_boundary.empty:
+                boundary_source_fallback = (
+                    "no near_boundary anchors; used all measured anchors"
+                )
+                near = raw_boundary
+            boundary_source = near.reset_index(drop=True)
+        else:
+            boundary_source = raw_boundary
+    requested_allocation = sampling_allocation(
+        args.n_points, args.global_fraction, args.boundary_fraction
+    )
     if design_path.exists():
         design = pd.read_csv(design_path)
         if len(design) != args.n_points:
@@ -312,17 +465,43 @@ def main() -> None:
             source, param_space, runner, args.n_points, args.elite_centers,
             args.radii, args.global_fraction, args.design_seed,
             args.center_selection, args.center_pool_multiplier,
+            boundary_source, args.boundary_fraction,
         )
         atomic_csv(design, design_path)
+        realized_allocation = {
+            mode: int(count)
+            for mode, count in design["sampling_mode"].value_counts().items()
+        }
+        reallocations = []
+        if requested_allocation["boundary_local"] and boundary_source.empty:
+            reallocations.append(
+                "boundary_local quota reallocated to local_elite because no "
+                "boundary center was available"
+            )
+        if source.empty and not boundary_source.empty:
+            reallocations.append(
+                "local_elite centers fell back to the measured boundary source "
+                "because no strict feasible center was available"
+            )
+        if boundary_source_fallback:
+            reallocations.append(boundary_source_fallback)
         metadata_path.write_text(json.dumps({
             "config": args.config,
             "source": str(args.source),
+            "boundary_source": (
+                str(args.boundary_source)
+                if args.boundary_source is not None else None
+            ),
             "n_points": args.n_points,
             "elite_centers": args.elite_centers,
             "center_selection": args.center_selection,
             "center_pool_multiplier": args.center_pool_multiplier,
             "radii": args.radii,
             "global_fraction": args.global_fraction,
+            "boundary_fraction": args.boundary_fraction,
+            "requested_allocation": requested_allocation,
+            "realized_allocation": realized_allocation,
+            "allocation_notes": reallocations,
             "seeds": args.seeds,
             "design_seed": args.design_seed,
             "parameter_names": param_names,

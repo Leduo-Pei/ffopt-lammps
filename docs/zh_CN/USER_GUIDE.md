@@ -606,6 +606,7 @@ sample
     centers 24
     center_selection diverse
     radii 0.01 0.025 0.05
+    boundary_fraction 0.20
     global_fraction 0.10
     seeds 101 202 303
 end
@@ -615,6 +616,9 @@ end
 - 三个 `seeds` 表示每个向量计算三次，总评估数为 `points * 3`。
 - `centers` 是从 BO 稳定结果中选择的多个中心。
 - `radii` 是相对于完整参数上下界的归一化半径，不是 `e`。
+- 在材料工作流中，`boundary_fraction` 从实测近边界中心附近采样；其余局域
+  配额来自严格可行中心。若某类中心为空，重分配原因和实际数量会写入
+  `metadata.json`，不会静默忽略。
 - `global_fraction` 是从完整范围补充的比例。
 
 多中心局域数据用于学习多个稳定盆地；全局数据用于识别边界和失败区域，但过多

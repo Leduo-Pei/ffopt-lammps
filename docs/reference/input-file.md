@@ -477,6 +477,7 @@ sample
     centers 24
     center_selection diverse
     radii 0.01 0.025 0.05
+    boundary_fraction 0.20
     global_fraction 0.10
     seeds 101 202 303
     design_seed 20260727
@@ -486,9 +487,14 @@ end
 `points` is the number of distinct parameter vectors, not the total number of
 LAMMPS jobs. The total is `points * number_of_seeds`. Centers are selected from
 successful BO data; `diverse` avoids choosing only near-duplicates. Radii are
-fractions of each full parameter bound, not charge units. `global_fraction`
-reserves part of the design for the full configured bounds. Three seeds allow
-the training table to include mean response and simulation variability.
+fractions of each full parameter bound, not charge units. In a material
+workflow, `boundary_fraction` samples around measured near-boundary coverage
+anchors, `global_fraction` reserves points across the full configured bounds,
+and the remainder samples around the exact feasible archive. Requested and
+realized allocations, including any fallback when one archive is empty, are
+recorded in `metadata.json`. Molecular workflows retain the original
+local/global design. Three seeds allow the training table to include mean
+response and simulation variability.
 
 ## ANN block
 

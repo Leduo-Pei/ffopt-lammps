@@ -119,6 +119,7 @@ def _project(tmp_path: Path) -> Project:
                 "n_points": 12,
                 "elite_centers": 2,
                 "radii": [0.01],
+                "boundary_fraction": 0.2,
                 "global_fraction": 0.0,
                 "seeds": [101],
             },
@@ -182,8 +183,22 @@ def test_material_pipeline_installs_commands_and_explicit_coverage_sources(
     ]
     sample = specs["sample"].command
     assert Path(sample[sample.index("--source") + 1]) == (
+        runner.root / "bo" / "feasible_archive.csv"
+    )
+    assert Path(sample[sample.index("--boundary-source") + 1]) == (
         runner.root / "bo" / "coverage_anchors.csv"
     )
+    assert sample[sample.index("--boundary-fraction") + 1] == "0.2"
+    audit = specs["audit"].command
+    audit_sources = [
+        audit[index + 1]
+        for index, token in enumerate(audit)
+        if token == "--source"
+    ]
+    assert audit_sources == [
+        str(runner.root / "bo" / "all_results.csv"),
+        str(runner.root / "sample" / "local_results.csv"),
+    ]
     candidates = specs["candidates"].command
     sources = [
         candidates[index + 1]

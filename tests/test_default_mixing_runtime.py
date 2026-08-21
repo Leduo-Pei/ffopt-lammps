@@ -5,6 +5,20 @@ import pytest
 
 from engine.lammps_interface import LAMMPSRunner
 from engine.nn_surrogate import PhysicsFeatureBuilder
+from workflow.cli import _mixing_rule_description
+
+
+@pytest.mark.parametrize(
+    ("rule", "description"),
+    [
+        ("default", "epsilon geometric, sigma geometric"),
+        ("geometric", "epsilon geometric, sigma geometric"),
+        ("arithmetic", "epsilon geometric, sigma arithmetic"),
+        ("none", "explicit unlike-pair coefficients"),
+    ],
+)
+def test_explain_reports_effective_lammps_mixing(rule, description) -> None:
+    assert _mixing_rule_description(rule) == description
 
 
 def _writer(rule: str) -> LAMMPSRunner:

@@ -814,6 +814,16 @@ def cmd_check(args: argparse.Namespace) -> None:
     print(f"Workflow              : {' -> '.join(_public_workflow(project))}")
 
 
+def _mixing_rule_description(rule: str) -> str:
+    if rule in {"default", "geometric"}:
+        return "epsilon geometric, sigma geometric"
+    if rule == "arithmetic":
+        return "epsilon geometric, sigma arithmetic"
+    if rule == "none":
+        return "explicit unlike-pair coefficients"
+    raise ValueError(f"Unsupported LAMMPS mixing rule: {rule!r}")
+
+
 def cmd_explain(args: argparse.Namespace) -> None:
     """Explain the expanded parameter/property plan without writing a config."""
     project = load_project(args.input)
@@ -842,11 +852,7 @@ def cmd_explain(args: argparse.Namespace) -> None:
     print(f"Fixed parameters      : {len(fixed)}")
     print(f"Derived parameter     : {derived}")
     mixing = config["pair_params"]["mixing_rule"]
-    mixing_detail = (
-        "epsilon geometric, sigma geometric"
-        if mixing == "geometric"
-        else "epsilon geometric, sigma arithmetic"
-    )
+    mixing_detail = _mixing_rule_description(mixing)
     print(f"LAMMPS mixing rule    : {mixing} ({mixing_detail})")
     print("\nProperties:")
     for prop in compilation.document.properties:
@@ -927,9 +933,14 @@ def cmd_explain(args: argparse.Namespace) -> None:
     if "sample" in stages:
         seeds = sample.get("seeds", [])
         points = int(sample.get("n_points", 0))
+        boundary_fraction = float(sample.get("boundary_fraction", 0.0))
+        global_fraction = float(sample.get("global_fraction", 0.0))
+        local_fraction = max(0.0, 1.0 - boundary_fraction - global_fraction)
         print(
             f"Sampling              : {points} points x {len(seeds)} seeds; "
-            f"centers={sample.get('elite_centers')} radii={sample.get('radii')}"
+            f"centers={sample.get('elite_centers')} radii={sample.get('radii')} "
+            f"local/boundary/global="
+            f"{local_fraction:.2f}/{boundary_fraction:.2f}/{global_fraction:.2f}"
         )
     if "nn" in stages:
         nn = config["nn"]

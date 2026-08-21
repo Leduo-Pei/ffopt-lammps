@@ -29,6 +29,12 @@ expectations while the public API remains in alpha.
 
 ### Fixed
 
+- Honor the elemental-material sampling split exactly: feasible local centers,
+  measured boundary centers, and global coverage now receive their declared
+  quotas, and the replicated audit ranks the explicit BO+Sample union rather
+  than silently ignoring Sample evidence.
+- Report the effective LAMMPS `lj/cut` default as geometric epsilon and sigma
+  mixing in `ffopt explain`; execution already delegated this rule correctly.
 - Preserve active SLURM stages when `squeue` or `sacct` is temporarily
   unavailable or has not yet indexed a job, preventing an inconclusive query
   from triggering a duplicate expensive submission.
