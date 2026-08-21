@@ -78,7 +78,13 @@ At 300 K, resonant-ultrasound measurements give
 `C44 = 115.87 +/- 0.17 GPa`
 ([Adams *et al.*, 2006](https://doi.org/10.1063/1.2365714)).
 These three independent cubic quantities are the primary finite-temperature
-targets. Isotropic `G`, `E`, and Poisson's ratio are derived diagnostics.
+targets. Adams is deliberately an experiment independent of the Rayne 0 K
+extrapolation; the pair must therefore not be used to infer a universal thermal
+scale factor.  The ultrasonic constants are adiabatic, whereas a thermostatted
+finite-temperature stress--strain calculation is closer to an isothermal
+response.  That thermodynamic-definition difference is retained as a reported
+systematic limitation rather than hidden inside the experimental uncertainty.
+Isotropic `G`, `E`, and Poisson's ratio are derived diagnostics.
 
 ## Model-form limitation of elemental LJ
 

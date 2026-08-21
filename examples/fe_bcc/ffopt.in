@@ -63,7 +63,8 @@ property elasticity
     target static C44     121.90 GPa
 
     # Dynamic: Adams et al., J. Appl. Phys. 100, 113530 (2006),
-    # DOI 10.1063/1.2365714 (one internally consistent 300 K data set).
+    # DOI 10.1063/1.2365714 (one internally consistent 300 K data set and an
+    # independent experimental validation, not a fitted 0-to-300 K scale law).
     module dynamic promotion
     target dynamic B       166.20 GPa
     target dynamic Cprime   48.15 GPa
