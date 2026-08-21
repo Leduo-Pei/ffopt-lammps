@@ -300,10 +300,114 @@ def test_material_elastic_resources_come_from_full_machine_allocation(
             assert command[command.index(option) + 1] == value
         assert "--state-workers" not in command
 
+    constrained_profile = runner._slurm_profile("constrained_al_01")
+    assert constrained_profile["cores"] == 76
+    assert constrained_profile["tasks"] == 38
+    assert constrained_profile["cpus_per_task"] == 2
+
     validate_profile = runner._slurm_profile("validate")
     assert validate_profile["cores"] == 76
-    assert validate_profile["tasks"] == 76
-    assert validate_profile["cpus_per_task"] == 1
+    assert validate_profile["tasks"] == 38
+    assert validate_profile["cpus_per_task"] == 2
+
+
+def test_constrained_al_keeps_worker_shaped_slurm_allocation(
+    tmp_path, monkeypatch
+):
+    project = _project(tmp_path)
+    config = _material_config()
+    config.update({
+        "machine": {"backend": "slurm"},
+        "parallel": {
+            "max_workers": 8,
+            "cores_per_worker": 2,
+            "omp_threads_per_worker": 1,
+            "use_mpi": True,
+            "scheduler_launcher": "srun",
+        },
+        "cluster": {
+            "al": {
+                "nodes": 1,
+                "cores": 16,
+                # Legacy/broken raw shape: the mixed-stage normalizer must
+                # convert this to one 2-CPU task per persistent worker.
+                "tasks": 16,
+                "cpus_per_task": 1,
+                "distributed_steps": True,
+                "time": "24:00:00",
+            },
+        },
+    })
+    monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: config)
+    runner = PipelineRunner(
+        project=project, machine="cluster", run_id="constrained-shape", dry_run=True
+    )
+    spec = {
+        stage.name: stage for stage in runner.build_specs()
+    }["constrained_al_01"]
+
+    command = spec.command
+    expected = {
+        "--available-cores": "16",
+        "--cores-per-state": "2",
+        "--omp-threads-per-state": "1",
+        "--candidate-workers": "8",
+    }
+    for option, value in expected.items():
+        assert command[command.index(option) + 1] == value
+
+    profile = runner._slurm_profile(spec.name)
+    assert profile["tasks"] == 8
+    assert profile["cpus_per_task"] == 2
+    script = runner._write_slurm_script(spec).read_text(encoding="utf-8")
+    assert "#SBATCH --ntasks=8" in script
+    assert "#SBATCH --cpus-per-task=2" in script
+
+    validate_spec = {
+        stage.name: stage for stage in runner.build_specs()
+    }["validate"]
+    validate_profile = runner._slurm_profile(validate_spec.name)
+    assert validate_profile["tasks"] == 8
+    assert validate_profile["cpus_per_task"] == 2
+    validate_script = runner._write_slurm_script(validate_spec).read_text(
+        encoding="utf-8"
+    )
+    assert "#SBATCH --ntasks=8" in validate_script
+    assert "#SBATCH --cpus-per-task=2" in validate_script
+
+
+def test_mixed_material_stage_rejects_incompatible_total_cpu_allocation(
+    tmp_path, monkeypatch
+):
+    project = _project(tmp_path)
+    config = _material_config()
+    config.update({
+        "machine": {"backend": "slurm"},
+        "parallel": {
+            "max_workers": 8,
+            "cores_per_worker": 2,
+            "omp_threads_per_worker": 1,
+            "use_mpi": True,
+            "scheduler_launcher": "srun",
+        },
+        "cluster": {
+            "al": {
+                "nodes": 1,
+                "cores": 15,
+                "tasks": 15,
+                "cpus_per_task": 1,
+                "distributed_steps": True,
+            },
+        },
+    })
+    monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: config)
+    runner = PipelineRunner(
+        project=project, machine="cluster", run_id="bad-mixed-shape", dry_run=True
+    )
+
+    for stage in ("constrained_al_01", "validate"):
+        with pytest.raises(ValueError, match="not divisible"):
+            runner._slurm_profile(stage)
 
 
 def test_material_resource_command_accounts_for_omp_without_oversubscription(
@@ -323,7 +427,7 @@ def test_material_resource_command_accounts_for_omp_without_oversubscription(
         "cluster": {
             "al": {
                 "nodes": 1,
-                "cores": 32,
+                "cores": 16,
                 "tasks": 4,
                 "cpus_per_task": 4,
                 "distributed_steps": True,
@@ -336,12 +440,12 @@ def test_material_resource_command_accounts_for_omp_without_oversubscription(
         project=project, machine="cluster", run_id="omp", dry_run=True
     )
     command = {spec.name: spec for spec in runner.build_specs()}["static"].command
-    assert command[command.index("--available-cores") + 1] == "32"
+    assert command[command.index("--available-cores") + 1] == "16"
     assert command[command.index("--cores-per-state") + 1] == "2"
     assert command[command.index("--omp-threads-per-state") + 1] == "2"
     assert command[command.index("--candidate-workers") + 1] == "4"
     profile = runner._slurm_profile("static")
-    assert profile["tasks"] == 16
+    assert profile["tasks"] == 8
     assert profile["cpus_per_task"] == 2
 
 

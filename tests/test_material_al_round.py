@@ -184,6 +184,19 @@ class _FakeStructuralRunner:
         ]
 
 
+class _FakeSchedulerPool:
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+class _PooledStructuralRunner(_FakeStructuralRunner):
+    def __init__(self):
+        self.scheduler_pool = _FakeSchedulerPool()
+
+
 def _fake_static_batch(**kwargs):
     proposals = pd.read_csv(
         kwargs["parameters_path"], float_precision="round_trip"
@@ -197,6 +210,36 @@ def _fake_static_batch(**kwargs):
     )
     (output / "stage_manifest.json").write_text("{}\n", encoding="utf-8")
     return results
+
+
+def test_structural_scheduler_pool_is_released_before_static_batch(tmp_path):
+    config, spec, structural, static = _write_inputs(tmp_path)
+    runner = _PooledStructuralRunner()
+    scheduler_pool = runner.scheduler_pool
+
+    def assert_released_then_run_static(**kwargs):
+        assert scheduler_pool.closed
+        assert runner.scheduler_pool is None
+        return _fake_static_batch(**kwargs)
+
+    run_material_al_round(
+        runtime_config_path=config,
+        refinement_config_path=spec,
+        structural_paths=[structural],
+        mechanical_paths=[static],
+        candidate_pool_paths=[],
+        output_dir=tmp_path / "pooled_round",
+        round_number=1,
+        maximum_rounds=3,
+        structural_seeds=[101],
+        available_cores=2,
+        cores_per_state=1,
+        structural_runner_factory=lambda _config: runner,
+        elasticity_batch_runner=assert_released_then_run_static,
+    )
+
+    assert scheduler_pool.closed
+    assert runner.scheduler_pool is None
 
 
 def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path]:

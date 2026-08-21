@@ -144,6 +144,23 @@ def _default_structural_runner_factory(config: dict[str, Any]) -> StructuralRunn
     return LAMMPSRunner(config)
 
 
+def _release_structural_scheduler_pool(runner: StructuralRunner) -> None:
+    """Release persistent structural workers before nested elastic srun steps."""
+
+    scheduler_pool = getattr(runner, "scheduler_pool", None)
+    if scheduler_pool is None:
+        return
+    try:
+        close = getattr(scheduler_pool, "close", None)
+        if callable(close):
+            close()
+    finally:
+        # LAMMPSRunner would otherwise keep dispatching through a pool whose
+        # worker step has ended, and the worker step would retain every task in
+        # the constrained-AL allocation while the elastic batch tries to start.
+        setattr(runner, "scheduler_pool", None)
+
+
 def _json_bytes(value: Any) -> bytes:
     return (
         json.dumps(
@@ -1106,23 +1123,26 @@ def run_material_al_round(
     }
     stage_manifest = destination / "material_al_manifest.json"
     if stage_manifest.exists():
-        decision = check_artifact_reuse(
-            stage_manifest,
-            kind="stage",
-            identifier=f"{_STAGE_IDENTIFIER}:{round_number:04d}",
-            parameters=None,
-            seeds=seeds,
-            scientific_config=scientific_identity,
-            input_artifacts=input_artifacts,
-            expected_outputs=fixed_outputs,
-        )
-        if not decision.reusable:
-            raise MaterialALRoundError(
-                f"completed material AL round is not reusable: {decision.reason}"
+        try:
+            decision = check_artifact_reuse(
+                stage_manifest,
+                kind="stage",
+                identifier=f"{_STAGE_IDENTIFIER}:{round_number:04d}",
+                parameters=None,
+                seeds=seeds,
+                scientific_config=scientific_identity,
+                input_artifacts=input_artifacts,
+                expected_outputs=fixed_outputs,
             )
-        _load_previous_evidence(fixed_outputs["round_evidence"])
-        state = json.loads(fixed_outputs["state"].read_text(encoding="utf-8"))
-        return MaterialALRoundResult(destination, state, True)
+            if not decision.reusable:
+                raise MaterialALRoundError(
+                    f"completed material AL round is not reusable: {decision.reason}"
+                )
+            _load_previous_evidence(fixed_outputs["round_evidence"])
+            state = json.loads(fixed_outputs["state"].read_text(encoding="utf-8"))
+            return MaterialALRoundResult(destination, state, True)
+        finally:
+            _release_structural_scheduler_pool(runner)
 
     destination.mkdir(parents=True, exist_ok=True)
     structural = _read_frames(evidence_structural_paths, names)
@@ -1193,19 +1213,22 @@ def run_material_al_round(
         max(1, configured_workers), max(1, available // structural_cores)
     )
     targets = tuple(str(name) for name in config.get("targets", {}))
-    new_structural, candidate_manifests = _evaluate_structural_batch(
-        proposals=planned,
-        names=names,
-        targets=targets,
-        seeds=seeds,
-        runner=runner,
-        config_path=runtime_source,
-        runner_input_artifacts=runner_input_artifacts,
-        config=config,
-        scientific_config=_structural_scientific_config(config),
-        root=destination / "structural_candidates",
-        workers=structural_workers,
-    )
+    try:
+        new_structural, candidate_manifests = _evaluate_structural_batch(
+            proposals=planned,
+            names=names,
+            targets=targets,
+            seeds=seeds,
+            runner=runner,
+            config_path=runtime_source,
+            runner_input_artifacts=runner_input_artifacts,
+            config=config,
+            scientific_config=_structural_scientific_config(config),
+            root=destination / "structural_candidates",
+            workers=structural_workers,
+        )
+    finally:
+        _release_structural_scheduler_pool(runner)
     _write_frame(fixed_outputs["new_structural"], new_structural)
     cumulative_structural = _merge_evidence(structural, new_structural, names)
     _write_frame(fixed_outputs["cumulative_structural"], cumulative_structural)

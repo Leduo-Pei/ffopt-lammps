@@ -66,6 +66,20 @@ RunnerFactory = Callable[[dict[str, Any]], LAMMPSRunner]
 ElasticBatchRunner = Callable[..., pd.DataFrame]
 
 
+def _release_structural_scheduler_pool(runner: LAMMPSRunner) -> None:
+    """Release structural workers before static/dynamic nested srun steps."""
+
+    scheduler_pool = getattr(runner, "scheduler_pool", None)
+    if scheduler_pool is None:
+        return
+    try:
+        close = getattr(scheduler_pool, "close", None)
+        if callable(close):
+            close()
+    finally:
+        setattr(runner, "scheduler_pool", None)
+
+
 def _json_safe(value: Any) -> Any:
     if isinstance(value, np.generic):
         value = value.item()
@@ -1103,29 +1117,36 @@ def run_material_validation(
             )
 
     runner = runner_factory(config)
-    prepared = prepare_candidate(
-        candidate,
-        output_dir=destination,
-        parameter_runner=runner,
-        config=config,
-    )
-    resolved_identity = (
-        destination / "candidate_runs" / candidate.digest / "inputs" / "resolved_parameters.json"
-    )
-    structural_inputs = _runner_input_artifacts(
-        runner,
-        config_path=config_source,
-        parameter_source=parameter_source,
-        resolved_parameters=resolved_identity,
-        force_field_include=prepared.force_field_include,
-    )
-    structural_result, structural_manifest = _run_or_reuse_structure(
-        runner=runner,
-        candidate=candidate,
-        work_dir=structure_dir,
-        config=config,
-        input_artifacts=structural_inputs,
-    )
+    try:
+        prepared = prepare_candidate(
+            candidate,
+            output_dir=destination,
+            parameter_runner=runner,
+            config=config,
+        )
+        resolved_identity = (
+            destination
+            / "candidate_runs"
+            / candidate.digest
+            / "inputs"
+            / "resolved_parameters.json"
+        )
+        structural_inputs = _runner_input_artifacts(
+            runner,
+            config_path=config_source,
+            parameter_source=parameter_source,
+            resolved_parameters=resolved_identity,
+            force_field_include=prepared.force_field_include,
+        )
+        structural_result, structural_manifest = _run_or_reuse_structure(
+            runner=runner,
+            candidate=candidate,
+            work_dir=structure_dir,
+            config=config,
+            input_artifacts=structural_inputs,
+        )
+    finally:
+        _release_structural_scheduler_pool(runner)
     structural_gate = assess_structural_gates(
         structural_result.get("properties", {}), config
     )

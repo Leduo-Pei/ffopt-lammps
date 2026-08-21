@@ -201,6 +201,14 @@ class FakeValidationRunner:
         )]
 
 
+class FakeSchedulerPool:
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
 class FakeElasticBatch:
     def __init__(self, *, calls, mechanical_error, structural_pass):
         self.calls = calls
@@ -355,6 +363,133 @@ def _run_validation(
         static_ranking,
         dynamic_ranking,
     )
+
+
+def test_validation_releases_structural_pool_before_elastic_batches(tmp_path):
+    config_path, config = _config(tmp_path)
+    parameter_path = tmp_path / "best_candidate.json"
+    parameter_path.write_text(
+        json.dumps({"raw_free_parameters": _parameters(config)}), encoding="utf-8"
+    )
+    fake_input = tmp_path / "fake_structure.in"
+    fake_input.write_text("fake structure input\n", encoding="ascii")
+    calls = Counter()
+    runner = FakeValidationRunner(
+        config,
+        calls=calls,
+        input_file=fake_input,
+    )
+    runner.scheduler_pool = FakeSchedulerPool()
+    scheduler_pool = runner.scheduler_pool
+    batch = FakeElasticBatch(
+        calls=calls,
+        mechanical_error=10.0,
+        structural_pass=True,
+    )
+
+    def assert_released_then_run_elastic(**kwargs):
+        assert scheduler_pool.closed
+        assert runner.scheduler_pool is None
+        return batch(**kwargs)
+
+    run_material_validation(
+        config_path=config_path,
+        parameters_path=parameter_path,
+        output_dir=tmp_path / "pooled_validation",
+        resources=plan_nested_resources(
+            available_cores=4,
+            cores_per_state=2,
+            candidate_workers=1,
+            state_workers=2,
+        ),
+        runner_factory=lambda _config: runner,
+        elastic_batch_runner=assert_released_then_run_elastic,
+        elastic_backend_factory=lambda **_kwargs: None,
+    )
+
+    assert scheduler_pool.closed
+    assert runner.scheduler_pool is None
+
+    reuse_runner = FakeValidationRunner(
+        config,
+        calls=calls,
+        input_file=fake_input,
+    )
+    reuse_runner.scheduler_pool = FakeSchedulerPool()
+    reuse_pool = reuse_runner.scheduler_pool
+
+    def assert_reuse_released(**kwargs):
+        assert reuse_pool.closed
+        assert reuse_runner.scheduler_pool is None
+        return batch(**kwargs)
+
+    run_material_validation(
+        config_path=config_path,
+        parameters_path=parameter_path,
+        output_dir=tmp_path / "pooled_validation",
+        resources=plan_nested_resources(
+            available_cores=4,
+            cores_per_state=2,
+            candidate_workers=1,
+            state_workers=2,
+        ),
+        runner_factory=lambda _config: reuse_runner,
+        elastic_batch_runner=assert_reuse_released,
+        elastic_backend_factory=lambda **_kwargs: None,
+    )
+    assert reuse_pool.closed
+    assert reuse_runner.scheduler_pool is None
+
+
+def test_validation_releases_structural_pool_when_structure_fails(tmp_path):
+    config_path, config = _config(tmp_path)
+    parameter_path = tmp_path / "best_candidate.json"
+    parameter_path.write_text(
+        json.dumps({"raw_free_parameters": _parameters(config)}), encoding="utf-8"
+    )
+    fake_input = tmp_path / "fake_structure.in"
+    fake_input.write_text("fake structure input\n", encoding="ascii")
+    runner = FakeValidationRunner(
+        config,
+        calls=Counter(),
+        input_file=fake_input,
+    )
+    runner.scheduler_pool = FakeSchedulerPool()
+    scheduler_pool = runner.scheduler_pool
+
+    def fail_structure(*_args, **_kwargs):
+        raise RuntimeError("structural failure")
+
+    runner.evaluate_batch = fail_structure
+    batch = FakeElasticBatch(
+        calls=runner.calls,
+        mechanical_error=10.0,
+        structural_pass=False,
+    )
+
+    def assert_released_then_run_elastic(**kwargs):
+        assert scheduler_pool.closed
+        assert runner.scheduler_pool is None
+        return batch(**kwargs)
+
+    summary = run_material_validation(
+        config_path=config_path,
+        parameters_path=parameter_path,
+        output_dir=tmp_path / "failed_validation",
+        resources=plan_nested_resources(
+            available_cores=4,
+            cores_per_state=2,
+            candidate_workers=1,
+            state_workers=2,
+        ),
+        runner_factory=lambda _config: runner,
+        elastic_batch_runner=assert_released_then_run_elastic,
+        elastic_backend_factory=lambda **_kwargs: None,
+    )
+
+    assert scheduler_pool.closed
+    assert runner.scheduler_pool is None
+    assert summary["status"] == "rejected"
 
 
 def test_mechanical_tier_excess_is_manifested_best_effort_and_resumes(tmp_path):

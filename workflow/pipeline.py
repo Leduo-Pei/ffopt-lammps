@@ -846,8 +846,57 @@ class PipelineRunner:
             node.command_token == "material-nn"
         ):
             profile["gpu"] = 0
+        persistent_material = node.command_token in {
+            "constrained-al", "material-validate",
+        }
+        if persistent_material and self.backend == "slurm":
+            parallel = self.config.get("parallel", {})
+            configured_workers = max(
+                1, int(parallel.get("max_workers", 1))
+            )
+            worker_cpu_cost = max(
+                1,
+                int(parallel.get("cores_per_worker", 1))
+                * int(parallel.get("omp_threads_per_worker", 1)),
+            )
+            total_cores = int(
+                profile.get(
+                    "cores",
+                    int(profile.get("tasks", 1))
+                    * int(profile.get("cpus_per_task", 1)),
+                )
+            )
+            if total_cores % worker_cpu_cost:
+                raise ValueError(
+                    f"Machine profile for {stage} allocates {total_cores} CPUs, "
+                    f"which is not divisible by one persistent LAMMPS worker "
+                    f"({worker_cpu_cost} CPUs)"
+                )
+            workers = total_cores // worker_cpu_cost
+            if workers != configured_workers:
+                raise ValueError(
+                    f"Machine profile for {stage} yields {workers} persistent "
+                    f"LAMMPS workers from {total_cores} CPUs, but "
+                    f"parallel.max_workers={configured_workers}; make the total "
+                    f"allocation {configured_workers * worker_cpu_cost} CPUs"
+                )
+            # Mixed structural/elastic controllers first launch one persistent
+            # worker per structural candidate slot.  Normalize legacy profiles
+            # such as 16x1 into the worker-shaped 8x2 allocation before writing
+            # the job; the pool is released before nested elastic srun steps.
+            profile.update({
+                "cores": total_cores,
+                "tasks": workers,
+                "cpus_per_task": worker_cpu_cost,
+                "distributed_steps": True,
+            })
+            nodes = max(1, int(profile.get("nodes", 1)))
+            if workers % nodes == 0:
+                profile["tasks_per_node"] = workers // nodes
+            else:
+                profile.pop("tasks_per_node", None)
         elastic_material = node.command_token in {
-            "static", "constrained-al", "finalists", "material-validate",
+            "static", "finalists",
         }
         if elastic_material and self.backend == "slurm":
             parallel = self.config.get("parallel", {})
