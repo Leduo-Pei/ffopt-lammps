@@ -174,7 +174,10 @@ def test_zero_eligible_round_is_valid_and_budget_state_is_machine_readable(tmp_p
 
     assert result.state["eligible_mechanical_candidates"] == 0
     assert result.state["status"] == "budget_exhausted"
-    assert result.state["convergence_status"] == "budget_exhausted"
+    assert result.state["convergence_status"] == "insufficient_eligible_finalists"
+    assert result.state["stop_reason"] == (
+        "maximum_rounds_insufficient_eligible_finalists"
+    )
     assert result.state["best_effort_retained"] is False
     assert pd.read_csv(output / "exact_structural_mechanical_ranking.csv").empty
     assert len(pd.read_csv(output / "mechanical_proposals.csv")) == 1
@@ -287,6 +290,35 @@ def test_capable_backend_may_report_patience_convergence(tmp_path: Path):
     assert second.state["status"] == "converged"
     assert second.state["convergence_status"] == "static_search_converged"
     assert second.state["requires_finalist_validation"] is True
+
+
+def test_patience_cannot_converge_before_required_finalist_floor(tmp_path: Path):
+    structural, mechanical = _write_round_inputs(tmp_path)
+    backend = _ConvergenceCapableBackend()
+    spec = _spec(minimum_eligible_finalists=2)
+    first_dir = tmp_path / "round_01"
+    run_refinement_round(
+        spec=spec,
+        structural_paths=[structural],
+        mechanical_paths=[mechanical],
+        output_dir=first_dir,
+        acquisition=backend,
+    )
+    second = run_refinement_round(
+        spec=spec,
+        structural_paths=[structural],
+        mechanical_paths=[mechanical],
+        previous_state_path=first_dir / "refinement_state.json",
+        output_dir=tmp_path / "round_02",
+        acquisition=backend,
+    )
+
+    assert second.state["no_improvement_rounds"] == 1
+    assert second.state["eligible_mechanical_candidates"] == 1
+    assert second.state["minimum_eligible_finalists"] == 2
+    assert second.state["finalist_floor_reached"] is False
+    assert second.state["status"] == "active"
+    assert second.state["convergence_status"] == "insufficient_eligible_finalists"
 
 
 def test_cubic_derivation_reuses_shared_elasticity_core():

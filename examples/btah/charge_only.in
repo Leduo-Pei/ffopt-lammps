@@ -5,6 +5,7 @@ workflow bo sample nn al audit finalize validate
 
 parameters
     range charge  delta  0.30
+    cutoff 8.0 A
     charge_limit 1.0
     neutrality derive bhN1
     mixing epsilon geometric

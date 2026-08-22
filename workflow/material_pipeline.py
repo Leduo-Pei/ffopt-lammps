@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 import pandas as pd
 
@@ -58,6 +58,181 @@ _MATERIAL_AL_OUTPUT_FILES = {
     "new_static": "new_static_observations.csv",
     "static_completion": "static_batch_completion.json",
 }
+
+
+# ``StageRegistry.expected_artifacts`` is the orchestration contract, while an
+# artifact manifest uses semantic labels.  Keep the translation explicit so a
+# completed material stage cannot be accepted merely because files with the
+# expected names happen to exist.  Optional validation-report outputs are
+# included here because they are manifested whenever the pipeline requests a
+# Top-N report, but they are not required by the public stage registry.
+_MATERIAL_STAGE_OUTPUT_FILES: dict[str, dict[str, str]] = {
+    "candidates": {
+        "candidates": "candidates.csv",
+        "candidate_pool": "candidate_pool.csv",
+        "static_screen": "static_screen_candidates.csv",
+        "summary": "candidates_summary.json",
+    },
+    "static": {
+        "results": "static_results.csv",
+        "finalists": "finalists_selected.csv",
+        "best_candidate": "best_candidate.json",
+        "batch_summary": "batch_summary.json",
+    },
+    "material-nn": {
+        "diagnostics": "surrogate_diagnostics.json",
+        "proposals": "initial_proposals.csv",
+        "candidate_pool": "candidate_pool.csv",
+    },
+    "finalists": {
+        "results": "dynamic_results.csv",
+        "seed_results": "dynamic_seed_results.csv",
+        "finalists": "finalists_selected.csv",
+        "best_candidate": "best_candidate.json",
+        "batch_summary": "batch_summary.json",
+    },
+    "material-validate": {
+        "validation_summary": "validation_summary.json",
+        "computed_properties": "computed_properties.csv",
+        "final_atom_parameters": "final_atom_parameters.csv",
+        "final_parameters_lammps": "final_parameters.lammps",
+        "final_parameters": "final_parameters.json",
+        "model_adequacy": "model_adequacy.json",
+        "top_parameters_csv": "TOP_PARAMETERS.csv",
+        "top_parameters_json": "TOP_PARAMETERS.json",
+        "top_parameters_markdown": "TOP_PARAMETERS.md",
+        "top_parameters_manifest": "top_parameters_manifest.json",
+    },
+}
+
+_MATERIAL_STAGE_IDENTIFIERS = {
+    "candidates": ("stage", "material_candidates", False),
+    "static": ("stage", "cubic_elastic_batch:static", False),
+    "material-nn": ("stage", "material_surrogate_preflight", False),
+    "finalists": ("stage", "cubic_elastic_batch:dynamic", False),
+    # A normal validation manifest is candidate-scoped.  A scientifically
+    # terminal zero-eligible result is stage-scoped, and is checked separately
+    # below while retaining the same identifier prefix.
+    "material-validate": ("candidate", "material_validation:", True),
+}
+
+MATERIAL_MANIFEST_COMMAND_TOKENS = frozenset({
+    *_MATERIAL_STAGE_OUTPUT_FILES,
+    "constrained-al",
+})
+
+
+def _required_artifact_names(
+    expected_artifacts: Iterable[str | os.PathLike[str]] | None,
+) -> tuple[str, ...]:
+    if expected_artifacts is None:
+        return ()
+    return tuple(Path(item).name for item in expected_artifacts)
+
+
+def _regular_files_exist(
+    root: Path,
+    names: Iterable[str],
+) -> tuple[bool, str]:
+    for name in names:
+        path = root / name
+        if not path.is_file():
+            return False, f"material stage artifact is missing or not a regular file: {path}"
+    return True, "material stage artifacts are regular files"
+
+
+def validate_material_stage_outputs(
+    directory: str | os.PathLike[str],
+    *,
+    command_token: str,
+    expected_artifacts: Iterable[str | os.PathLike[str]] | None = None,
+) -> tuple[bool, str]:
+    """Verify one completed material stage against its immutable manifest.
+
+    Pipeline state is only an orchestration cache.  Scientific reuse additionally
+    requires an intrinsically valid manifest, the expected stage identity, and
+    byte-identical regular-file outputs.  Unknown material command tokens fail
+    closed so adding a new publisher requires adding its manifest contract here.
+    """
+
+    root = Path(directory).resolve()
+    required_names = _required_artifact_names(expected_artifacts)
+    regular, reason = _regular_files_exist(root, required_names)
+    if not regular:
+        return False, reason
+    if command_token not in MATERIAL_MANIFEST_COMMAND_TOKENS:
+        return False, f"no material manifest contract for command token {command_token!r}"
+    if command_token == "constrained-al":
+        valid, detail = validate_material_al_stage_outputs(root)
+        if not valid:
+            return valid, detail
+        manifest = load_artifact_manifest(root / "material_al_manifest.json")
+        declared = dict(manifest.expected_outputs)
+        filename_to_label = {
+            filename: label for label, filename in _MATERIAL_AL_OUTPUT_FILES.items()
+        }
+        known_names = set(filename_to_label) | {
+            "material_al_manifest.json"
+        }
+        unknown = sorted(set(required_names) - known_names)
+        if unknown:
+            return False, f"material AL contract does not declare required artifacts: {unknown}"
+        for filename in required_names:
+            if filename == "material_al_manifest.json":
+                continue
+            label = filename_to_label[filename]
+            if label not in declared:
+                return False, f"material AL manifest omits required artifact {filename!r}"
+        return True, detail
+
+    outputs = _MATERIAL_STAGE_OUTPUT_FILES[command_token]
+    manifest_path = root / "stage_manifest.json"
+    try:
+        manifest = load_artifact_manifest(manifest_path)
+    except ArtifactManifestError as exc:
+        return False, str(exc)
+
+    expected_kind, identifier, prefix = _MATERIAL_STAGE_IDENTIFIERS[command_token]
+    kind_valid = manifest.kind == expected_kind
+    if command_token == "material-validate" and manifest.kind == "stage":
+        kind_valid = manifest.identifier == "material_validation:zero_hard_gate_eligible"
+    identifier_valid = (
+        manifest.identifier.startswith(identifier)
+        if prefix
+        else manifest.identifier == identifier
+    )
+    if command_token == "material-validate" and manifest.kind == "candidate":
+        identifier_valid = manifest.identifier == f"material_validation:{manifest.parameter_key}"
+    if not kind_valid or not identifier_valid:
+        return False, (
+            "material stage manifest has the wrong identity: "
+            f"kind={manifest.kind!r}, identifier={manifest.identifier!r}"
+        )
+
+    declared = dict(manifest.expected_outputs)
+    unknown_labels = sorted(set(declared) - set(outputs))
+    if unknown_labels:
+        return False, f"material stage manifest declares unknown outputs: {unknown_labels}"
+    filename_to_label = {filename: label for label, filename in outputs.items()}
+    allowed_non_outputs = {"stage_manifest.json"}
+    for filename in required_names:
+        if filename in allowed_non_outputs:
+            continue
+        label = filename_to_label.get(filename)
+        if label is None:
+            return False, f"material stage contract does not declare required artifact {filename!r}"
+        if label not in declared:
+            return False, f"material stage manifest omits required artifact {filename!r}"
+
+    for label, expected in declared.items():
+        filename = outputs[label]
+        try:
+            actual = sha256_file(root / filename)
+        except ArtifactManifestError as exc:
+            return False, str(exc)
+        if actual != expected:
+            return False, f"material stage output hash mismatch for {filename}"
+    return True, "material stage manifest identity and output hashes verified"
 
 
 def validate_material_al_stage_outputs(
@@ -232,6 +407,9 @@ def build_refinement_spec(
             else 0.98
         ),
         "fit_quality_column": "minimum_fit_r2",
+        "minimum_eligible_finalists": int(
+            runtime.get("minimum_eligible_finalists", 1)
+        ),
     }
 
 
@@ -432,11 +610,13 @@ def write_skipped_refinement_stage(
 
 __all__ = [
     "MATERIAL_EXECUTABLE_KINDS",
+    "MATERIAL_MANIFEST_COMMAND_TOKENS",
     "REFINEMENT_OUTPUTS",
     "TERMINAL_REFINEMENT_STATUSES",
     "build_refinement_spec",
     "load_refinement_state",
     "refinement_is_terminal",
     "validate_material_al_stage_outputs",
+    "validate_material_stage_outputs",
     "write_skipped_refinement_stage",
 ]

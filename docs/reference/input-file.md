@@ -40,6 +40,7 @@ molecule-specific meaning.
 ```text
 parameters
     range charge  delta  0.30
+    cutoff 8.0 A
     charge_limit 1.0
     neutrality derive N1
     mixing epsilon geometric
@@ -95,6 +96,35 @@ for readability but is not required.
 Every free parameter needs either a global or per-type range. Fixed parameters
 still need an initial value in each `type` row but do not need a range. A
 per-type range overrides the global range for that label and parameter.
+
+### Global cutoff
+
+```text
+cutoff VALUE A
+```
+
+Every input must declare exactly one positive LJ cutoff in the `parameters`
+block. It is a scientific part of the force field, not a property-specific
+runtime convenience: bulk, surface, sublimation, adsorption, static
+elasticity, dynamic promotion, and final validation all inherit the same
+value. There is no hidden default, and property blocks cannot override it.
+Changing the cutoff changes the scientific and artifact fingerprints, so an
+existing campaign cannot resume across that change.
+
+For `material elemental` with `crystal bcc`, the declared cutoff must satisfy
+`cutoff >= 2.5 * sigma_max`, where `sigma_max` is the largest sigma value
+allowed anywhere in the declared optimization domain. For example, a global
+`range sigma absolute 0.001 5.0` requires `cutoff 12.5 A`. This check covers
+the complete search space, rather than only the initial type values.
+
+Elemental-BCC periodic cells must also satisfy
+`cutoff <= 0.45 * h_min`, where `h_min` is the shortest perpendicular face
+height after the property-specific replicate. FFOpt computes face heights from
+the full box vectors, so this remains valid for triclinic cells. The 0.45
+factor leaves 10% headroom relative to the half-box limit for NPT contraction
+and elastic strain. Enlarge the replicate if the lower sigma-domain bound and
+this upper box-size bound cannot both be met. The generated force-field include
+also locks `pair_modify shift no tail no`.
 
 ### `fix`
 
@@ -223,7 +253,6 @@ accepted and ignored.
 | `temperature` | NPT temperature | `300 K` |
 | `pressure` | NPT pressure | `1 atm` |
 | `timestep` | LAMMPS timestep | `1 fs` |
-| `cutoff` | LJ and real-space Coulomb cutoff | `8 A` |
 | `equilibration` | Discarded NPT timesteps | `20000` |
 | `production` | Averaged NPT timesteps | `40000` |
 | `seed` | Velocity-initialization seed | `101` |
@@ -273,8 +302,8 @@ corrections. The validation manifest records this definition.
 
 `temperature` records the experimental target temperature (default
 `298.15 K`); the bulk simulation temperature is controlled by the bulk block
-and defaults to `300 K`. `cutoff` optionally overrides only the isolated-
-molecule minimization cutoff and otherwise inherits the bulk cutoff. The
+and defaults to `300 K`. The isolated-molecule minimization uses the global
+cutoff declared in `parameters`; it cannot introduce a second cutoff. The
 number of atoms per molecule is read from the required single-molecule data
 file and is not a user parameter.
 
@@ -303,10 +332,11 @@ in kcal/mol. Omit `target` when no experimental reference exists; FFOpt then
 computes adsorption only during final validation and does not train or
 optimize against it.
 
-The only optional adsorption settings are `metal LABEL` (default `Au`) and
-`cutoff VALUE A` (default `7 A`). Because schema 1 adsorption is deterministic
-minimization, temperature, timestep, random seed, equilibration, and production
-settings are rejected instead of being accepted and ignored.
+The only optional adsorption setting is `metal LABEL` (default `Au`). The
+complex, slab, and molecule all use the global cutoff declared in
+`parameters`. Because schema 1 adsorption is deterministic minimization,
+property-local cutoff, temperature, timestep, random seed, equilibration, and
+production settings are rejected instead of being accepted and ignored.
 
 Schema 1 assumes that `metal LABEL` identifies one fixed, uncharged substrate
 type whose LJ parameters remain in each data file. FFOpt updates the molecular
@@ -339,9 +369,15 @@ property elasticity
     replicate 2 2 2
     temperature 300 K
     timestep 1 fs
-    equilibration 20000
+    npt_equilibration 20000
+    nvt_equilibration 20000
     production 40000
     seeds 101 202 303
+
+    validation_strain 0.001 0.003
+    validation_npt_equilibration 200000
+    validation_nvt_equilibration 50000
+    validation_production 500000
     validation_seeds 404 505 606
 end
 ```
@@ -364,16 +400,23 @@ structurally feasible mechanical compromise.
 positive/negative perturbations and the undeformed reference. At least two
 strictly increasing magnitudes in `(0, 0.05]` are required. `replicate` belongs
 to the elasticity calculation and is distinct from bulk `cells_in_data`.
-Dynamic-only settings have deterministic defaults of `300 K`, `1 fs`, 20000
-equilibration steps, 40000 production steps, and seeds `101 202 303`; supplying
-them without a dynamic module is an error. `seeds` are the finite-temperature
-promotion trajectories. Optional `validation_seeds` declare a disjoint holdout
-set for final validation; overlap is rejected because replaying the promotion
-trajectories is not independent evidence. Older inputs without
-`validation_seeds` retain their previous compiled shape, and the validation
-report explicitly identifies any compatibility fallback that reuses promotion
-seeds. All explicit values and defaults are part of the scientific
-configuration hash.
+Dynamic promotion and final validation are two separately fingerprinted
+protocols. `npt_equilibration`, `nvt_equilibration`, and `production` control the
+promotion NPT equilibration, NVT equilibration, and NVT production lengths;
+`seeds` are its trajectories. The packaged Fe workflow uses this quick
+multi-seed protocol for all 20 finalists. `validation_strain`,
+`validation_npt_equilibration`, `validation_nvt_equilibration`, and
+`validation_production` define the longer protocol used only for the promoted
+winner. `validation_seeds` must be present when a validation-specific override
+is used and must be disjoint from promotion seeds; replaying promotion is not
+independent evidence. Use at least two holdout seeds when trajectory-to-
+trajectory uncertainty is required; the packaged Fe production example uses
+three. A one-seed standard deviation is not an uncertainty estimate. All
+values, including the shared global cutoff, are part
+of the scientific identity and cannot be mixed during resume. The legacy
+`equilibration` and `validation_equilibration` spellings remain aliases for the
+corresponding NVT settings, but an input cannot combine an alias with its
+explicit `*_nvt_equilibration` form.
 
 ## Targets, weights, and tolerances
 
@@ -577,16 +620,20 @@ screen
 end
 
 finalists
-    minimum 10
+    minimum 20
     maximum 20
     window 1.0
-    diverse 1
+    diverse 4
+    require_minimum yes
 end
 ```
 
 Finalists are selected by exact 0 K minimax rank plus a reserved diverse
 branch. Their finite-temperature order is recomputed and may differ from the
-static order; both ranks and evidence levels remain in the result bundle.
+static order; both ranks and evidence levels remain in the result bundle. With
+`require_minimum yes`, `minimum` is a hard preflight floor: if fewer than 20
+unique hard-gate candidates are eligible, the stage stops before launching any
+finite-temperature LAMMPS work. It never silently substitutes a smaller set.
 
 ## Robust audit and finalization
 

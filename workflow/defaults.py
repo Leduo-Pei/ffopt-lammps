@@ -71,6 +71,7 @@ METHOD_DEFAULTS: dict[str, Any] = {
         "n_initial": 48,
         "n_bo_iterations": 200,
         "objective": "weighted_rmse",
+        "warm_start_gate": False,
         "pareto": {
             "mode": "posthoc",
             "reference_point": {"structural": 30.0, "surface": 50.0},

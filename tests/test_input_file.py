@@ -438,13 +438,8 @@ def test_stage_validation_reports_the_exact_input_line(tmp_path):
     ("old", "new", "message"),
     [
         ("production 40000", "production 4999", "at least 5000"),
-        ("pressure 1 atm", "pressure 1 atm\n    cutoff 0 A", "bulk cutoff"),
+        ("cutoff 8.0 A", "cutoff 0 A", "cutoff must be positive"),
         ("method ann", "method ann\n    learning_rate nan", "learning_rate"),
-        (
-            "protocol minimize",
-            "protocol minimize\n    cutoff 0 A",
-            "adsorption cutoff",
-        ),
     ],
 )
 def test_rejects_invalid_physical_run_values(tmp_path, old, new, message):
@@ -456,6 +451,34 @@ def test_rejects_invalid_physical_run_values(tmp_path, old, new, message):
 
     with pytest.raises(InputFileError, match=message):
         compile_input(parse_input_file(path))
+
+
+def test_global_cutoff_is_required_once_in_parameters(tmp_path):
+    source = (ROOT / "examples" / "btah" / "charge_only.in").read_text()
+    source = source.replace("    cutoff 8.0 A\n", "", 1)
+    path = tmp_path / "missing_cutoff.in"
+    path.write_text(source, encoding="utf-8")
+    with pytest.raises(InputFileError, match="parameters block requires explicit"):
+        parse_input_file(path)
+
+    duplicate = (ROOT / "examples" / "btah" / "charge_only.in").read_text()
+    duplicate = duplicate.replace(
+        "    cutoff 8.0 A\n", "    cutoff 8.0 A\n    cutoff 9.0 A\n", 1
+    )
+    path.write_text(duplicate, encoding="utf-8")
+    with pytest.raises(InputFileError, match="duplicate cutoff"):
+        parse_input_file(path)
+
+
+def test_property_specific_cutoff_cannot_split_one_force_field(tmp_path):
+    source = (ROOT / "examples" / "btah" / "charge_only.in").read_text()
+    source = source.replace(
+        "property bulk\n", "property bulk\n    cutoff 7.0 A\n", 1
+    )
+    path = tmp_path / "property_cutoff.in"
+    path.write_text(source, encoding="utf-8")
+    with pytest.raises(InputFileError, match="does not use setting 'cutoff'"):
+        parse_input_file(path)
 
 
 def test_optimization_rejects_all_zero_target_weights(tmp_path):

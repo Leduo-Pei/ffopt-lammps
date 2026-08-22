@@ -12,6 +12,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10
     import tomli as tomllib
 
 from engine.lammps_interface import LAMMPSRunner
+from workflow.artifact_manifest import sha256_file
 from workflow.cli import _free_parameter_count
 from workflow.input_compiler import compile_input
 from workflow.input_file import parse_input_file
@@ -89,6 +90,26 @@ class ProjectConfigTests(unittest.TestCase):
             Path(config["manifest"]["data_files"]["bulk"]),
             (ROOT / "data/bulk/BTAH_822_bulk.data").resolve(),
         )
+
+    def test_all_molecular_data_roles_are_content_addressed(self) -> None:
+        config = compose_config(self.project, "local")
+        expected = {
+            "manifest.data_files.bulk": ROOT / "data/bulk/BTAH_822_bulk.data",
+            "sublimation.data_files.bulk": ROOT / "data/bulk/BTAH_822_bulk.data",
+            "sublimation.data_files.single": ROOT / "data/molecule/BTAH_822_single.data",
+            "adsorption.data_files.complex": ROOT / "data/adsorption/ad_complex.data",
+            "adsorption.data_files.mol": ROOT / "data/adsorption/ad_mol.data",
+            "adsorption.data_files.slab": ROOT / "data/adsorption/ad_slab.data",
+        }
+        artifacts = config["manifest"]["data_artifacts"]
+
+        self.assertEqual(set(artifacts), set(expected))
+        for role, source in expected.items():
+            resolved = source.resolve()
+            digest = sha256_file(resolved)
+            self.assertEqual(artifacts[role]["path"], str(resolved))
+            self.assertEqual(artifacts[role]["sha256"], digest.sha256)
+            self.assertEqual(artifacts[role]["size_bytes"], digest.size_bytes)
 
     def test_two_node_slurm_profile_keeps_nn_workers_on_one_node(self) -> None:
         profile = build_machine_profile(

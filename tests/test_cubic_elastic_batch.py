@@ -11,6 +11,7 @@ import pytest
 from engine.cubic_elastic_batch import (
     BatchArtifactError,
     CandidateParameterError,
+    CubicElasticBatchError,
     build_parser as build_elastic_batch_parser,
     effective_available_cores,
     load_candidates,
@@ -72,6 +73,18 @@ def test_gate_order_prevents_perfect_mechanics_from_rescuing_bad_structure():
         diversity_slots=0,
     )
     assert list(selected["parameter_key"]) == ["candidate1"]
+
+
+def test_ranking_preserves_explicit_born_optional_eligibility():
+    row = _rank_row("candidate1", 25.0, 20.0, born=False)
+    # The evaluator owns the born-required policy.  An eligible row with a
+    # failed Born diagnostic represents a project that explicitly set born off.
+    row["finalist_eligible"] = True
+
+    ranked = rank_elastic_results(pd.DataFrame([row]))
+
+    assert bool(ranked.iloc[0]["finalist_eligible"])
+    assert not bool(ranked.iloc[0]["born_stability_pass"])
 
 
 def test_dynamic_ranking_can_reverse_static_rank_and_retains_best_effort():
@@ -241,9 +254,9 @@ def _bcc_data() -> str:
 2 atoms
 2 atom types
 
-0.0 2.8665 xlo xhi
-0.0 2.8665 ylo yhi
-0.0 2.8665 zlo zhi
+0.0 30.0 xlo xhi
+0.0 30.0 ylo yhi
+0.0 30.0 zlo zhi
 
 Masses
 
@@ -278,6 +291,7 @@ workflow bo validate
 parameters
     range epsilon absolute 0.001 10
     range sigma absolute 0.001 5
+    cutoff 12.5 A
     mixing default
     tie epsilon all
     difference sigma Fe_corner Fe_body max 0.75 A
@@ -662,6 +676,45 @@ def test_dynamic_zero_eligible_is_successful_without_launching_seeds(tmp_path):
         "zero_hard_gate_eligible"
     )
     assert (output / "stage_manifest.json").is_file()
+
+
+def test_dynamic_required_minimum_fails_before_lammps_launch(tmp_path):
+    config_path, config = _compiled_config(tmp_path)
+    candidates = tmp_path / "thin-finalists.csv"
+    frame = _candidate_frame(config).iloc[:1].copy()
+    frame["structural_gate_pass"] = True
+    frame["born_stability_pass"] = True
+    frame["fit_quality_pass"] = True
+    frame["finite_mechanical_score"] = True
+    frame["finalist_eligible"] = True
+    frame["mechanical_max_error_percent"] = 5.0
+    frame["mechanical_rmse_percent"] = 4.0
+    frame["same_element_parameter_contrast"] = 0.0
+    frame["structural_margin"] = 0.5
+    frame.to_csv(candidates, index=False)
+    output = tmp_path / "dynamic-thin"
+    factory = FakeBackendFactory(tmp_path)
+
+    with pytest.raises(CubicElasticBatchError, match="only 1 are eligible"):
+        run_elasticity_batch(
+            config_path=config_path,
+            parameters_path=candidates,
+            output_dir=output,
+            protocol="dynamic",
+            resources=_resources(),
+            top_n=2,
+            minimum=2,
+            require_minimum=True,
+            diversity_slots=0,
+            backend_factory=factory,
+        )
+
+    assert not factory.calls
+    summary = json.loads((output / "batch_summary.json").read_text())
+    assert summary["status"] == "insufficient_eligible_finalists"
+    assert summary["required_finalists"] == 2
+    assert summary["launched_lammps_work_units"] == 0
+    assert not (output / "stage_manifest.json").exists()
 
 
 def test_recorded_parameter_key_detects_value_tampering(tmp_path):

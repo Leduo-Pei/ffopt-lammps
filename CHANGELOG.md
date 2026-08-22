@@ -6,6 +6,29 @@ expectations while the public API remains in alpha.
 
 ## Unreleased
 
+## 0.3.0a5 - 2026-08-22
+
+### Changed
+
+- Require one explicit global `cutoff VALUE A` in the `parameters` block and
+  lock that value across every fitted and validation property. No workflow may
+  fall back to a hidden cutoff; elemental BCC inputs additionally require
+  `cutoff >= 2.5 * sigma_max`, where `sigma_max` is the largest declared sigma
+  optimization bound. Periodic BCC cells also require
+  `cutoff <= 0.45 * h_min` after replication, using triclinic-safe face
+  heights; generated includes explicitly lock `shift no` and `tail no`.
+- Separate the inexpensive multi-seed 300 K finalist promotion protocol from
+  the independent long-trajectory validation protocol for the promoted winner,
+  and record both protocols in the scientific identity.
+- Make the production Fe workflow require a hard floor of 20 structurally and
+  mechanically eligible finalists. If fewer than 20 survive, promotion stops
+  before launching any finite-temperature LAMMPS work instead of silently
+  evaluating a smaller set.
+- Evaluate the declared BO centre once as a structural warm-start gate before
+  launching LHS candidates, retaining the successful result as exact evidence
+  and stopping cheaply when the data/cutoff/protocol no longer reproduces the
+  known feasible baseline.
+
 ### Fixed
 
 - Select the nested single-node MPI launcher dialect explicitly and fail on
@@ -21,6 +44,23 @@ expectations while the public API remains in alpha.
 - Separate local-workstation and SLURM instructions in generated projects,
   clarify that `local` bypasses the scheduler, and identify `--partition` as a
   site-specific SLURM partition rather than a node name.
+- Fingerprint the bytes, size, resolved path, and role of every LAMMPS data
+  input. A coordinate-only edit at the same path now changes the pipeline
+  scientific identity and cannot reuse old stage evidence.
+- Bind every BO checkpoint to the exact pipeline-stage signature, scientific
+  configuration, optimization policy, resolved BO method, and ordered parameter
+  space. Explicit and automatic resume both reject legacy or incompatible
+  `train_X`/`train_Y` before loading them.
+- Treat an unsuccessful structural-validation execution as retryable rather
+  than publishing an elastic candidate from incomplete properties. Downstream
+  artifacts left by affected prereleases are moved into a recoverable attempt
+  archive before the retry.
+- Verify manifest identity, regular-file type, declared outputs, and SHA-256 for
+  every material-stage completion or reuse path, including local execution,
+  SLURM completion, resume, and `--from-stage` upstream checks.
+- Honor `born off` during elastic ranking and reject a `finalists` workflow at
+  input-validation time unless its dynamic elasticity module has the required
+  `promotion` role.
 
 ## 0.3.0a4 - 2026-08-21
 

@@ -323,6 +323,7 @@ def create_project(
     if target_list and mode in {"full", "fix_sigma", "charge_only"}:
         range_lines.append(f"    range charge  delta  {charge_window:g}")
     range_block = "\n".join(range_lines)
+    range_block += "\n    cutoff 8.0 A"
     optimized_per_type = {
         "full": 3, "fix_sigma": 2, "charge_only": 1, "lj_only": 2
     }[mode]

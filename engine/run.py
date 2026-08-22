@@ -562,6 +562,11 @@ def main():
     parser.add_argument("--checkpoint", default=None,
                         help="Path to specific checkpoint JSON to resume from")
     parser.add_argument(
+        "--stage-signature",
+        default=None,
+        help="Managed-pipeline BO stage identity stored in every checkpoint.",
+    )
+    parser.add_argument(
         "--output-dir", default=None,
         help="Deterministic BO output directory (used by ffopt run).",
     )
@@ -613,6 +618,10 @@ def main():
     if args.output_dir:
         config.setdefault("workflow", {})["bo_output_dir"] = str(
             Path(args.output_dir).resolve()
+        )
+    if args.stage_signature:
+        config.setdefault("workflow", {})["bo_stage_signature"] = str(
+            args.stage_signature
         )
 
     mf = config["manifest"]

@@ -16,9 +16,9 @@ def _bcc_data() -> str:
 2 atoms
 2 atom types
 
-0.0 2.8665 xlo xhi
-0.0 2.8665 ylo yhi
-0.0 2.8665 zlo zhi
+0.0 30.0 xlo xhi
+0.0 30.0 ylo yhi
+0.0 30.0 zlo zhi
 
 Masses
 
@@ -45,9 +45,14 @@ def _elasticity_block(*, dynamic: bool = True) -> str:
     target dynamic C44 115.87 GPa
     temperature 300 K
     timestep 1 fs
-    equilibration 20000
+    npt_equilibration 21000
+    nvt_equilibration 20000
     production 40000
     seeds 101 202 303
+    validation_strain 0.001 0.003
+    validation_npt_equilibration 200000
+    validation_nvt_equilibration 50000
+    validation_production 500000
     validation_seeds 404 505 606
 """ if dynamic else ""
     return f"""property elasticity
@@ -78,6 +83,7 @@ workflow bo validate
 parameters
     range epsilon absolute 0.001 10
     range sigma absolute 0.001 5
+    cutoff 12.5 A
     mixing default
     tie epsilon all
     type 1 Fe_corner 6.0 2.3
@@ -178,8 +184,16 @@ def test_cubic_elasticity_contract_compiles_without_polluting_legacy_targets(
         "C44": {"value": 115.87, "unit": "GPa"},
     }
     assert dynamic["protocol"]["temperature_k"] == 300.0
+    assert dynamic["protocol"]["equilibration_steps"] == 21000
+    assert dynamic["protocol"]["nvt_equilibration_steps"] == 20000
     assert dynamic["protocol"]["seeds"] == [101, 202, 303]
-    assert dynamic["validation_protocol"]["seeds"] == [404, 505, 606]
+    assert dynamic["validation_protocol"] == {
+        "strain_magnitudes": [0.001, 0.003],
+        "equilibration_steps": 200000,
+        "nvt_equilibration_steps": 50000,
+        "production_steps": 500000,
+        "seeds": [404, 505, 606],
+    }
     assert "elasticity" not in config["property_evaluators"]
     assert "elasticity" not in config["validation"]["property_evaluators"]
 
@@ -211,9 +225,15 @@ def test_static_only_contract_uses_deterministic_scientific_defaults(
 def test_legacy_dynamic_input_without_holdout_seeds_keeps_old_shape(
     tmp_path: Path,
 ) -> None:
-    source = _project_text().replace(
-        "    validation_seeds 404 505 606\n", ""
-    )
+    source = _project_text()
+    for line in (
+        "    validation_strain 0.001 0.003\n",
+        "    validation_npt_equilibration 200000\n",
+        "    validation_nvt_equilibration 50000\n",
+        "    validation_production 500000\n",
+        "    validation_seeds 404 505 606\n",
+    ):
+        source = source.replace(line, "")
     compiled = compile_input(parse_input_file(_write(tmp_path, source)))
 
     assert "validation_protocol" not in (
@@ -276,6 +296,28 @@ def test_dynamic_only_settings_require_dynamic_module(tmp_path: Path) -> None:
 
     with pytest.raises(InputFileError, match="temperature requires a dynamic module"):
         parse_input_file(path)
+
+
+def test_finalists_require_dynamic_promotion_module(tmp_path: Path) -> None:
+    workflow = "workflow bo sample audit screen nn al finalists validate"
+    no_dynamic = _project_text(_elasticity_block(dynamic=False)).replace(
+        "workflow bo validate", workflow
+    )
+    with pytest.raises(
+        InputFileError, match="finalists.*module dynamic promotion"
+    ):
+        parse_input_file(_write(tmp_path, no_dynamic))
+
+
+def test_finalists_reject_validation_only_dynamic_role(tmp_path: Path) -> None:
+    workflow = "workflow bo sample audit screen nn al finalists validate"
+    validation_only = _project_text().replace(
+        "workflow bo validate", workflow
+    ).replace("module dynamic promotion", "module dynamic validation")
+    with pytest.raises(
+        InputFileError, match="finalists.*role promotion"
+    ):
+        parse_input_file(_write(tmp_path, validation_only))
 
 
 def test_validation_seeds_require_dynamic_module(tmp_path: Path) -> None:

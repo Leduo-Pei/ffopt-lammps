@@ -20,6 +20,7 @@ Pareto BO:
   posthoc        = Pareto front extracted from all valid evaluations after BO
 """
 
+import hashlib
 import math
 import os
 import csv
@@ -29,7 +30,7 @@ import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -86,6 +87,50 @@ warnings.filterwarnings("ignore", message=".*qNoisyExpectedImprovement.*")
 warnings.filterwarnings("ignore", category=RuntimeWarning, module="botorch.optim")
 warnings.filterwarnings("ignore", message=".*added jitter.*")
 warnings.filterwarnings("ignore", message=".*A not p.d..*")
+
+
+BO_CHECKPOINT_IDENTITY_SCHEMA = 1
+
+
+class CheckpointIdentityError(RuntimeError):
+    """Raised before state is loaded from an incompatible BO checkpoint."""
+
+
+def _canonical_hash(value: Any) -> str:
+    payload = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _bo_checkpoint_scientific_config(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Return BO science inputs without host/runtime-only configuration."""
+
+    excluded = {
+        "active_learning",
+        "checkpoint",
+        "cluster",
+        "machine",
+        "machine_learning",
+        "nn",
+        "optimization",
+        "parallel",
+        "workflow",
+    }
+    result = {
+        key: value
+        for key, value in config.items()
+        if not str(key).startswith("_") and key not in excluded
+    }
+    lammps = dict(result.get("lammps", {}))
+    for key in ("executable", "mpiexec", "mpi_flavor", "timeout"):
+        lammps.pop(key, None)
+    result["lammps"] = lammps
+    return result
 
 # GP kernel matrix conditioning limit.
 # Beyond ~512 points the Cholesky factorisation degrades; keep only the best N.
@@ -269,6 +314,17 @@ class ForceFieldOptimizer:
         self.coverage_enabled = str(self.objective_type).lower() == "feasible_coverage"
         self.coverage_cfg = dict(opt_cfg.get("coverage", {}))
         self._pending_selection_roles: dict[tuple[float, ...], str] = {}
+        warm_start_gate = opt_cfg.get("warm_start_gate", {})
+        self.warm_start_gate_enabled = bool(
+            warm_start_gate.get("enabled", False)
+            if isinstance(warm_start_gate, dict)
+            else warm_start_gate
+        )
+        self.warm_start_gate_mode = (
+            str(warm_start_gate.get("mode", "structural"))
+            if isinstance(warm_start_gate, dict)
+            else "structural"
+        )
 
         # TuRBO
         self.bo_method = self._select_bo_method(self.n_params, opt_cfg)
@@ -643,6 +699,84 @@ class ForceFieldOptimizer:
             return self._parse_seed_params(seed_path), seed_path
         return None, None
 
+    def _run_warm_start_gate(
+        self,
+        seed: Dict[str, float],
+        source: str,
+    ) -> None:
+        """Evaluate one declared baseline before spending the full BO budget.
+
+        The result is deliberately retained as the first exact BO observation.
+        A failed gate writes a compact diagnostic artifact and stops before any
+        LHS candidates are launched, which makes protocol drift cheap and
+        obvious instead of discovering it after a multi-hour optimization.
+        """
+
+        if self.warm_start_gate_mode != "structural":
+            raise RuntimeError(
+                f"Unsupported warm-start gate mode {self.warm_start_gate_mode!r}"
+            )
+        print("\nWarm-start structural feasibility gate")
+        print(f"  Source         : {source}")
+        print(f"  LJ cutoff      : {float(self.config['lammps']['cutoff']):g} A")
+        before = len(self.all_results)
+        key = tuple(round(float(seed[name]), 12) for name in self.param_names)
+        self._pending_selection_roles[key] = "warm_start_gate"
+        self._evaluate_and_record([seed], "warm_start_gate")
+        if len(self.all_results) != before + 1:
+            raise RuntimeError("Warm-start gate did not produce exactly one result")
+        entry = self.all_results[-1]
+        passed = bool(entry.get("success")) and bool(
+            entry.get("structural_feasible", False)
+        )
+
+        def finite_or_none(value: Any) -> float | None:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return None
+            return number if math.isfinite(number) else None
+
+        report = {
+            "status": "passed" if passed else "failed",
+            "mode": self.warm_start_gate_mode,
+            "source": source,
+            "cutoff_angstrom": float(self.config["lammps"]["cutoff"]),
+            "parameters": {name: float(seed[name]) for name in self.param_names},
+            "success": bool(entry.get("success")),
+            "structural_feasible": bool(entry.get("structural_feasible", False)),
+            "structural_constraint_violation": finite_or_none(
+                entry.get("structural_constraint_violation")
+            ),
+            "structural_limiting_constraint": str(
+                entry.get("structural_limiting_constraint", "")
+            ),
+            "structural_failed_constraints": str(
+                entry.get("structural_failed_constraints", "")
+            ),
+            "calculated": {
+                name: finite_or_none(entry.get(f"calc_{name}"))
+                for name in self.config["targets"]
+            },
+            "errors_percent": {
+                name: finite_or_none(entry.get(f"error_{name}"))
+                for name in self.config["targets"]
+            },
+        }
+        report_path = os.path.join(self.work_dir, "warm_start_gate.json")
+        os.makedirs(self.work_dir, exist_ok=True)
+        with open(report_path, "w", encoding="utf-8") as handle:
+            json.dump(report, handle, indent=2, sort_keys=True, allow_nan=False)
+            handle.write("\n")
+        if not passed:
+            failed = report["structural_failed_constraints"] or "evaluation_failed"
+            raise RuntimeError(
+                "Warm-start structural feasibility gate failed before BO sampling: "
+                f"{failed}. Inspect {report_path}; verify cutoff, data, replication, "
+                "mixing, and trajectory protocol before starting a new run."
+            )
+        print(f"  Status         : PASS ({report_path})")
+
     def run(self) -> dict:
         start_time = time.time()
         self._print_header()
@@ -670,13 +804,23 @@ class ForceFieldOptimizer:
                     if hard_differences else None
                 )
                 if seed_error:
-                    print(
-                        "  Warm-start: skipped infeasible seed from "
-                        f"{src}: {seed_error}"
-                    )
+                    if self.warm_start_gate_enabled:
+                        raise RuntimeError(
+                            "Warm-start structural feasibility gate cannot evaluate an "
+                            f"infeasible seed from {src}: {seed_error}"
+                        )
+                    print(f"  Warm-start: skipped infeasible seed from {src}: {seed_error}")
                 else:
-                    initial_points = [seed] + initial_points
+                    if self.warm_start_gate_enabled:
+                        self._run_warm_start_gate(seed, str(src))
+                    else:
+                        initial_points = [seed] + initial_points
                     print(f"  Warm-start: seeded initial batch from {src}")
+            elif self.warm_start_gate_enabled:
+                raise RuntimeError(
+                    "BO warm_start_gate is enabled, but no complete initial "
+                    "parameter centre is available"
+                )
             self._evaluate_and_record(initial_points, "initial")
 
             if self._best_valid_obj < float("inf"):
@@ -1916,8 +2060,102 @@ class ForceFieldOptimizer:
     # Checkpoint                                                              #
     # ====================================================================== #
 
+    def _checkpoint_identity_payload(self) -> dict[str, Any]:
+        """Build the immutable scientific/optimization identity of BO state."""
+
+        return {
+            "schema_version": BO_CHECKPOINT_IDENTITY_SCHEMA,
+            "pipeline_stage_signature": self.config.get("workflow", {}).get(
+                "bo_stage_signature"
+            ),
+            "scientific_config": _bo_checkpoint_scientific_config(self.config),
+            "optimization": self.config.get("optimization", {}),
+            "resolved_bo_method": self.bo_method,
+            "parameter_space": [
+                {
+                    "name": str(name),
+                    "lower": float(lower),
+                    "upper": float(upper),
+                }
+                for name, lower, upper in self.param_space
+            ],
+        }
+
+    def _checkpoint_identity(self) -> dict[str, Any]:
+        payload = self._checkpoint_identity_payload()
+        return {
+            "schema_version": BO_CHECKPOINT_IDENTITY_SCHEMA,
+            "sha256": _canonical_hash(payload),
+            "payload": payload,
+        }
+
+    def _validate_checkpoint_identity(
+        self,
+        checkpoint: Mapping[str, Any],
+        path: str,
+    ) -> None:
+        """Reject legacy, corrupt, or differently configured BO state."""
+
+        stored = checkpoint.get("checkpoint_identity")
+        if not isinstance(stored, Mapping):
+            raise CheckpointIdentityError(
+                f"Checkpoint {path} has no BO scientific/optimization identity; "
+                "legacy checkpoints cannot be resumed safely. Start an independent "
+                "run instead."
+            )
+        if stored.get("schema_version") != BO_CHECKPOINT_IDENTITY_SCHEMA:
+            raise CheckpointIdentityError(
+                f"Checkpoint {path} uses unsupported identity schema "
+                f"{stored.get('schema_version')!r}; expected "
+                f"{BO_CHECKPOINT_IDENTITY_SCHEMA}. Start an independent run."
+            )
+        stored_payload = stored.get("payload")
+        stored_digest = stored.get("sha256")
+        if not isinstance(stored_payload, Mapping) or not isinstance(
+            stored_digest, str
+        ):
+            raise CheckpointIdentityError(
+                f"Checkpoint {path} has an incomplete BO identity and is unsafe "
+                "to resume."
+            )
+        actual_stored_digest = _canonical_hash(stored_payload)
+        if stored_digest != actual_stored_digest:
+            raise CheckpointIdentityError(
+                f"Checkpoint {path} BO identity is corrupt or was edited "
+                "after it was written."
+            )
+
+        expected = self._checkpoint_identity()
+        if stored_digest != expected["sha256"]:
+            expected_payload = expected["payload"]
+            changed = sorted(
+                key
+                for key in expected_payload
+                if _canonical_hash(stored_payload.get(key))
+                != _canonical_hash(expected_payload.get(key))
+            )
+            detail = ", ".join(changed) or "unknown identity fields"
+            raise CheckpointIdentityError(
+                f"Checkpoint {path} belongs to a different BO scientific/"
+                f"optimization identity (changed: {detail}; checkpoint "
+                f"{stored_digest[:12]}, current {expected['sha256'][:12]}). "
+                "Refusing to mix its observations/objectives with this run."
+            )
+
+        if checkpoint.get("param_names") != self.param_names:
+            raise CheckpointIdentityError(
+                f"Checkpoint {path} parameter ordering differs from the current "
+                "BO parameter space."
+            )
+        if checkpoint.get("bo_method") != self.bo_method:
+            raise CheckpointIdentityError(
+                f"Checkpoint {path} BO method differs from the current resolved "
+                f"method {self.bo_method!r}."
+            )
+
     def _save_checkpoint(self):
         ckpt = {
+            "checkpoint_identity": self._checkpoint_identity(),
             "round":          self.current_round,
             "bo_method":      self.bo_method,
             "train_X":        self.train_X.numpy().tolist(),
@@ -1950,6 +2188,7 @@ class ForceFieldOptimizer:
                 json.dump(ckpt, f, indent=2, default=str)
 
     def load_checkpoint(self, path: str = None) -> bool:
+        checkpoint = None
         if path is None:
             # Each run creates a fresh timestamped work_dir, so this run's own
             # ckpt_dir is empty. For --resume to actually continue, auto-discover
@@ -1979,25 +2218,46 @@ class ForceFieldOptimizer:
                 if not cands:
                     print(f"No checkpoint found (searched {patterns})")
                     return False
-                # Pick the MOST PROGRESSED checkpoint (highest round), not just
-            # the newest file; a fresh run round-0 checkpoint can have a
-                # newer mtime than an earlier run that reached round 60.
-                def _ckpt_round(p):
+                # Only consider checkpoints with the exact current identity.
+                # A progressed checkpoint from a different target/cutoff/objective
+                # must never win merely because it has a higher round number.
+                compatible = []
+                for candidate in cands:
                     try:
-                        with open(p) as fh:
-                            return json.load(fh).get("round", -1)
-                    except Exception:
-                        return -1
-                path = max(cands, key=lambda p: (_ckpt_round(p),
-                                                 os.path.getmtime(p)))
+                        with open(candidate) as fh:
+                            candidate_checkpoint = json.load(fh)
+                        self._validate_checkpoint_identity(
+                            candidate_checkpoint, candidate
+                        )
+                    except (OSError, ValueError, CheckpointIdentityError):
+                        continue
+                    compatible.append((
+                        int(candidate_checkpoint.get("round", -1)),
+                        os.path.getmtime(candidate),
+                        candidate,
+                        candidate_checkpoint,
+                    ))
+                if not compatible:
+                    print(
+                        "No compatible checkpoint found "
+                        f"({len(cands)} checkpoint(s) had another or legacy "
+                        "BO identity)"
+                    )
+                    return False
+                round_number, _mtime, path, checkpoint = max(
+                    compatible, key=lambda item: (item[0], item[1])
+                )
                 print(f"Auto-resuming from checkpoint: {path} "
-                      f"(round {_ckpt_round(path)})")
+                      f"(round {round_number})")
         if not os.path.exists(path):
             print(f"No checkpoint at {path}")
             return False
 
-        with open(path) as f:
-            ckpt = json.load(f)
+        if checkpoint is None:
+            with open(path) as f:
+                checkpoint = json.load(f)
+        self._validate_checkpoint_identity(checkpoint, path)
+        ckpt = checkpoint
 
         self.current_round    = ckpt["round"]
         self.train_X          = torch.tensor(ckpt["train_X"],  dtype=torch.double)
@@ -2018,13 +2278,6 @@ class ForceFieldOptimizer:
             self._turbo_state.failure_counter = ts_ckpt["failure_counter"]
             self._turbo_state.success_counter = ts_ckpt["success_counter"]
             self._turbo_state.best_value      = ts_ckpt["best_value"]
-
-        # Verify param_names match (catches config changes between runs)
-        ckpt_names = ckpt.get("param_names", [])
-        if ckpt_names and ckpt_names != self.param_names:
-            print("  WARNING: checkpoint param_names differ from current config!")
-            print(f"    checkpoint : {ckpt_names}")
-            print(f"    current    : {self.param_names}")
 
         self._update_feasibility_classifier()
         print(f"Resumed from round {self.current_round}, "

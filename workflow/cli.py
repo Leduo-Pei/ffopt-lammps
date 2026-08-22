@@ -881,8 +881,8 @@ def cmd_explain(args: argparse.Namespace) -> None:
         raise SystemExit("ffopt explain expects a .in/.inp command file")
     compilation = project.compilation
     config = project.runtime_config
-    free = []
-    fixed = []
+    free: list[str] = []
+    fixed: list[str] = []
     charge_enabled = bool(config["charge"].get("enabled", False))
     for atom_type in config["atom_types"]:
         for name, value in atom_type["params"].items():
@@ -925,6 +925,34 @@ def cmd_explain(args: argparse.Namespace) -> None:
     mixing = config["pair_params"]["mixing_rule"]
     mixing_detail = _mixing_rule_description(mixing)
     print(f"LAMMPS mixing rule    : {mixing} ({mixing_detail})")
+    lammps = config.get("lammps", {})
+    cutoff = lammps.get("cutoff")
+    cutoff_policy = lammps.get("cutoff_policy", {})
+    if cutoff is not None:
+        cutoff_note = str(cutoff_policy.get("source", "compiled"))
+        ratio = cutoff_policy.get("cutoff_to_maximum_sigma_ratio")
+        sigma_max = cutoff_policy.get("maximum_sigma_bound")
+        if ratio is not None and sigma_max is not None:
+            cutoff_note += (
+                f", {float(ratio):.3f} x maximum sigma bound "
+                f"{float(sigma_max):g} A"
+            )
+        print(f"LJ cutoff             : {float(cutoff):g} A ({cutoff_note})")
+        print(
+            "LJ energy convention  : "
+            f"shift={'yes' if lammps.get('shift', False) else 'no'}, "
+            f"tail={'yes' if lammps.get('tail_correction', False) else 'no'}"
+        )
+        for check in cutoff_policy.get("periodic_box_checks", []):
+            safe_maximum = float(check["maximum_safe_cutoff_angstrom"])
+            margin = safe_maximum - float(cutoff)
+            role = str(check.get("role", "periodic box"))
+            replicate = "x".join(str(value) for value in check.get("replicate", []))
+            print(
+                f"  box safety {role:<16}: {float(cutoff):g} <= "
+                f"{safe_maximum:.4f} A (0.45*h_min, margin={margin:.4f} A, "
+                f"replicate={replicate or '-'})"
+            )
     print("\nProperties:")
     for prop in compilation.document.properties:
         if prop.name == "elasticity":
@@ -981,18 +1009,30 @@ def cmd_explain(args: argparse.Namespace) -> None:
             static_protocol = modules.get("static", {}).get("protocol", {})
             dynamic_module = modules.get("dynamic", {})
             dynamic_protocol = dynamic_module.get("protocol", {})
-            strains = static_protocol.get(
-                "strain_magnitudes", dynamic_protocol.get("strain_magnitudes", [])
-            )
+            strains = static_protocol.get("strain_magnitudes", [])
             promotion_seeds = dynamic_protocol.get("seeds", [])
-            validation_seeds = dynamic_module.get("validation_protocol", {}).get(
-                "seeds", []
+            validation_overrides = dynamic_module.get("validation_protocol", {})
+            validation_protocol = {**dynamic_protocol, **validation_overrides}
+            print(
+                "    static protocol: "
+                f"strains={list(strains)}, replicate="
+                f"{list(static_protocol.get('replicate', []))}"
             )
             print(
-                "    protocols: "
-                f"strains={list(strains)}, "
-                f"promotion_seeds={list(promotion_seeds)}, "
-                f"validation_seeds={list(validation_seeds)}"
+                "    quick promotion: "
+                f"strains={list(dynamic_protocol.get('strain_magnitudes', []))}, "
+                f"NPT={dynamic_protocol.get('equilibration_steps')}, "
+                f"NVT={dynamic_protocol.get('nvt_equilibration_steps')}, "
+                f"production={dynamic_protocol.get('production_steps')}, "
+                f"seeds={list(promotion_seeds)}"
+            )
+            print(
+                "    final validation: "
+                f"strains={list(validation_protocol.get('strain_magnitudes', []))}, "
+                f"NPT={validation_protocol.get('equilibration_steps')}, "
+                f"NVT={validation_protocol.get('nvt_equilibration_steps')}, "
+                f"production={validation_protocol.get('production_steps')}, "
+                f"seeds={list(validation_protocol.get('seeds', []))}"
             )
             continue
         role = "fit + final validation" if prop.fitted else "final validation only"
@@ -1069,6 +1109,17 @@ def cmd_explain(args: argparse.Namespace) -> None:
             f"audit_max_evaluations={stability_evaluations} "
             f"stage_max_evaluations={total_evaluations + stability_evaluations}"
         )
+        warm_gate = optimization.get("warm_start_gate", {})
+        print(
+            "BO protocol gate       : "
+            f"{'required' if warm_gate.get('enabled') else 'off'}"
+            + (
+                f" ({warm_gate.get('mode', 'structural')}; one exact warm-start "
+                "evaluation before LHS)"
+                if warm_gate.get("enabled")
+                else ""
+            )
+        )
     if "sample" in stages:
         seeds = sample.get("seeds", [])
         points = int(sample.get("n_points", 0))
@@ -1119,6 +1170,16 @@ def cmd_explain(args: argparse.Namespace) -> None:
             f"rounds={active_learning.get('n_rounds')} "
             f"LAMMPS candidates/round={active_learning.get('n_candidates_per_round')} "
             f"domain={active_learning.get('sampling_domain')}"
+        )
+    if "finalists" in stages:
+        finalists = project.data.get("pipeline", {}).get("finalists", {})
+        print(
+            "Dynamic finalists      : "
+            f"minimum={finalists.get('minimum')} "
+            f"maximum={finalists.get('maximum')} "
+            f"hard_floor={'yes' if finalists.get('require_minimum') else 'no'} "
+            f"window={finalists.get('near_optimal_window_percent')}% "
+            f"diverse={finalists.get('diverse_reserve')}"
         )
     if "audit" in stages:
         final_audit = project.data.get("pipeline", {}).get("audit", {})

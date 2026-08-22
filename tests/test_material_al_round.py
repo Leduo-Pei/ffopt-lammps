@@ -473,6 +473,21 @@ def test_public_pipeline_advances_two_exact_rounds_then_traceably_skips(
         },
     })
     monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: config)
+    original_material_validation = PipelineRunner._material_stage_outputs_valid
+
+    def accept_synthetic_upstream(self, spec):
+        # This end-to-end test exercises constrained-AL manifests. Its upstream
+        # files are intentionally synthetic placeholders rather than artifacts
+        # published by the real candidate/static/NN stage commands.
+        if spec.command_token != "constrained-al":
+            return True, "synthetic upstream fixture accepted"
+        return original_material_validation(self, spec)
+
+    monkeypatch.setattr(
+        PipelineRunner,
+        "_material_stage_outputs_valid",
+        accept_synthetic_upstream,
+    )
     runner = PipelineRunner(project=project, machine="local", run_id="two-rounds")
     rows = [
         _structural_row(0.2 + 0.1 * index, 1.1 + 0.12 * index)

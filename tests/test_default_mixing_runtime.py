@@ -58,6 +58,7 @@ def test_bulk_pair_writer_delegates_default_but_keeps_explicit_rules(
     path = _writer(rule)._build_pair_coeffs(_resolved(), str(tmp_path))
     text = open(path, encoding="utf-8").read()
 
+    assert "pair_modify shift no tail no" in text
     assert "pair_modify mix default" not in text
     if expected is None:
         assert "pair_modify mix" not in text
@@ -85,6 +86,7 @@ def test_adsorption_pair_writer_matches_bulk_mixing_semantics(
     )
     text = open(path, encoding="utf-8").read()
 
+    assert "pair_modify shift no tail no" in text
     assert "pair_modify mix default" not in text
     if expected is None:
         assert "pair_modify mix" not in text

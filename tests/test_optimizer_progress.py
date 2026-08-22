@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import csv
 import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -102,6 +103,70 @@ class OptimizerProgressTests(unittest.TestCase):
 
         self.assertEqual(seed, {"N_charge": -0.5})
         self.assertEqual(source, "atom_types init values")
+
+    def test_warm_start_feasibility_gate_records_one_exact_pass(self) -> None:
+        optimizer = ForceFieldOptimizer.__new__(ForceFieldOptimizer)
+        optimizer.param_names = ["epsilon"]
+        optimizer.config = {
+            "lammps": {"cutoff": 12.5},
+            "targets": {"a": {"value": 2.8665}},
+        }
+        optimizer.all_results = []
+        optimizer._pending_selection_roles = {}
+        optimizer.warm_start_gate_mode = "structural"
+
+        def evaluate(points, label):
+            self.assertEqual(label, "warm_start_gate")
+            self.assertEqual(points, [{"epsilon": 6.0}])
+            optimizer.all_results.append({
+                "success": True,
+                "structural_feasible": True,
+                "calc_a": 2.8665,
+                "error_a": 0.0,
+            })
+
+        optimizer._evaluate_and_record = evaluate
+        with tempfile.TemporaryDirectory() as directory:
+            optimizer.work_dir = directory
+            optimizer._run_warm_start_gate({"epsilon": 6.0}, "test baseline")
+            report = json.loads(
+                Path(directory, "warm_start_gate.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(report["status"], "passed")
+        self.assertEqual(report["cutoff_angstrom"], 12.5)
+        self.assertEqual(len(optimizer.all_results), 1)
+
+    def test_warm_start_feasibility_gate_fails_before_sampling(self) -> None:
+        optimizer = ForceFieldOptimizer.__new__(ForceFieldOptimizer)
+        optimizer.param_names = ["epsilon"]
+        optimizer.config = {
+            "lammps": {"cutoff": 8.0},
+            "targets": {"surf_energy": {"value": 2.34}},
+        }
+        optimizer.all_results = []
+        optimizer._pending_selection_roles = {}
+        optimizer.warm_start_gate_mode = "structural"
+
+        def evaluate(_points, _label):
+            optimizer.all_results.append({
+                "success": True,
+                "structural_feasible": False,
+                "structural_failed_constraints": "surf_energy",
+                "calc_surf_energy": 2.0694,
+                "error_surf_energy": 11.56,
+            })
+
+        optimizer._evaluate_and_record = evaluate
+        with tempfile.TemporaryDirectory() as directory:
+            optimizer.work_dir = directory
+            with self.assertRaisesRegex(RuntimeError, "surf_energy"):
+                optimizer._run_warm_start_gate({"epsilon": 6.0}, "test baseline")
+            report = json.loads(
+                Path(directory, "warm_start_gate.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(report["status"], "failed")
 
     def test_explicit_saasbo_never_silently_changes_method(self) -> None:
         with mock.patch.object(optimizer_module, "_SAASBO_AVAILABLE", False):

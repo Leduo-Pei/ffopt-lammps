@@ -37,6 +37,7 @@ workflow bo
 parameters
     range epsilon absolute 0.001 10
     range sigma absolute 0.001 5
+    cutoff 12.5 A
     mixing default
     tie epsilon all
     {difference}
@@ -48,6 +49,24 @@ property bulk
     data "{data_path.as_posix()}"
     cells_in_data 1 1 1
     target a 2.8665 A weight 1 tolerance 0.03
+end
+"""
+
+
+def _dynamic_elasticity_text() -> str:
+    return """
+property elasticity
+    module static objective
+    target static B 173.1 GPa
+    target static Cprime 52.5 GPa
+    target static C44 121.9 GPa
+    module dynamic promotion
+    target dynamic B 166.2 GPa
+    target dynamic Cprime 48.15 GPa
+    target dynamic C44 115.87 GPa
+    strain 0.002 0.004
+    seeds 101
+    validation_seeds 404
 end
 """
 
@@ -66,9 +85,9 @@ def _elemental_data(tmp_path: Path) -> Path:
 2 atoms
 2 atom types
 
-0 2.8665 xlo xhi
-0 2.8665 ylo yhi
-0 2.8665 zlo zhi
+0 30.0 xlo xhi
+0 30.0 ylo yhi
+0 30.0 zlo zhi
 
 Masses
 
@@ -104,6 +123,9 @@ def test_packaged_fe_full_and_non_scientific_canary_compile(tmp_path):
     canary = _compile_packaged_fe_input(canary_path, tmp_path, "canary.in")
 
     assert full.config["optimization"]["stability_audit"]["enabled"] is False
+    assert full.config["elasticity"]["modules"]["dynamic"][
+        "validation_protocol"
+    ]["seeds"] == [404, 505, 606]
     assert canary.document.project == "fe_bcc_canary"
     assert "NON_SCIENTIFIC_CANARY" in canary_path.read_text(encoding="utf-8")
     assert canary.config["optimization"]["n_initial"] == 4
@@ -155,9 +177,20 @@ def test_explain_reports_material_parameter_graph_and_elasticity_contract(
     assert "targets: B=166.2 GPa, Cprime=48.15 GPa, C44=115.87 GPa" in output
     assert "lattice<=1%, angles<=1 degree, density<=1%, surface<=5%" in output
     assert "tier=20.0% (soft/reporting only), Born=required, R2>=0.98" in output
-    assert "strains=[0.002, 0.004, 0.006]" in output
-    assert "promotion_seeds=[101, 202, 303]" in output
-    assert "validation_seeds=[404, 505, 606]" in output
+    assert "LJ cutoff             : 12.5 A" in output
+    assert "LJ energy convention  : shift=no, tail=no" in output
+    assert "box safety bulk" in output
+    assert "0.45*h_min" in output
+    assert "static protocol: strains=[0.002, 0.004, 0.006]" in output
+    assert "quick promotion: strains=[0.002, 0.004, 0.006]" in output
+    assert "seeds=[101, 202, 303]" in output
+    assert "final validation: strains=[0.001, 0.003]" in output
+    assert (
+        "NPT=200000, NVT=50000, production=500000, seeds=[404, 505, 606]"
+        in output
+    )
+    assert "BO protocol gate       : required" in output
+    assert "Dynamic finalists      : minimum=20 maximum=20 hard_floor=yes" in output
     assert (
         "Constrained AL        : rounds<=8 auto_advance=yes "
         "structural/static candidates=76/38 pool=65536"
@@ -237,6 +270,7 @@ def test_elemental_public_workflow_compiles_to_repeated_constrained_al(tmp_path)
         "workflow bo",
         "workflow bo sample audit screen nn al finalists validate",
     )
+    source += _dynamic_elasticity_text()
     source += """
 bo
     objective feasible_coverage
@@ -320,6 +354,7 @@ end
             "diverse_reserve": 1,
             "top_n": 20,
             "diversity_slots": 1,
+            "require_minimum": False,
         },
         "graph_mode": "linear",
     }
@@ -348,6 +383,7 @@ def test_compiled_material_stage_graph_consumes_public_stage_settings(
         "workflow bo",
         "workflow bo sample audit screen nn al finalists validate",
     )
+    source += _dynamic_elasticity_text()
     source += """
 audit
     top_k 6
@@ -381,6 +417,7 @@ finalists
     maximum 7
     window 2.5
     diverse 2
+    require_minimum yes
 end
 """
     path = _write(tmp_path, source)
@@ -440,6 +477,7 @@ end
             "candidate_pool",
             "seed",
             "structural_seeds",
+            "minimum_eligible_finalists",
         )
     } == {
         "maximum_rounds": 4,
@@ -454,6 +492,7 @@ end
         "candidate_pool": 111,
         "seed": 42,
         "structural_seeds": [11, 13, 17],
+        "minimum_eligible_finalists": 3,
     }
     assert runner._stage_settings("finalists") == {
         "minimum": 3,
@@ -462,6 +501,7 @@ end
         "diverse_reserve": 2,
         "top_n": 7,
         "diversity_slots": 2,
+        "require_minimum": True,
     }
 
     specs = {item.name: item for item in runner.build_specs()}
@@ -481,6 +521,7 @@ end
         finalists.index("--near-optimal-window-percent") + 1
     ] == "2.5"
     assert finalists[finalists.index("--diversity-slots") + 1] == "2"
+    assert "--require-minimum" in finalists
 
 
 def test_feasible_coverage_without_detail_line_persists_defaults(tmp_path):
@@ -543,6 +584,21 @@ def test_packaged_fe_bcc_example_compiles_as_one_managed_pipeline(tmp_path):
     assert compiled.config["elasticity"]["modules"]["dynamic"]["protocol"][
         "seeds"
     ] == [101, 202, 303]
+    assert compiled.config["lammps"]["cutoff"] == pytest.approx(12.5)
+    assert compiled.config["lammps"]["cutoff_policy"]["source"] == "parameters.cutoff"
+    dynamic = compiled.config["elasticity"]["modules"]["dynamic"]
+    assert dynamic["protocol"]["production_steps"] == 40000
+    assert dynamic["validation_protocol"] == {
+        "strain_magnitudes": [0.001, 0.003],
+        "equilibration_steps": 200000,
+        "nvt_equilibration_steps": 50000,
+        "production_steps": 500000,
+        "seeds": [404, 505, 606],
+    }
+    assert compiled.project_data["pipeline"]["finalists"]["require_minimum"] is True
+    assert compiled.project_data["pipeline"]["constrained_al"][
+        "minimum_eligible_finalists"
+    ] == 20
 
 
 @pytest.mark.parametrize("kind", ["molecular", "multicomponent"])

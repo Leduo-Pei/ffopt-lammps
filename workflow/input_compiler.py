@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,7 @@ from typing import Any
 from engine.config_loader import deep_merge
 from engine.resources import resolve_builtin_resource
 
+from .artifact_manifest import sha256_file
 from .defaults import method_defaults
 from .input_file import FFOptInput, InputFileError, PropertySpec
 from .lammps_data import inspect_lammps_data
@@ -86,6 +88,70 @@ def _path(document: FFOptInput, value: str) -> str:
 
 def _property(document: FFOptInput, name: str) -> PropertySpec | None:
     return next((item for item in document.properties if item.name == name), None)
+
+
+def _record_scientific_data_artifacts(
+    document: FFOptInput,
+    config: dict[str, Any],
+) -> None:
+    """Content-address every compiled ``data_files`` input.
+
+    Paths alone are not a scientific identity: a user may replace atom
+    coordinates in-place while retaining the same filename, box, type table,
+    and atom counts.  Store one role-aware digest for every compiled
+    ``data_files`` mapping so runtime snapshots and pipeline scientific hashes
+    change with the bytes actually read by LAMMPS.
+    """
+
+    artifacts: dict[str, dict[str, Any]] = {}
+    digest_cache: dict[Path, dict[str, Any]] = {}
+
+    def visit(value: Any, scope: tuple[str, ...] = ()) -> None:
+        if not isinstance(value, Mapping):
+            return
+        data_files = value.get("data_files")
+        if data_files is not None:
+            if not isinstance(data_files, Mapping):
+                raise InputFileError(
+                    document.path,
+                    1,
+                    f"compiled {'.'.join((*scope, 'data_files'))} must be a mapping",
+                )
+            for role, raw_path in sorted(data_files.items(), key=lambda item: str(item[0])):
+                if not isinstance(raw_path, (str, Path)):
+                    raise InputFileError(
+                        document.path,
+                        1,
+                        f"compiled {'.'.join((*scope, 'data_files', str(role)))} "
+                        "must be a file path",
+                    )
+                source = Path(raw_path).expanduser().resolve()
+                try:
+                    digest = digest_cache.get(source)
+                    if digest is None:
+                        digest = sha256_file(source).to_dict()
+                        digest_cache[source] = digest
+                except (OSError, ValueError) as exc:
+                    raise InputFileError(
+                        document.path,
+                        1,
+                        f"cannot fingerprint scientific data file {source}: {exc}",
+                    ) from exc
+                label = ".".join((*scope, "data_files", str(role)))
+                artifacts[label] = {"path": str(source), **digest}
+        for key, child in sorted(value.items(), key=lambda item: str(item[0])):
+            if key in {"data_files", "data_artifacts"}:
+                continue
+            visit(child, (*scope, str(key)))
+
+    visit(config)
+    if not artifacts:
+        raise InputFileError(
+            document.path,
+            1,
+            "compiled project contains no scientific data_files to fingerprint",
+        )
+    config["manifest"]["data_artifacts"] = artifacts
 
 
 def _primary_data(document: FFOptInput) -> Path:
@@ -356,6 +422,59 @@ def _target_document(document: FFOptInput, prop: PropertySpec) -> dict[str, dict
     return result
 
 
+def _enforce_elemental_bcc_cutoff_box(
+    document: FFOptInput,
+    config: dict[str, Any],
+    *,
+    role: str,
+    summary: Any,
+    replicate: tuple[int, int, int] | list[int],
+) -> None:
+    """Validate cutoff against triclinic-safe periodic face heights."""
+
+    if not (
+        document.material_kind == "elemental"
+        and document.crystal_family == "bcc"
+    ):
+        return
+    try:
+        factors = tuple(int(value) for value in replicate)
+        heights = tuple(
+            float(value) for value in summary.periodic_face_heights(factors)
+        )
+    except (TypeError, ValueError) as exc:
+        raise InputFileError(
+            document.path,
+            document.parameters.setting_lines["cutoff"],
+            f"cannot validate periodic cutoff safety for {role}: {exc}",
+        ) from exc
+    shortest = min(heights)
+    safety_fraction = 0.45
+    safe_maximum = safety_fraction * shortest
+    cutoff = float(config["lammps"]["cutoff"])
+    check = {
+        "role": role,
+        "data": str(summary.path),
+        "replicate": list(factors),
+        "periodic_face_heights_angstrom": list(heights),
+        "shortest_periodic_face_height_angstrom": shortest,
+        "safety_fraction": safety_fraction,
+        "maximum_safe_cutoff_angstrom": safe_maximum,
+    }
+    config["lammps"]["cutoff_policy"].setdefault(
+        "periodic_box_checks", []
+    ).append(check)
+    if cutoff > safe_maximum + 1.0e-12:
+        raise InputFileError(
+            document.path,
+            document.parameters.setting_lines["cutoff"],
+            f"global LJ cutoff is unsafe for periodic {role}: cutoff={cutoff:g} A, "
+            f"replicated shortest face height={shortest:g} A, required cutoff "
+            f"<= 0.45*h_min={safe_maximum:g} A; enlarge replicate or reduce the "
+            "declared sigma search range and cutoff together",
+        )
+
+
 def _compile_bulk(document: FFOptInput, prop: PropertySpec, config: dict[str, Any]) -> dict[str, Any]:
     value = prop.data_files.get("bulk")
     if not value:
@@ -390,12 +509,28 @@ def _compile_bulk(document: FFOptInput, prop: PropertySpec, config: dict[str, An
             prop.setting_lines.get("replicate", prop.line),
             "bulk replicate values must be positive integers",
         )
+    bulk_path = Path(_path(document, value))
+    try:
+        bulk_summary = inspect_lammps_data(bulk_path)
+    except (OSError, ValueError) as exc:
+        raise InputFileError(
+            document.path,
+            prop.line,
+            f"cannot inspect bulk data {bulk_path}: {exc}",
+        ) from exc
+    _enforce_elemental_bcc_cutoff_box(
+        document,
+        config,
+        role="bulk",
+        summary=bulk_summary,
+        replicate=replicate,
+    )
     effective_cells = tuple(
         count * multiplier for count, multiplier in zip(cells, replicate)
     )
     temperature = float(prop.settings.get("temperature", 300.0))
     timestep = float(prop.settings.get("timestep", 1.0))
-    cutoff = float(prop.settings.get("cutoff", 8.0))
+    cutoff = float(config["lammps"]["cutoff"])
     equilibration = int(prop.settings.get("equilibration", 20000))
     production = int(prop.settings.get("production", 40000))
     seed = int(prop.settings.get("seed", 101))
@@ -449,7 +584,7 @@ def _compile_bulk(document: FFOptInput, prop: PropertySpec, config: dict[str, An
             prop.setting_lines.get("seed", prop.line),
             "bulk seed must be positive",
         )
-    config["manifest"]["data_files"]["bulk"] = _path(document, value)
+    config["manifest"]["data_files"]["bulk"] = str(bulk_path)
     bulk_config: dict[str, Any] = {
         "nx": int(effective_cells[0]),
         "ny": int(effective_cells[1]),
@@ -504,7 +639,7 @@ def _compile_sublimation(
         )
     )
     target_temperature = float(prop.settings.get("temperature", 298.15))
-    single_cutoff = float(prop.settings.get("cutoff", config["lammps"]["cutoff"]))
+    single_cutoff = float(config["lammps"]["cutoff"])
     if target_temperature <= 0.0:
         raise InputFileError(
             document.path,
@@ -514,7 +649,7 @@ def _compile_sublimation(
     if single_cutoff <= 0.0:
         raise InputFileError(
             document.path,
-            prop.setting_lines.get("cutoff", prop.line),
+            document.parameters.setting_lines["cutoff"],
             "sublimation cutoff must be positive",
         )
     targets = _target_document(document, prop)
@@ -549,11 +684,11 @@ def _compile_adsorption(document: FFOptInput, prop: PropertySpec, config: dict[s
     missing = [name for name in ("complex", "slab", "molecule") if name not in prop.data_files]
     if missing:
         raise InputFileError(document.path, prop.line, f"adsorption data missing: {missing}")
-    cutoff = float(prop.settings.get("cutoff", 7.0))
+    cutoff = float(config["lammps"]["cutoff"])
     if cutoff <= 0.0:
         raise InputFileError(
             document.path,
-            prop.setting_lines.get("cutoff", prop.line),
+            document.parameters.setting_lines["cutoff"],
             "adsorption cutoff must be positive",
         )
     data_paths = {
@@ -724,6 +859,13 @@ def _compile_surface(
                 prop.line,
                 f"cannot inspect surface {role} data {data_path}: {exc}",
             ) from exc
+        _enforce_elemental_bcc_cutoff_box(
+            document,
+            config,
+            role=f"surface_{role}",
+            summary=summaries[role],
+            replicate=replicate,
+        )
     try:
         primary_summary = inspect_lammps_data(primary_data)
     except (OSError, ValueError) as exc:  # Usually reported by _compile_atom_types first.
@@ -879,6 +1021,22 @@ def _compile_elasticity(
         "strain", (0.002, 0.004, 0.006)
     )]
     replicate = [int(value) for value in prop.settings.get("replicate", (1, 1, 1))]
+    elasticity_bulk_path = Path(_path(document, bulk_prop.data_files["bulk"]))
+    try:
+        elasticity_bulk_summary = inspect_lammps_data(elasticity_bulk_path)
+    except (OSError, ValueError) as exc:
+        raise InputFileError(
+            document.path,
+            prop.line,
+            f"cannot inspect elasticity bulk data {elasticity_bulk_path}: {exc}",
+        ) from exc
+    _enforce_elemental_bcc_cutoff_box(
+        document,
+        config,
+        role="elasticity",
+        summary=elasticity_bulk_summary,
+        replicate=replicate,
+    )
     minimum_r2 = float(prop.settings.get("minimum_r2", 0.98))
     born_required = bool(prop.settings.get("born", True))
     reporting_tier = float(prop.settings.get("tier", 20.0))
@@ -929,7 +1087,16 @@ def _compile_elasticity(
                 "temperature_k": float(prop.settings.get("temperature", 300.0)),
                 "timestep_fs": float(prop.settings.get("timestep", 1.0)),
                 "equilibration_steps": int(
-                    prop.settings.get("equilibration", 20000)
+                    prop.settings.get(
+                        "npt_equilibration",
+                        prop.settings.get("equilibration", 20000),
+                    )
+                ),
+                "nvt_equilibration_steps": int(
+                    prop.settings.get(
+                        "nvt_equilibration",
+                        prop.settings.get("equilibration", 20000),
+                    )
                 ),
                 "production_steps": int(prop.settings.get("production", 40000)),
                 "seeds": [int(value) for value in prop.settings.get(
@@ -937,12 +1104,29 @@ def _compile_elasticity(
                 )],
             },
         }
+        validation_protocol: dict[str, Any] = {}
         if "validation_seeds" in prop.settings:
-            dynamic_module["validation_protocol"] = {
-                "seeds": [
-                    int(value) for value in prop.settings["validation_seeds"]
-                ],
-            }
+            validation_protocol["seeds"] = [
+                int(value) for value in prop.settings["validation_seeds"]
+            ]
+        validation_aliases = {
+            "validation_strain": "strain_magnitudes",
+            "validation_npt_equilibration": "equilibration_steps",
+            "validation_nvt_equilibration": "nvt_equilibration_steps",
+            "validation_equilibration": "nvt_equilibration_steps",
+            "validation_production": "production_steps",
+        }
+        for public_name, compiled_name in validation_aliases.items():
+            if public_name not in prop.settings:
+                continue
+            raw = prop.settings[public_name]
+            validation_protocol[compiled_name] = (
+                [float(value) for value in raw]
+                if public_name == "validation_strain"
+                else int(raw)
+            )
+        if validation_protocol:
+            dynamic_module["validation_protocol"] = validation_protocol
         modules["dynamic"] = dynamic_module
 
     config["elasticity"] = {
@@ -982,6 +1166,7 @@ def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: 
         "method": "method", "initial_points": "n_initial", "rounds": "n_bo_iterations",
         "max_rounds": "n_bo_iterations", "batch_size": "batch_size",
         "random_seed": "random_seed", "objective": "objective",
+        "warm_start_gate": "warm_start_gate",
     }
     sample_map = {
         "points": "n_points", "centers": "elite_centers", "elite_centers": "elite_centers",
@@ -1019,6 +1204,7 @@ def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: 
         "maximum": "maximum",
         "window": "near_optimal_window_percent",
         "diverse": "diverse_reserve",
+        "require_minimum": "require_minimum",
     }
     maps = {
         "bo": bo_map,
@@ -1224,6 +1410,31 @@ def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: 
             document.path,
             _stage_line(document, "bo", "objective"),
             "BO feasible_coverage requires an explicit material workflow",
+        )
+    warm_start_gate = optimization.get("warm_start_gate", False)
+    if warm_start_gate is True:
+        warm_start_gate = "structural"
+    if warm_start_gate in {False, None}:
+        optimization["warm_start_gate"] = {
+            "enabled": False,
+            "mode": "structural",
+        }
+    elif str(warm_start_gate).lower() == "structural":
+        if objective != "feasible_coverage":
+            raise InputFileError(
+                document.path,
+                _stage_line(document, "bo", "warm_start_gate"),
+                "BO warm_start_gate structural requires objective feasible_coverage",
+            )
+        optimization["warm_start_gate"] = {
+            "enabled": True,
+            "mode": "structural",
+        }
+    else:
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "bo", "warm_start_gate"),
+            "BO warm_start_gate must be off, on, or structural",
         )
     configured_coverage = optimization.get("coverage", {})
     if configured_coverage and objective != "feasible_coverage":
@@ -1661,6 +1872,7 @@ def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: 
             "maximum": 20,
             "near_optimal_window_percent": 1.0,
             "diverse_reserve": 1,
+            "require_minimum": False,
         }
         for key, value in defaults.items():
             finalists.setdefault(key, value)
@@ -1683,6 +1895,12 @@ def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: 
                 document.path,
                 _stage_line(document, "finalists", "minimum", "maximum"),
                 "finalists minimum cannot exceed maximum",
+            )
+        if not isinstance(finalists["require_minimum"], bool):
+            raise InputFileError(
+                document.path,
+                _stage_line(document, "finalists", "require_minimum"),
+                "finalists require_minimum must be yes or no",
             )
         window = float(finalists["near_optimal_window_percent"])
         if not math.isfinite(window) or window < 0.0:
@@ -1722,6 +1940,35 @@ def compile_input(document: FFOptInput) -> CompiledInput:
     if params.derive_charge is not None:
         derive_type = next(item.type_id for item in params.atom_types if item.label == params.derive_charge)
 
+    if params.cutoff is None:  # Defensive: parse_input_file validates this first.
+        raise InputFileError(
+            document.path, 1,
+            "parameters block requires explicit 'cutoff VALUE A'",
+        )
+    cutoff = float(params.cutoff)
+    sigma_upper_bounds = []
+    for atom_type in atom_types:
+        sigma = atom_type["params"]["sigma"]
+        sigma_upper_bounds.append(
+            float(sigma["max"]) if isinstance(sigma, dict) else float(sigma)
+        )
+    maximum_sigma = max(sigma_upper_bounds)
+    cutoff_ratio = cutoff / maximum_sigma
+    minimum_elemental_ratio = 2.5
+    is_elemental_bcc = (
+        document.material_kind == "elemental"
+        and document.crystal_family == "bcc"
+    )
+    if is_elemental_bcc and cutoff_ratio + 1.0e-12 < minimum_elemental_ratio:
+        raise InputFileError(
+            document.path,
+            params.setting_lines["cutoff"],
+            "elemental BCC LJ cutoff must cover the complete optimization "
+            f"domain: cutoff={cutoff:g} A, maximum sigma bound={maximum_sigma:g} A, "
+            f"required cutoff >= 2.5*sigma_max="
+            f"{minimum_elemental_ratio * maximum_sigma:g} A",
+        )
+
     config = deep_merge(method_defaults(), {
         "manifest": {
             "system_name": document.project,
@@ -1756,7 +2003,17 @@ def compile_input(document: FFOptInput) -> CompiledInput:
             "bulk_input": _resource("lammps/inputs/bulk/in.bulk.mol"),
             "surf_input": _resource("lammps/inputs/bulk/in.bulk.mol"),
             "compute_surface": False,
-            "cutoff": 8.0,
+            "cutoff": cutoff,
+            # Explicitly lock the two LAMMPS pair_modify energy conventions.
+            # Surface energies are especially sensitive to accidental drift.
+            "shift": False,
+            "tail_correction": False,
+            "cutoff_policy": {
+                "source": "parameters.cutoff",
+                "maximum_sigma_bound": maximum_sigma,
+                "cutoff_to_maximum_sigma_ratio": cutoff_ratio,
+                "minimum_ratio": minimum_elemental_ratio if is_elemental_bcc else None,
+            },
             "timestep": 1.0,
             "bulk": {
                 "nx": 1, "ny": 1, "nz": 1, "npt_seed": 101,
@@ -1884,6 +2141,12 @@ def compile_input(document: FFOptInput) -> CompiledInput:
                 name, {"enabled": True}
             )
 
+    # Freeze the bytes behind every role-aware data_files entry only after all
+    # property compilers have registered their inputs.  This field remains in
+    # the compiled config, the machine-composed runtime config, and therefore
+    # the pipeline scientific hash used to authorize resume.
+    _record_scientific_data_artifacts(document, config)
+
     stages: dict[str, Any] = {
         "sample": {
             "n_points": min(2500, max(1500, 75 * max(dimensions, 1))),
@@ -1968,6 +2231,10 @@ def compile_input(document: FFOptInput) -> CompiledInput:
             "top_n": int(finalist_settings["maximum"]),
             "diversity_slots": int(finalist_settings["diverse_reserve"]),
         }
+        if bool(finalist_settings.get("require_minimum", False)):
+            pipeline["constrained_al"]["minimum_eligible_finalists"] = int(
+                finalist_settings["minimum"]
+            )
 
     project_data = {
         "schema_version": 1,

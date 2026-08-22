@@ -721,12 +721,13 @@ def rank_elastic_results(frame: pd.DataFrame) -> pd.DataFrame:
     )
     # Fail closed if an upstream table contains an inconsistent eligibility
     # flag.  The auditable gate evidence, rather than that convenience flag,
-    # decides whether a row may enter finalist selection.
+    # decides whether a row may enter finalist selection. ``recorded_eligible``
+    # already applies Born stability only when the input declares it required;
+    # do not silently turn ``born off`` back into a hard gate here.
     recorded_eligible = _truth_series(ranked, "finalist_eligible")
     ranked["finalist_eligible"] = (
         recorded_eligible
         & ranked["structural_gate_pass"]
-        & ranked["born_stability_pass"]
         & ranked["fit_quality_pass"]
         & ranked["finite_mechanical_score"]
     )
@@ -1230,6 +1231,7 @@ def _stage_scientific_config(
     protocol: str,
     top_n: int,
     minimum: int,
+    require_minimum: bool,
     near_optimal_window_percent: float,
     diversity_slots: int,
     evaluate_structural_failures: bool,
@@ -1239,10 +1241,22 @@ def _stage_scientific_config(
         "elasticity": config["elasticity"],
         "material": config.get("material", {}),
         "crystal": config.get("crystal", {}),
+        # Keep the force-field protocol self-describing.  The immutable input
+        # config hash already rejects cross-cutoff reuse, while this explicit
+        # subset also makes the scientific hash explain *why* it changed.
+        "lammps_protocol": {
+            key: config.get("lammps", {}).get(key)
+            for key in (
+                "pair_style", "cutoff", "mixing_rule", "shift",
+                "tail_correction",
+            )
+            if key in config.get("lammps", {})
+        },
         "parameter_space": build_parameter_space(dict(config)),
         "finalist_selection": {
             "top_n": top_n,
             "minimum": minimum,
+            "require_minimum": bool(require_minimum),
             "near_optimal_window_percent": near_optimal_window_percent,
             "diversity_slots": diversity_slots,
         },
@@ -1353,6 +1367,7 @@ def run_elasticity_batch(
     near_optimal_window_percent: float = 5.0,
     diversity_slots: int = 2,
     minimum: int = 1,
+    require_minimum: bool = False,
     evaluate_structural_failures: bool = False,
     backend_factory: BackendFactory = default_backend_factory,
 ) -> pd.DataFrame:
@@ -1369,11 +1384,13 @@ def run_elasticity_batch(
     module = _protocol_module(config, canonical_protocol)
     parameter_space = build_parameter_space(config)
     candidates = load_candidates(parameter_source, parameter_space)
+    input_candidate_count = len(candidates)
     scientific = _stage_scientific_config(
         config,
         protocol=canonical_protocol,
         top_n=top_n,
         minimum=minimum,
+        require_minimum=require_minimum,
         near_optimal_window_percent=near_optimal_window_percent,
         diversity_slots=diversity_slots,
         evaluate_structural_failures=evaluate_structural_failures,
@@ -1410,6 +1427,26 @@ def run_elasticity_batch(
             diversity_slots=diversity_slots,
             minimum=minimum,
         )
+        if require_minimum and len(selected_input) < minimum:
+            outputs = _output_paths(destination, canonical_protocol)
+            _write_frame(outputs["finalists"], selected_input)
+            _write_json(
+                outputs["batch_summary"],
+                {
+                    "schema_version": 1,
+                    "protocol": canonical_protocol,
+                    "status": "insufficient_eligible_finalists",
+                    "input_candidates": input_candidate_count,
+                    "required_finalists": int(minimum),
+                    "selected_finalists": len(selected_input),
+                    "launched_lammps_work_units": 0,
+                },
+            )
+            raise CubicElasticBatchError(
+                "insufficient_eligible_finalists: dynamic promotion requires "
+                f"at least {minimum} unique hard-gate candidates, but only "
+                f"{len(selected_input)} are eligible; no LAMMPS work was launched"
+            )
         selected_keys = set(selected_input["parameter_key"].astype(str))
         candidates = [item for item in candidates if item.parameter_key in selected_keys]
 
@@ -1576,7 +1613,7 @@ def run_elasticity_batch(
     summary_document = {
         "schema_version": 1,
         "protocol": canonical_protocol,
-        "input_candidates": len(candidates),
+        "input_candidates": input_candidate_count,
         "completed_work_units": len(completed),
         "failed_work_units": incomplete_failures,
         "hard_gate_eligible": int(
@@ -1586,6 +1623,8 @@ def run_elasticity_batch(
             ranked["within_quality_tier"].sum() if "within_quality_tier" in ranked else 0
         ),
         "selected_finalists": len(finalists),
+        "required_finalists": int(minimum),
+        "require_minimum": bool(require_minimum),
         "scientific_outcome": (
             "incomplete_failures" if incomplete_failures else best["status"]
         ),
@@ -1658,6 +1697,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--omp-threads-per-state", type=int, default=1)
     parser.add_argument("--top-n", type=int, default=20)
     parser.add_argument("--minimum", type=int, default=1)
+    parser.add_argument(
+        "--require-minimum",
+        action="store_true",
+        help="Fail before launching LAMMPS when fewer than --minimum candidates pass",
+    )
     parser.add_argument("--near-optimal-window-percent", type=float, default=5.0)
     parser.add_argument("--diversity-slots", type=int, default=2)
     parser.add_argument(
@@ -1688,6 +1732,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         resources=resources,
         top_n=arguments.top_n,
         minimum=arguments.minimum,
+        require_minimum=arguments.require_minimum,
         near_optimal_window_percent=arguments.near_optimal_window_percent,
         diversity_slots=arguments.diversity_slots,
         evaluate_structural_failures=arguments.evaluate_structural_failures,

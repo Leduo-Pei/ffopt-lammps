@@ -60,7 +60,7 @@ conda install -c conda-forge "lammps=*=*openmpi*" openmpi -y
 python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 python -m pip install \
-  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a4/ffopt_lammps-0.3.0a4-py3-none-any.whl"
+  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a5/ffopt_lammps-0.3.0a5-py3-none-any.whl"
 ```
 
 上面的命令有意安装 CPU 版 PyTorch。GPU 工作站应先按 PyTorch 官方安装选择器
@@ -101,7 +101,7 @@ conda activate ffopt
 conda env config vars set PYTHONNOUSERSITE=1
 conda deactivate
 conda activate ffopt
-python -m pip install "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a4/ffopt_lammps-0.3.0a4-py3-none-any.whl"
+python -m pip install "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a5/ffopt_lammps-0.3.0a5-py3-none-any.whl"
 ```
 
 LAMMPS 和 MPI 可以由用户单独安装，随后在机器配置中填写绝对路径。路径含空格
@@ -496,6 +496,7 @@ parameters
     range epsilon factor 0.50 2.00
     range sigma   factor 0.85 1.15
     range charge  delta  0.30
+    cutoff 8.0 A
     charge_limit 1.0
     neutrality derive bhN1
     mixing epsilon geometric
@@ -511,6 +512,7 @@ end
 - `factor 0.50 2.00` 表示初始值的 0.5 到 2.0 倍。
 - `delta 0.30` 表示初始值加减 0.30。
 - `absolute LOW HIGH` 表示直接给绝对上下界。
+- `cutoff VALUE A` 是所有拟合和验证性质共用的唯一全局 LJ 截断，必须显式填写。
 - `charge_limit 1.0` 表示任何最终电荷都必须满足 `|q| <= 1.0 e`。
 - `fix epsilon sigma` 表示只优化电荷。
 - 没有 `fix` 表示三类参数全部放开。
@@ -519,6 +521,20 @@ end
 `neutrality derive bhN1` 会把该 type 的电荷从独立维度中移除，并根据每个 type
 的原子数恢复出严格中性的电荷。因此 14 个 type 的 charge-only 通常是 13 维，
 但恢复出的第 14 个电荷仍会进入 LAMMPS 和 ANN 特征。
+
+`cutoff` 属于力场的科学定义，不是某个 property 的运行便利项。bulk、surface、
+sublimation、adsorption、0 K 弹性、300 K 候选晋级和最终验证全部继承同一个值；
+property 块不能单独覆盖，也没有隐藏默认值。修改 cutoff 会改变科学指纹，必须开启
+新 campaign，不能混用旧 checkpoint。对于 `material elemental` + `crystal bcc`，
+还必须满足 `cutoff >= 2.5 * sigma_max`；这里 `sigma_max` 是完整优化域内最大的 sigma
+上界，而不是当前初始值。例如 `range sigma absolute 0.001 5.0` 必须配
+`cutoff 12.5 A`。
+
+脚本还会检查每个 BCC 周期模型满足 `cutoff <= 0.45 * h_min`；`h_min` 是应用该
+property 的 replicate 后，按完整盒矢量计算出的最短垂直面高，因此 triclinic 盒同样
+适用。系数 0.45 相对半盒条件保留了 10% 的 NPT 收缩/应变余量；若上下界冲突，应
+增大 replicate，而不是静默缩短 cutoff。生成的力场文件同时显式锁定
+`pair_modify shift no tail no`。
 
 ### 6.3 混合规则
 
@@ -556,10 +572,19 @@ bulk 标准流程写死为：固定盒子最小化、生成速度、三斜全柔
 生产统计。`cells_in_data` 是 data 文件中已经包含的晶胞重复数，不会再复制超胞。
 
 可修改且真正生效的 bulk 参数如下：`temperature`（默认 `300 K`）、`pressure`
-（默认 `1 atm`）、`timestep`（默认 `1 fs`）、`cutoff`（默认 `8 A`）、
-`equilibration`（默认 `20000` 步）、`production`（默认 `40000` 步）和速度种子
+（默认 `1 atm`）、`timestep`（默认 `1 fs`）、`equilibration`（默认 `20000` 步）、
+`production`（默认 `40000` 步）和速度种子
 `seed`（默认 `101`）。schema 1 不提供 bulk `protocol` 开关，不能把标准流程改成
 NVT 或仅最小化；`production` 至少为固定统计间隔所需的 `5000` 步。
+
+元素 BCC 的有限温度弹性采用两套明确分离的协议：20 个 hard-gate 候选先用较短的
+多种子 promotion 重排，只对晋级后的一个 winner 使用独立 seed 和长轨迹进行最终
+validation。`validation_strain`、`validation_npt_equilibration`、
+`validation_nvt_equilibration`、`validation_production` 和 `validation_seeds` 共同锁定
+长协议；validation seed 必须与 promotion seeds 不重叠。生产 Fe 输入同时要求
+`finalists minimum 20`、`maximum 20` 和 `require_minimum yes`；若不足 20 个唯一候选
+通过结构、Born 稳定性和拟合质量硬门，程序会在任何 300 K LAMMPS 工作启动前停止，
+不会悄悄用更少候选继续。
 
 ### 6.5 升华焓目标
 
@@ -583,8 +608,9 @@ E_sub,estimate = E_single,min - <PE_bulk,NPT> / N_molecules
 需要理解这里是受控近似，而不是完整热化学自由能计算。
 
 这里的 `temperature`（默认 `298.15 K`）记录实验目标温度；真正的体相模拟温度由
-bulk 模块控制，默认 `300 K`。可选 `cutoff` 只覆盖单分子最小化截断，省略时继承
-bulk 截断。每个分子的原子数直接从必须提供的 single data 文件读取，不能另外手写。
+bulk 模块控制，默认 `300 K`。单分子最小化继承 `parameters` 中的全局 cutoff，不能
+另设第二个截断。每个分子的原子数直接从必须提供的 single data 文件读取，不能
+另外手写。
 
 ### 6.6 吸附
 
@@ -606,8 +632,9 @@ target -3.5 kcal/mol weight 1.0 tolerance 0.5
 ```
 
 吸附模块当前固定为确定性的 0 K 最小化。除必需路径和 `protocol minimize` 外，只有
-`metal`（默认 `Au`）和 `cutoff`（默认 `7 A`）可修改；温度、时间步、随机种子、
-平衡步数和生产步数不会被接受，避免用户写了参数却实际不生效。
+`metal`（默认 `Au`）可修改；complex、slab 和 molecule 统一继承 `parameters` 中的
+全局 cutoff。property 内的 cutoff、温度、时间步、随机种子、平衡步数和生产步数
+不会被接受，避免用户写了参数却实际不生效。
 
 `metal` 必须对应一个固定、零电荷的基底 type，其 LJ 参数继续使用各 data 文件中
 的值；FFOpt 只更新 complex 与孤立分子共同拥有的分子 types。不要把带电、多组分

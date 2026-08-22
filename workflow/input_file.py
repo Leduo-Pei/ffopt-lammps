@@ -95,6 +95,7 @@ class ParameterSpec:
     mixing_epsilon: str = "geometric"
     mixing_sigma: str = "geometric"
     charge_abs_max: float = 1.0
+    cutoff: float | None = None
     setting_lines: dict[str, int] = field(default_factory=dict)
 
 
@@ -495,30 +496,31 @@ def _parse_elasticity_line(
         set_setting("minimum_r2", value)
         return
 
-    if command == "strain":
+    if command in {"strain", "validation_strain"}:
+        label = "validation strain" if command == "validation_strain" else "strain"
         if len(args) < 2:
             raise InputFileError(
                 path,
                 line,
-                "elasticity strain requires at least two positive magnitudes",
+                f"elasticity {label} requires at least two positive magnitudes",
             )
         values = tuple(
-            _float(path, line, value, "elasticity strain magnitude")
+            _float(path, line, value, f"elasticity {label} magnitude")
             for value in args
         )
         if any(value <= 0.0 or value > 0.05 for value in values):
             raise InputFileError(
                 path,
                 line,
-                "elasticity strain magnitudes must be in (0, 0.05]",
+                f"elasticity {label} magnitudes must be in (0, 0.05]",
             )
         if any(right <= left for left, right in zip(values, values[1:])):
             raise InputFileError(
                 path,
                 line,
-                "elasticity strain magnitudes must be unique and strictly increasing",
+                f"elasticity {label} magnitudes must be unique and strictly increasing",
             )
-        set_setting("strain", values)
+        set_setting(command, values)
         return
 
     if command == "replicate":
@@ -562,7 +564,17 @@ def _parse_elasticity_line(
         set_setting(command, value)
         return
 
-    if command in {"equilibration", "production"}:
+    dynamic_step_settings = {
+        "npt_equilibration",
+        "nvt_equilibration",
+        "equilibration",
+        "production",
+        "validation_npt_equilibration",
+        "validation_nvt_equilibration",
+        "validation_equilibration",
+        "validation_production",
+    }
+    if command in dynamic_step_settings:
         if len(args) != 1:
             raise InputFileError(
                 path,
@@ -570,9 +582,9 @@ def _parse_elasticity_line(
                 f"elasticity {command} requires one integer value",
             )
         value = _int(path, line, args[0], f"elasticity {command}")
-        minimum = 0 if command == "equilibration" else 1
+        minimum = 1 if command.endswith("production") else 0
         if value < minimum:
-            qualifier = "non-negative" if command == "equilibration" else "positive"
+            qualifier = "positive" if minimum else "non-negative"
             raise InputFileError(
                 path,
                 line,
@@ -620,6 +632,25 @@ def _parse_parameter_line(document: FFOptInput, line: int, tokens: list[str]) ->
     params = document.parameters
     command = tokens[0].lower()
     args = tokens[1:]
+    if command == "cutoff":
+        if "cutoff" in params.setting_lines:
+            previous = params.setting_lines["cutoff"]
+            raise InputFileError(
+                path, line,
+                f"duplicate cutoff setting (first set on line {previous})",
+            )
+        if len(args) not in {1, 2}:
+            raise InputFileError(path, line, "cutoff requires VALUE [A]")
+        if len(args) == 2 and args[1].lower() not in {
+            "a", "angstrom", "angstroms"
+        }:
+            raise InputFileError(path, line, "cutoff unit must be A/angstrom")
+        cutoff = _float(path, line, args[0], "cutoff")
+        if cutoff <= 0.0:
+            raise InputFileError(path, line, "cutoff must be positive")
+        params.cutoff = cutoff
+        params.setting_lines["cutoff"] = line
+        return
     if command == "type":
         if len(args) not in {4, 5}:
             raise InputFileError(
@@ -910,15 +941,15 @@ def _parse_property_line(document: FFOptInput, prop: PropertySpec, line: int, to
         raise InputFileError(path, line, f"{command} requires a value")
 
     bulk_settings = {
-        "cells_in_data", "temperature", "pressure", "timestep", "cutoff",
+        "cells_in_data", "temperature", "pressure", "timestep",
         "equilibration", "production", "seed",
     }
     if document.crystal_family == "bcc":
         bulk_settings.update({"replicate", "tdamp", "pdamp"})
     allowed_settings = {
         "bulk": bulk_settings,
-        "sublimation": {"temperature", "cutoff"},
-        "adsorption": {"cutoff", "protocol", "metal"},
+        "sublimation": {"temperature"},
+        "adsorption": {"protocol", "metal"},
         "surface": {"facet", "replicate"},
     }[prop.name]
     if command not in allowed_settings:
@@ -953,12 +984,11 @@ def _parse_property_line(document: FFOptInput, prop: PropertySpec, line: int, to
             tuple(_int(path, line, value, command) for value in args),
         )
         return
-    if command in {"temperature", "pressure", "timestep", "cutoff", "tdamp", "pdamp"}:
+    if command in {"temperature", "pressure", "timestep", "tdamp", "pdamp"}:
         units = {
             "temperature": {"k"},
             "pressure": {"atm"},
             "timestep": {"fs"},
-            "cutoff": {"a", "angstrom", "angstroms"},
             "tdamp": {"fs"},
             "pdamp": {"fs"},
         }[command]
@@ -1068,9 +1098,16 @@ def _validate_elasticity_property(
     dynamic_only_settings = {
         "temperature",
         "timestep",
+        "npt_equilibration",
+        "nvt_equilibration",
         "equilibration",
         "production",
         "seeds",
+        "validation_strain",
+        "validation_npt_equilibration",
+        "validation_nvt_equilibration",
+        "validation_equilibration",
+        "validation_production",
         "validation_seeds",
     }
     if "dynamic" not in prop.elasticity_modules:
@@ -1092,6 +1129,32 @@ def _validate_elasticity_property(
                 prop.setting_lines["validation_seeds"],
                 "elasticity validation_seeds must be disjoint from promotion "
                 f"seeds; overlap={overlap}",
+            )
+    validation_protocol_settings = {
+        "validation_strain",
+        "validation_npt_equilibration",
+        "validation_nvt_equilibration",
+        "validation_equilibration",
+        "validation_production",
+    }
+    configured_validation = sorted(validation_protocol_settings & set(prop.settings))
+    if configured_validation and "validation_seeds" not in prop.settings:
+        key = configured_validation[0]
+        raise InputFileError(
+            path,
+            prop.setting_lines[key],
+            f"elasticity {key} requires validation_seeds so the long validation "
+            "protocol is independent from promotion",
+        )
+    for explicit, legacy in (
+        ("nvt_equilibration", "equilibration"),
+        ("validation_nvt_equilibration", "validation_equilibration"),
+    ):
+        if explicit in prop.settings and legacy in prop.settings:
+            raise InputFileError(
+                path,
+                prop.setting_lines[explicit],
+                f"elasticity {explicit} and legacy {legacy} cannot both be set",
             )
 
 
@@ -1121,6 +1184,7 @@ def _validate(document: FFOptInput) -> None:
                 "type label must start with a letter and contain only letters, "
                 "numbers, or underscores",
             )
+    for item in document.parameters.atom_types:
         if item.epsilon <= 0.0:
             raise InputFileError(path, item.line, "initial epsilon must be positive")
         if item.sigma <= 0.0:
@@ -1254,6 +1318,37 @@ def _validate(document: FFOptInput) -> None:
                 prop.line,
                 "BCC bulk requires explicit 'cells_in_data NX NY NZ'",
             )
+    if "finalists" in document.workflow:
+        elasticity = next(
+            (prop for prop in document.properties if prop.name == "elasticity"),
+            None,
+        )
+        dynamic = (
+            elasticity.elasticity_modules.get("dynamic")
+            if elasticity is not None
+            else None
+        )
+        if dynamic is None:
+            raise InputFileError(
+                path,
+                elasticity.line if elasticity is not None else 1,
+                "workflow stage 'finalists' requires "
+                "'module dynamic promotion'",
+            )
+        if dynamic.role != "promotion":
+            raise InputFileError(
+                path,
+                dynamic.line,
+                "workflow stage 'finalists' requires the dynamic module role "
+                "promotion; role validation is reserved for final validation",
+            )
+    if document.parameters.cutoff is None:
+        raise InputFileError(
+            path,
+            1,
+            "parameters block requires explicit 'cutoff VALUE A'; LJ cutoff "
+            "is a scientific protocol input and never uses a silent default",
+        )
     if (
         any(stage in {"bo", "sample", "nn", "al"} for stage in document.workflow)
         and not any(prop.fitted for prop in document.properties)
