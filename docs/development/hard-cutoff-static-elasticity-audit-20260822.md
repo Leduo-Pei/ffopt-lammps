@@ -311,9 +311,11 @@ energy-work consistency are demonstrated first.
 4. Add a fail-closed consistency audit comparing stress-derived moduli with
    energy-derived moduli and/or integrated stress work. A high energy-fit R2
    must not be treated as evidence of consistency.
-5. Add an adaptive-strain retry when stress central differences are not stable.
-   Shrinking strains can help avoid a nearby shell crossing, but it is a retry,
-   not a reason to make energy curvature canonical again.
+5. Separate deterministic static and dynamic strain windows. Use the two
+   smallest static magnitudes for the canonical `h -> 0` extrapolation and an
+   outer magnitude as an independent drift audit. Reject the point fail-closed
+   when that drift exceeds the public `static_drift` limit; do not silently
+   change a candidate's protocol through an adaptive retry.
 6. Add a regression fixture from these exact legacy-final raw records. It must
    reproduce approximately `233.21/65.395/188.90 GPa` from the `0.3.0a5`
    pressures and must flag the energy result as inconsistent.
@@ -326,6 +328,29 @@ energy-work consistency are demonstrated first.
    LAMMPS mixing and `shift no` remain valid project choices; the validator must
    correctly measure the chosen model.
 
-Until this disposition is implemented, no `0.3.0a5` energy-curvature static
-ranking should be presented as the scientific successor to the legacy Fe
-result.
+## `0.3.0a6` live Fe acceptance
+
+The corrected implementation was run through the packaged `0.3.0a6` wheel at
+commit `e276f0679742` on the legacy-final parameter set, using
+`static_strain 0.0005 0.001 0.002`. The real LAMMPS result was:
+
+| Quantity | Result |
+| --- | ---: |
+| B | 233.235995 GPa |
+| Cprime | 65.448587 GPa |
+| C44 | 189.603603 GPa |
+| minimum canonical-window R2 | 0.9999453 |
+| maximum zero-strain extrapolation drift | 0.10016% |
+| reference mean residual pressure | 5.51e-8 GPa |
+| reference maximum deviatoric stress | 5.94e-14 GPa |
+
+The same small-strain states gave an energy-curvature B of 160.483146 GPa,
+31.19% below the canonical stress result, while the energy fit itself still
+reported R2=0.99990. The diagnostic was correctly labelled inconsistent and
+was not used for selection. This acceptance confirms both parts of the fix:
+the stress estimator reproduces the legacy local tangent, and a high
+energy-fit R2 cannot bypass the explicit energy--stress diagnostic.
+
+All `0.3.0a5` static/finalist/final-validation rankings remain invalid for
+scientific succession. Its structure-and-surface-only BO evidence remains
+eligible only for an explicit provenance-preserving handoff.

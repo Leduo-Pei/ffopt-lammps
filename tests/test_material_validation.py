@@ -656,7 +656,10 @@ def test_zero_eligible_finalists_publish_rejected_terminal_bundle_and_resume(tmp
     outcome.write_text(json.dumps({
         "schema_version": 1,
         "status": "zero_hard_gate_eligible",
-        "message": "No candidate passed structure, Born, R2, and finite-score gates.",
+        "message": (
+            "No candidate passed structure, Born, protocol fit-quality, "
+            "and finite-score gates."
+        ),
     }), encoding="utf-8")
     static_ranking = tmp_path / "static.csv"
     dynamic_ranking = tmp_path / "dynamic.csv"

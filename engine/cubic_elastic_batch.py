@@ -1360,7 +1360,10 @@ def _best_candidate_document(
         return {
             "schema_version": 1,
             "status": "zero_hard_gate_eligible",
-            "message": "No candidate passed structure, Born, R2, and finite-score gates.",
+            "message": (
+                "No candidate passed structure, Born, protocol fit-quality, "
+                "and finite-score gates."
+            ),
         }
     row = eligible.iloc[0]
     within = bool(row["within_quality_tier"])
@@ -1377,7 +1380,8 @@ def _best_candidate_document(
             "within_quality_tier": within,
             "best_effort": not within,
             "selection_rule": (
-                "structure -> Born -> R2 gates; then M_infinity -> RMSE -> "
+                "structure -> Born -> protocol fit-quality gates; then "
+                "M_infinity -> RMSE -> "
                 "same-element contrast -> structural margin"
             ),
         },

@@ -28,6 +28,10 @@ expectations while the public API remains in alpha.
   default). It rejects a static candidate when any canonical zero-strain
   modulus is too sensitive to the outer-shell/full-window extrapolation audit,
   even when the raw stress fit passes its R2 threshold.
+- Close the downstream qualification chain: constrained refinement now
+  requires the recorded protocol-specific `fit_quality_pass` flag in addition
+  to its scalar R2 check, and Top-N evidence reports retain the measured static
+  drift and configured limit.
 
 ## 0.3.0a5 - 2026-08-22
 
