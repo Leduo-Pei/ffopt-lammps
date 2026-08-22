@@ -496,8 +496,30 @@ def _parse_elasticity_line(
         set_setting("minimum_r2", value)
         return
 
-    if command in {"strain", "validation_strain"}:
-        label = "validation strain" if command == "validation_strain" else "strain"
+    if command == "static_drift":
+        if len(args) != 2 or args[1].lower() not in {"percent", "%"}:
+            raise InputFileError(
+                path,
+                line,
+                "elasticity static_drift syntax: static_drift VALUE percent",
+            )
+        value = _float(path, line, args[0], "elasticity static extrapolation drift")
+        if value <= 0.0:
+            raise InputFileError(
+                path,
+                line,
+                "elasticity static_drift must be positive",
+            )
+        set_setting("maximum_static_drift_percent", value)
+        return
+
+    if command in {
+        "strain",
+        "static_strain",
+        "dynamic_strain",
+        "validation_strain",
+    }:
+        label = command.replace("_", " ")
         if len(args) < 2:
             raise InputFileError(
                 path,
@@ -1103,6 +1125,7 @@ def _validate_elasticity_property(
         "equilibration",
         "production",
         "seeds",
+        "dynamic_strain",
         "validation_strain",
         "validation_npt_equilibration",
         "validation_nvt_equilibration",
@@ -1130,6 +1153,28 @@ def _validate_elasticity_property(
                 "elasticity validation_seeds must be disjoint from promotion "
                 f"seeds; overlap={overlap}",
             )
+    if "strain" in prop.settings:
+        for specific in ("static_strain", "dynamic_strain"):
+            if specific in prop.settings:
+                raise InputFileError(
+                    path,
+                    prop.setting_lines[specific],
+                    f"elasticity legacy strain and {specific} cannot both be set",
+                )
+    static_values = prop.settings.get(
+        "static_strain",
+        prop.settings.get("strain", (0.0005, 0.001, 0.002)),
+    )
+    if len(static_values) < 3:
+        line = prop.setting_lines.get(
+            "static_strain", prop.setting_lines.get("strain", prop.line)
+        )
+        raise InputFileError(
+            path,
+            line,
+            "elasticity static_strain requires at least three magnitudes: "
+            "two define the zero-strain extrapolation and the outer value audits drift",
+        )
     validation_protocol_settings = {
         "validation_strain",
         "validation_npt_equilibration",

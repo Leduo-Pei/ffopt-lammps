@@ -999,11 +999,21 @@ def cmd_explain(args: argparse.Namespace) -> None:
                 else "soft/reporting only"
             )
             born = selection.get("born_stability", {}).get("required", False)
-            minimum_r2 = selection.get("fit_quality", {}).get("minimum_r2", "-")
+            fit_quality = selection.get("fit_quality", {})
+            minimum_r2 = fit_quality.get("minimum_r2", "-")
+            maximum_static_drift = fit_quality.get(
+                "maximum_static_drift_percent", "-"
+            )
+            drift_text = (
+                f"{float(maximum_static_drift):g}"
+                if isinstance(maximum_static_drift, (int, float))
+                else str(maximum_static_drift)
+            )
             print(
                 "    quality controls: "
                 f"tier={tier}% ({tier_kind}), "
-                f"Born={'required' if born else 'off'}, R2>={minimum_r2}"
+                f"Born={'required' if born else 'off'}, "
+                f"R2>={minimum_r2}, static drift<={drift_text}%"
             )
 
             static_protocol = modules.get("static", {}).get("protocol", {})
@@ -1015,8 +1025,11 @@ def cmd_explain(args: argparse.Namespace) -> None:
             validation_protocol = {**dynamic_protocol, **validation_overrides}
             print(
                 "    static protocol: "
+                f"method={static_protocol.get('method', '-')}, "
                 f"strains={list(strains)}, replicate="
-                f"{list(static_protocol.get('replicate', []))}"
+                f"{list(static_protocol.get('replicate', []))}, "
+                "energy_curvature="
+                f"{static_protocol.get('energy_curvature', 'not_configured')}"
             )
             print(
                 "    quick promotion: "

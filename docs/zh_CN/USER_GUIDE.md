@@ -60,7 +60,7 @@ conda install -c conda-forge "lammps=*=*openmpi*" openmpi -y
 python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 python -m pip install \
-  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a5/ffopt_lammps-0.3.0a5-py3-none-any.whl"
+  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a6/ffopt_lammps-0.3.0a6-py3-none-any.whl"
 ```
 
 上面的命令有意安装 CPU 版 PyTorch。GPU 工作站应先按 PyTorch 官方安装选择器
@@ -101,7 +101,7 @@ conda activate ffopt
 conda env config vars set PYTHONNOUSERSITE=1
 conda deactivate
 conda activate ffopt
-python -m pip install "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a5/ffopt_lammps-0.3.0a5-py3-none-any.whl"
+python -m pip install "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a6/ffopt_lammps-0.3.0a6-py3-none-any.whl"
 ```
 
 LAMMPS 和 MPI 可以由用户单独安装，随后在机器配置中填写绝对路径。路径含空格
@@ -577,6 +577,16 @@ bulk 标准流程写死为：固定盒子最小化、生成速度、三斜全柔
 `seed`（默认 `101`）。schema 1 不提供 bulk `protocol` 开关，不能把标准流程改成
 NVT 或仅最小化；`production` 至少为固定统计间隔所需的 `5000` 步。
 
+元素 BCC 的完整 `property elasticity` 块中，应显式包含以下几行，分别声明拟合质量、
+静态外推漂移门和两套应变窗口：
+
+```text
+r2 0.98
+static_drift 5 percent
+static_strain  0.0005 0.001 0.002
+dynamic_strain 0.002  0.004 0.006
+```
+
 元素 BCC 的有限温度弹性采用两套明确分离的协议：20 个 hard-gate 候选先用较短的
 多种子 promotion 重排，只对晋级后的一个 winner 使用独立 seed 和长轨迹进行最终
 validation。`validation_strain`、`validation_npt_equilibration`、
@@ -585,6 +595,20 @@ validation。`validation_strain`、`validation_npt_equilibration`、
 `finalists minimum 20`、`maximum 20` 和 `require_minimum yes`；若不足 20 个唯一候选
 通过结构、Born 稳定性和拟合质量硬门，程序会在任何 300 K LAMMPS 工作启动前停止，
 不会悄悄用更少候选继续。
+
+0 K 静态弹性不再使用势能曲率作为排序结果。对于 `lj/cut` 且全局
+`shift no` 的势，邻居壳跨越硬截断时势能会发生离散跳变；即使二次拟合的 R2 很高，
+所得“模量”也可能是伪影。正式的 `B/Cprime/C44` 来自 hydro、orthorhombic、shear
+三种对称应力响应，并用两个最小应变按 `M(h)=M0+q*h^2` 外推到零应变；势能曲率只
+作为一致性诊断，绝不进入 NN/AL 标签或候选排名。建议分别写
+`static_strain 0.0005 0.001 0.002` 与
+`dynamic_strain 0.002 0.004 0.006`：前者接近静态切线，后者保证 300 K 信号高于热噪声。
+`r2` 与 `static_drift` 是两个独立的硬资格门。`static_drift 5 percent` 表示
+`B/Cprime/C44` 任一零应变截距在外层应变/全窗口审计中相对内层两点正式外推漂移超过
+5% 时拒绝候选；因此 R2 很高但明显依赖应变窗口的结果也不能晋级。省略时默认也是
+5%，但生产输入应显式填写。静态输入强制至少三个应变幅值：内层两个定义截距，第三个
+提供独立的外层漂移审计；动态输入至少两个。旧关键词 `strain` 仍可同时设置两套窗口，
+但不能与两个新关键词混用，并且也必须满足静态的三个幅值要求。
 
 ### 6.5 升华焓目标
 

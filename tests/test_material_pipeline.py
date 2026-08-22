@@ -72,7 +72,10 @@ def _material_config() -> dict:
                     "density": {"maximum_relative_error_percent": 1.0},
                     "surface": {"maximum_relative_error_percent": 5.0},
                 },
-                "fit_quality": {"minimum_r2": 0.98},
+                "fit_quality": {
+                    "minimum_r2": 0.98,
+                    "maximum_static_drift_percent": 5.0,
+                },
                 "born_stability": {"required": True},
             },
             "reporting": {"mechanical_tier_percent": 20.0},
@@ -154,6 +157,7 @@ def test_compiled_elasticity_maps_to_generic_refinement_contract():
     ]
     assert spec["stability_column"] == "born_stability_pass"
     assert spec["fit_quality_column"] == "minimum_fit_r2"
+    assert spec["fit_quality_pass_column"] == "fit_quality_pass"
     assert next(
         item for item in spec["structural_constraints"] if item["name"] == "alpha"
     )["mode"] == "absolute"

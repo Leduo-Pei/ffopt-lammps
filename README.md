@@ -78,7 +78,7 @@ wheels and are not yet published on PyPI:
 
 ```bash
 python -m pip install \
-  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a5/ffopt_lammps-0.3.0a5-py3-none-any.whl"
+  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a6/ffopt_lammps-0.3.0a6-py3-none-any.whl"
 ```
 
 For development:

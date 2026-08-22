@@ -8,6 +8,7 @@ import time
 import pytest
 
 from engine.cubic_elastic_runner import (
+    ATM_TO_GPA,
     DYNAMIC_PROTOCOL,
     KCAL_PER_MOL_ANGSTROM3_TO_GPA,
     STATIC_PROTOCOL,
@@ -48,6 +49,14 @@ class FakeElasticBackend:
     def _static_record(self, state):
         reference_density = -12.5
         volume = 1000.0
+        pressure_gpa = {
+            "pxx": 0.003,
+            "pyy": -0.002,
+            "pzz": 0.001,
+            "pxy": 0.0005,
+            "pxz": -0.0003,
+            "pyz": 0.0002,
+        }
         if state.role == "reference":
             density = reference_density
         else:
@@ -61,12 +70,34 @@ class FakeElasticBackend:
                 + quartic[state.mode] * strain**4
                 + odd[state.mode] * strain**3
             )
-        return {
+            if state.mode == "hydro":
+                for component in ("pxx", "pyy", "pzz"):
+                    pressure_gpa[component] += -3.0 * 170.0 * strain
+            elif state.mode == "orthorhombic":
+                pressure_gpa["pxx"] += -2.0 * 50.0 * strain
+                pressure_gpa["pyy"] += 2.0 * 50.0 * strain
+            else:
+                pressure_gpa["pxy"] += -120.0 * strain
+        record = {
             "potential_energy_kcal_mol": (
                 density * volume / KCAL_PER_MOL_ANGSTROM3_TO_GPA
             ),
             "volume_angstrom3": volume,
+            **{
+                f"{component}_atm": value / ATM_TO_GPA
+                for component, value in pressure_gpa.items()
+            },
         }
+        if state.role == "reference":
+            record.update({
+                "lx_angstrom": 10.0,
+                "ly_angstrom": 10.0,
+                "lz_angstrom": 10.0,
+                "xy_angstrom": 0.0,
+                "xz_angstrom": 0.0,
+                "yz_angstrom": 0.0,
+            })
+        return record
 
     @staticmethod
     def _dynamic_record(state):
@@ -202,6 +233,11 @@ def test_static_candidate_recovers_independent_moduli_and_reuses_every_artifact(
         {"B": 170.0, "Cprime": 50.0, "C44": 120.0}
     )
     assert summary["fit_quality"]["minimum_r2"] == pytest.approx(1.0)
+    assert summary["fit_method"] == (
+        "symmetric three-mode static stress-strain zero-limit extrapolation"
+    )
+    assert summary["energy_curvature_diagnostic"]["used_for_selection"] is False
+    assert summary["energy_curvature_diagnostic"]["consistent_with_stress"] is True
     assert summary["born_stability"]["stable"] is True
     assert summary["eligible"] is True
     assert len(backend.calls) == 13
@@ -213,6 +249,37 @@ def test_static_candidate_recovers_independent_moduli_and_reuses_every_artifact(
     second = runner.run_static(strains)
     assert second == summary
     assert len(backend.calls) == 13
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("xy_angstrom", 0.01, "not axis-aligned cubic"),
+        ("ly_angstrom", 10.01, "not axis-aligned cubic"),
+        ("pxy_atm", 2000.0, "excessive deviatoric stress"),
+    ],
+)
+def test_static_reference_quality_fails_closed(
+    tmp_path,
+    field,
+    value,
+    message,
+):
+    backend = FakeElasticBackend(tmp_path, STATIC_PROTOCOL)
+    original = backend._static_record
+
+    def altered_reference(state):
+        record = original(state)
+        if state.role == "reference":
+            record[field] = value
+        return record
+
+    backend._static_record = altered_reference
+
+    with pytest.raises(Exception, match=message):
+        _runner(tmp_path, backend).run_static([-0.02, -0.01, 0.01, 0.02])
+    assert backend.calls == ["reference"]
+    assert not (tmp_path / "candidate-1" / "artifact_manifest.json").exists()
 
 
 def test_dynamic_candidate_reports_independent_and_derived_diagnostics(tmp_path):
@@ -297,6 +364,7 @@ def test_packaged_templates_make_independent_reference_branches_explicit():
     dynamic_strain = (root / "in.cubic.dynamic_strain").read_text(encoding="utf-8")
 
     assert "write_restart elastic_reference.restart" in static_reference
+    assert "$(pxx) $(pyy) $(pzz) $(pxy) $(pxz) $(pyz)" in static_reference
     assert "read_restart elastic_reference.restart" in static_strain
     assert "write_restart elastic_reference.restart" in dynamic_reference
     assert "read_restart elastic_reference.restart" in dynamic_strain

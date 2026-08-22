@@ -1017,9 +1017,21 @@ def _compile_elasticity(
             "unit": "degree" if gate_name == "angles" else "percent",
         }
 
-    strain = [float(value) for value in prop.settings.get(
-        "strain", (0.002, 0.004, 0.006)
-    )]
+    legacy_strain = prop.settings.get("strain")
+    static_strain = [
+        float(value)
+        for value in prop.settings.get(
+            "static_strain",
+            legacy_strain if legacy_strain is not None else (0.0005, 0.001, 0.002),
+        )
+    ]
+    dynamic_strain = [
+        float(value)
+        for value in prop.settings.get(
+            "dynamic_strain",
+            legacy_strain if legacy_strain is not None else (0.002, 0.004, 0.006),
+        )
+    ]
     replicate = [int(value) for value in prop.settings.get("replicate", (1, 1, 1))]
     elasticity_bulk_path = Path(_path(document, bulk_prop.data_files["bulk"]))
     try:
@@ -1038,6 +1050,9 @@ def _compile_elasticity(
         replicate=replicate,
     )
     minimum_r2 = float(prop.settings.get("minimum_r2", 0.98))
+    maximum_static_drift = float(
+        prop.settings.get("maximum_static_drift_percent", 5.0)
+    )
     born_required = bool(prop.settings.get("born", True))
     reporting_tier = float(prop.settings.get("tier", 20.0))
 
@@ -1065,10 +1080,19 @@ def _compile_elasticity(
         "cost_class": "low",
         "targets": targets_by_fidelity["static"],
         "protocol": {
-            "method": "symmetric_energy_strain",
-            "strain_magnitudes": strain,
+            # The canonical 0 K observable is the tangent of stress with
+            # respect to strain.  Energy curvature is unsafe for an unshifted
+            # hard cutoff because neighbour-shell crossings make U discontinuous.
+            "method": "symmetric_static_stress_zero_limit",
+            "strain_magnitudes": static_strain,
             "replicate": replicate,
             "temperature_k": 0.0,
+            "energy_curvature": "diagnostic_only",
+            "energy_stress_consistency_percent": 10.0,
+            "maximum_zero_strain_extrapolation_drift_percent": maximum_static_drift,
+            "reference_geometry_relative_tolerance": 1.0e-8,
+            "reference_max_residual_pressure_gpa": 0.1,
+            "reference_max_deviatoric_stress_gpa": 0.1,
         },
     }
 
@@ -1082,7 +1106,7 @@ def _compile_elasticity(
             "targets": targets_by_fidelity["dynamic"],
             "protocol": {
                 "method": "symmetric_stress_strain",
-                "strain_magnitudes": strain,
+                "strain_magnitudes": dynamic_strain,
                 "replicate": replicate,
                 "temperature_k": float(prop.settings.get("temperature", 300.0)),
                 "timestep_fs": float(prop.settings.get("timestep", 1.0)),
@@ -1137,7 +1161,10 @@ def _compile_elasticity(
         "selection": {
             "method": "constrained_minimax_relative_error",
             "structural_gates": compiled_gates,
-            "fit_quality": {"minimum_r2": minimum_r2},
+            "fit_quality": {
+                "minimum_r2": minimum_r2,
+                "maximum_static_drift_percent": maximum_static_drift,
+            },
             "born_stability": {"required": born_required},
         },
         # A tier labels scientific quality; it is not an eligibility gate and

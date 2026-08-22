@@ -64,7 +64,8 @@ property elasticity
     target dynamic B 166.2 GPa
     target dynamic Cprime 48.15 GPa
     target dynamic C44 115.87 GPa
-    strain 0.002 0.004
+    static_strain 0.0005 0.001 0.002
+    dynamic_strain 0.002 0.004
     seeds 101
     validation_seeds 404
 end
@@ -176,12 +177,19 @@ def test_explain_reports_material_parameter_graph_and_elasticity_contract(
     assert "module dynamic: role=promotion fidelity=dynamic_300k cost=high" in output
     assert "targets: B=166.2 GPa, Cprime=48.15 GPa, C44=115.87 GPa" in output
     assert "lattice<=1%, angles<=1 degree, density<=1%, surface<=5%" in output
-    assert "tier=20.0% (soft/reporting only), Born=required, R2>=0.98" in output
+    assert (
+        "tier=20.0% (soft/reporting only), Born=required, "
+        "R2>=0.98, static drift<=5%"
+    ) in output
     assert "LJ cutoff             : 12.5 A" in output
     assert "LJ energy convention  : shift=no, tail=no" in output
     assert "box safety bulk" in output
     assert "0.45*h_min" in output
-    assert "static protocol: strains=[0.002, 0.004, 0.006]" in output
+    assert (
+        "static protocol: method=symmetric_static_stress_zero_limit, "
+        "strains=[0.0005, 0.001, 0.002]"
+    ) in output
+    assert "energy_curvature=diagnostic_only" in output
     assert "quick promotion: strains=[0.002, 0.004, 0.006]" in output
     assert "seeds=[101, 202, 303]" in output
     assert "final validation: strains=[0.001, 0.003]" in output
@@ -587,7 +595,12 @@ def test_packaged_fe_bcc_example_compiles_as_one_managed_pipeline(tmp_path):
     assert compiled.config["lammps"]["cutoff"] == pytest.approx(12.5)
     assert compiled.config["lammps"]["cutoff_policy"]["source"] == "parameters.cutoff"
     dynamic = compiled.config["elasticity"]["modules"]["dynamic"]
+    static = compiled.config["elasticity"]["modules"]["static"]
+    assert static["protocol"]["method"] == "symmetric_static_stress_zero_limit"
+    assert static["protocol"]["strain_magnitudes"] == [0.0005, 0.001, 0.002]
+    assert static["protocol"]["energy_curvature"] == "diagnostic_only"
     assert dynamic["protocol"]["production_steps"] == 40000
+    assert dynamic["protocol"]["strain_magnitudes"] == [0.002, 0.004, 0.006]
     assert dynamic["validation_protocol"] == {
         "strain_magnitudes": [0.001, 0.003],
         "equilibration_steps": 200000,

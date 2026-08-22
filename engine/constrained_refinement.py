@@ -183,6 +183,7 @@ class RefinementSpec:
     stability_column: str = "mechanically_stable"
     minimum_fit_quality: float | None = None
     fit_quality_column: str = "minimum_fit_r2"
+    fit_quality_pass_column: str | None = None
     minimum_eligible_finalists: int = 1
     derivation: Mapping[str, Any] | None = None
 
@@ -232,6 +233,11 @@ class RefinementSpec:
         derivation = raw.get("derivation")
         if derivation is not None and not isinstance(derivation, Mapping):
             raise RefinementError("derivation must be a mapping")
+        fit_quality_pass_column = raw.get("fit_quality_pass_column")
+        if fit_quality_pass_column is not None:
+            fit_quality_pass_column = str(fit_quality_pass_column).strip()
+            if not fit_quality_pass_column:
+                raise RefinementError("fit_quality_pass_column must not be empty")
         return cls(
             parameter_names=parameter_names,
             structural_constraints=constraints,
@@ -256,6 +262,7 @@ class RefinementSpec:
             stability_column=str(raw.get("stability_column", "mechanically_stable")),
             minimum_fit_quality=fit_quality,
             fit_quality_column=str(raw.get("fit_quality_column", "minimum_fit_r2")),
+            fit_quality_pass_column=fit_quality_pass_column,
             minimum_eligible_finalists=_positive_int(
                 raw.get("minimum_eligible_finalists", 1),
                 field="minimum_eligible_finalists",
@@ -581,6 +588,16 @@ def assess_and_rank_candidates(
                 fit_ok = False
             else:
                 fit_ok = fit_value + _EPS >= spec.minimum_fit_quality
+        recorded_fit_ok = True
+        if spec.fit_quality_pass_column is not None:
+            # This upstream boolean includes protocol-specific quality checks
+            # that cannot be reconstructed from the scalar R2 column alone
+            # (for example the static zero-strain extrapolation-drift gate).
+            # Missing or false evidence therefore fails closed.
+            recorded_fit_ok = _truthy(
+                mechanical_row.get(spec.fit_quality_pass_column, False)
+            )
+            fit_ok = bool(fit_ok and recorded_fit_ok)
         finite_score = math.isfinite(float(objective_summary["maximum_error_percent"]))
         eligible = bool(
             constraint_summary["feasible"] and stability_ok and fit_ok and finite_score
@@ -594,6 +611,7 @@ def assess_and_rank_candidates(
             "mechanical_stability_gate_pass": stability_ok,
             "mechanical_fit_gate_pass": fit_ok,
             "mechanical_fit_quality": fit_value,
+            "mechanical_recorded_fit_quality_pass": recorded_fit_ok,
             "mechanical_eligible": eligible,
             "within_mechanical_report_threshold": within,
             "mechanical_quality_tier": (

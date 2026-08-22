@@ -81,6 +81,70 @@ def test_exact_structure_gate_precedes_minimax_and_rmse_breaks_ties():
     assert set(ranking["mechanical_quality_tier"]) == {"best_effort_mechanical"}
 
 
+@pytest.mark.parametrize("recorded_gate", [False, None])
+def test_recorded_static_fit_gate_is_required_and_fail_closed(recorded_gate):
+    spec = _spec(
+        minimum_fit_quality=0.98,
+        fit_quality_column="minimum_fit_r2",
+        fit_quality_pass_column="fit_quality_pass",
+    )
+    structural = _keyed(pd.DataFrame([
+        {"epsilon": 1.0, "sigma": 1.0, "calc_density": 10.0},
+    ]), spec)
+    row = {
+        "epsilon": 1.0,
+        "sigma": 1.0,
+        "B": 100.0,
+        "Cprime": 100.0,
+        "minimum_fit_r2": 0.999,
+    }
+    if recorded_gate is not None:
+        row["fit_quality_pass"] = recorded_gate
+    mechanical = _keyed(pd.DataFrame([row]), spec)
+
+    assessed, ranking = assess_and_rank_candidates(structural, mechanical, spec)
+
+    assert ranking.empty
+    assert not bool(assessed.iloc[0]["mechanical_fit_gate_pass"])
+    assert not bool(assessed.iloc[0]["mechanical_eligible"])
+
+
+def test_recorded_static_fit_gate_and_r2_must_both_pass():
+    spec = _spec(
+        minimum_fit_quality=0.98,
+        fit_quality_column="minimum_fit_r2",
+        fit_quality_pass_column="fit_quality_pass",
+    )
+    structural = _keyed(pd.DataFrame([
+        {"epsilon": 1.0, "sigma": 1.0, "calc_density": 10.0},
+        {"epsilon": 2.0, "sigma": 2.0, "calc_density": 10.0},
+    ]), spec)
+    mechanical = _keyed(pd.DataFrame([
+        {
+            "epsilon": 1.0,
+            "sigma": 1.0,
+            "B": 100.0,
+            "Cprime": 100.0,
+            "minimum_fit_r2": 0.999,
+            "fit_quality_pass": True,
+        },
+        {
+            "epsilon": 2.0,
+            "sigma": 2.0,
+            "B": 100.0,
+            "Cprime": 100.0,
+            "minimum_fit_r2": 0.90,
+            "fit_quality_pass": True,
+        },
+    ]), spec)
+
+    assessed, ranking = assess_and_rank_candidates(structural, mechanical, spec)
+
+    assert list(ranking["epsilon"]) == [1.0]
+    failed = assessed.loc[assessed["epsilon"] == 2.0].iloc[0]
+    assert not bool(failed["mechanical_fit_gate_pass"])
+
+
 def _write_round_inputs(tmp_path: Path, *, all_structural_fail: bool = False):
     structural = tmp_path / "structural.csv"
     mechanical = tmp_path / "mechanical.csv"

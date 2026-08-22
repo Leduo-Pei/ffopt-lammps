@@ -364,8 +364,10 @@ property elasticity
     gate surface 5 percent
     born required
     r2 0.98
+    static_drift 5 percent
     tier 20 percent
-    strain 0.002 0.004 0.006
+    static_strain  0.0005 0.001 0.002
+    dynamic_strain 0.002  0.004 0.006
     replicate 2 2 2
     temperature 300 K
     timestep 1 fs
@@ -391,15 +393,32 @@ and `nu` are rejected as fit targets. Hill `G`, Hill `E`, and Poisson's ratio
 are derived once and reported as diagnostics.
 
 Static elasticity is ranked by maximum relative error inside the declared
-structural gates, not added to the first-stage weighted structural RMSE. The
-`r2` and optional Born-stability requirement are eligibility checks. `tier` is
-a reporting band only: missing the requested band does not discard the best
-structurally feasible mechanical compromise.
+structural gates, not added to the first-stage weighted structural RMSE. Its
+canonical values come from symmetric three-mode pressure slopes extrapolated
+to zero strain with the two smallest magnitudes. The raw linear fit, outer
+strain shells, and energy curvature remain diagnostics. Energy curvature is
+never used for ranking because an unshifted hard-cutoff potential has discrete
+energy jumps when neighbour shells cross the cutoff. The `r2`, `static_drift`,
+and optional Born-stability requirement are eligibility checks. `static_drift
+5 percent` rejects a candidate when any of the `B`, `Cprime`, or `C44`
+zero-strain intercepts changes by more than 5% under the outer-shell/full-window
+extrapolation audits. It complements R2: a nearly linear-looking fit can still
+be too dependent on the chosen strain window. The default is 5% when the line
+is omitted; production inputs should state it explicitly. `tier` is a reporting
+band only: missing the requested band does not discard the best structurally
+feasible mechanical compromise.
 
-`strain` lists positive magnitudes; the evaluator generates the symmetric
-positive/negative perturbations and the undeformed reference. At least two
-strictly increasing magnitudes in `(0, 0.05]` are required. `replicate` belongs
-to the elasticity calculation and is distinct from bulk `cells_in_data`.
+`static_strain` and `dynamic_strain` list their independent positive
+magnitudes; each evaluator generates symmetric positive/negative perturbations
+and an undeformed reference. Values must be strictly increasing and lie in
+`(0, 0.05]`. Static requires at least three magnitudes: the inner two define the
+canonical intercept and the third provides the independent `static_drift`
+audit. Dynamic requires at least two. Small deterministic static strains
+provide a zero-strain tangent, while larger dynamic strains preserve signal
+above thermal noise. The legacy `strain` spelling still sets both lists, but
+cannot be mixed with either fidelity-specific spelling and must therefore meet
+the three-magnitude static requirement. `replicate` belongs to the elasticity
+calculation and is distinct from bulk `cells_in_data`.
 Dynamic promotion and final validation are two separately fingerprinted
 protocols. `npt_equilibration`, `nvt_equilibration`, and `production` control the
 promotion NPT equilibration, NVT equilibration, and NVT production lengths;

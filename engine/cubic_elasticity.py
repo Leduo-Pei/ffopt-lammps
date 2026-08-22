@@ -26,6 +26,23 @@ from .constraint_objectives import minimax_relative_errors
 
 _EPS = 1.0e-14
 _ENERGY_MODES = ("hydro", "orthorhombic", "shear")
+_STATIC_STRESS_MODES = _ENERGY_MODES
+_STATIC_PRESSURE_COMPONENTS = ("pxx", "pyy", "pzz", "pxy")
+_STATIC_RESPONSE_DEFINITIONS = {
+    "hydro": "(pxx + pyy + pzz) / 3",
+    "orthorhombic": "pxx - pyy",
+    "shear": "pxy",
+}
+_STATIC_MODULUS_NAMES = {
+    "hydro": "B",
+    "orthorhombic": "Cprime",
+    "shear": "C44",
+}
+_STATIC_MODULUS_FROM_SLOPE = {
+    "hydro": -1.0 / 3.0,
+    "orthorhombic": -1.0 / 4.0,
+    "shear": -1.0,
+}
 _STRESS_DIRECTIONS = ("x", "y", "z", "xy", "xz", "yz")
 _RELEVANT_RESPONSES: dict[str, tuple[tuple[str, str], ...]] = {
     "x": (("sxx", "C11"), ("syy", "C12"), ("szz", "C12")),
@@ -296,6 +313,324 @@ def _linear_fit(strain: np.ndarray, response_gpa: np.ndarray) -> dict[str, Any]:
         "fit_rank": 2,
         "degrees_of_freedom": int(len(strain) - 2),
         "scaled_design_condition_number": float(singular_values[0] / singular_values[-1]),
+    }
+
+
+def _static_mode_response(mode: str, pressure_gpa: Mapping[str, float]) -> float:
+    if mode == "hydro":
+        return float((pressure_gpa["pxx"] + pressure_gpa["pyy"] + pressure_gpa["pzz"]) / 3.0)
+    if mode == "orthorhombic":
+        return float(pressure_gpa["pxx"] - pressure_gpa["pyy"])
+    if mode == "shear":
+        return float(pressure_gpa["pxy"])
+    raise ValueError(f"unsupported static stress mode {mode!r}")
+
+
+def _zero_strain_modulus_extrapolation(
+    magnitudes: Sequence[float],
+    moduli_gpa: Sequence[float],
+) -> dict[str, Any]:
+    """Return a two-smallest-shell intercept plus non-canonical diagnostics."""
+
+    if len(magnitudes) != len(moduli_gpa) or len(magnitudes) < 2:
+        raise ValueError("Zero-strain extrapolation needs at least two strain magnitudes")
+    magnitude_array = np.asarray(magnitudes, dtype=float)
+    modulus_array = np.asarray(moduli_gpa, dtype=float)
+    if not np.all(np.isfinite(magnitude_array)) or not np.all(np.isfinite(modulus_array)):
+        raise ValueError("Zero-strain extrapolation inputs must be finite")
+    squared = magnitude_array**2
+    denominator = float(squared[1] - squared[0])
+    if denominator <= _EPS:
+        raise ValueError("Two smallest strain magnitudes are not distinct")
+    quadratic = float((modulus_array[1] - modulus_array[0]) / denominator)
+    canonical = float(modulus_array[0] - quadratic * squared[0])
+    if not all(math.isfinite(value) for value in (quadratic, canonical)):
+        raise ValueError("Zero-strain extrapolation produced non-finite coefficients")
+
+    scale = float(np.max(squared))
+    design = np.column_stack((squared / scale, np.ones_like(squared)))
+    coefficients, _, _, singular_values = np.linalg.lstsq(design, modulus_array, rcond=None)
+    full_quadratic = float(coefficients[0] / scale)
+    full_intercept = float(coefficients[1])
+    full_predicted = design @ coefficients
+    full_rmse = float(math.sqrt(np.mean((modulus_array - full_predicted) ** 2)))
+    relative_scale = max(abs(canonical), _EPS)
+    full_drift = 100.0 * abs(full_intercept - canonical) / relative_scale
+
+    checks: list[dict[str, float]] = []
+    for index in range(2, len(magnitude_array)):
+        outer_denominator = float(squared[index] - squared[0])
+        outer_quadratic = float(
+            (modulus_array[index] - modulus_array[0]) / outer_denominator
+        )
+        outer_intercept = float(modulus_array[0] - outer_quadratic * squared[0])
+        checks.append(
+            {
+                "strain_magnitude": float(magnitude_array[index]),
+                "anchor_strain_magnitude": float(magnitude_array[0]),
+                "zero_strain_modulus_gpa": outer_intercept,
+                "drift_from_canonical_percent": (
+                    100.0 * abs(outer_intercept - canonical) / relative_scale
+                ),
+            }
+        )
+    drift_values = [item["drift_from_canonical_percent"] for item in checks]
+    if len(magnitude_array) > 2:
+        drift_values.append(full_drift)
+
+    return {
+        "canonical_modulus_gpa": canonical,
+        "canonical_strain_magnitudes": [
+            float(magnitude_array[0]),
+            float(magnitude_array[1]),
+        ],
+        "canonical_quadratic_coefficient_gpa": quadratic,
+        "outer_shell_checks": checks,
+        "full_window": {
+            "zero_strain_modulus_gpa": full_intercept,
+            "quadratic_coefficient_gpa": full_quadratic,
+            "r2": _r2_score(modulus_array, full_predicted),
+            "rmse_gpa": full_rmse,
+            "degrees_of_freedom": int(len(magnitude_array) - 2),
+            "scaled_design_condition_number": float(
+                singular_values[0] / singular_values[-1]
+            ),
+            "drift_from_canonical_percent": full_drift,
+        },
+        "maximum_zero_strain_extrapolation_drift_percent": (
+            max(drift_values) if drift_values else 0.0
+        ),
+    }
+
+
+def fit_cubic_static_stress_strain(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    zero_state: Mapping[str, Any],
+    stress_convention: str = "compression_positive",
+    stress_to_gpa: Any = 1.0,
+) -> dict[str, Any]:
+    """Fit ``B/Cprime/C44`` from symmetric 0 K three-mode LAMMPS pressures.
+
+    ``records`` must contain non-zero symmetric strain pairs for each of
+    ``hydro``, ``orthorhombic``, and ``shear``.  Every record supplies
+    ``mode/strain/pxx/pyy/pzz/pxy``.  The unstrained pressure is supplied
+    separately as ``zero_state`` so a caller cannot silently substitute an
+    inferred baseline.  A pressure-only zero-state mapping is sufficient;
+    optional ``mode='zero'`` and ``strain=0`` audit labels are validated when
+    present.
+
+    This protocol deliberately accepts only LAMMPS' compression-positive
+    pressure convention.  ``stress_to_gpa`` is a positive multiplier from the
+    caller's pressure units to GPa.  The fitted compression-positive response
+    slopes are reduced using ``B=-slope/3``, ``Cprime=-slope/4``, and
+    ``C44=-slope``.  Raw linear-fit diagnostics, the explicit residual
+    pressure, and per-shell central-difference estimates are retained for
+    audit and fit-quality gates.  The canonical modulus is the ``h -> 0``
+    intercept of ``M(h)=M0+q*h**2`` through the two smallest strain shells;
+    larger shells only diagnose extrapolation drift and never change it.
+    """
+    if stress_convention != "compression_positive":
+        raise ValueError(
+            "static three-mode stress fitting requires "
+            "stress_convention='compression_positive'"
+        )
+    conversion = _finite_float(stress_to_gpa, "stress_to_gpa")
+    if conversion <= 0.0:
+        raise ValueError("stress_to_gpa must be positive")
+    if not records:
+        raise ValueError("Static stress-strain records must not be empty")
+    if not isinstance(zero_state, Mapping):
+        raise ValueError("zero_state must be a mapping")
+    if "mode" in zero_state and str(zero_state["mode"]) != "zero":
+        raise ValueError("zero_state must declare mode='zero'")
+    zero_strain = _finite_float(zero_state.get("strain", 0.0), "zero_state strain")
+    if abs(zero_strain) > _EPS:
+        raise ValueError("zero_state strain must be zero")
+
+    zero_pressure_raw = {
+        component: _finite_float(
+            zero_state.get(component),
+            f"zero_state {component}",
+        )
+        for component in _STATIC_PRESSURE_COMPONENTS
+    }
+    zero_pressure_gpa = {
+        component: conversion * value for component, value in zero_pressure_raw.items()
+    }
+    zero_responses_gpa = {
+        mode: _static_mode_response(mode, zero_pressure_gpa)
+        for mode in _STATIC_STRESS_MODES
+    }
+
+    parsed: list[dict[str, Any]] = []
+    for index, record in enumerate(records):
+        if not isinstance(record, Mapping):
+            raise ValueError(f"Static stress-strain record {index} must be a mapping")
+        mode = str(record.get("mode", ""))
+        if mode not in _STATIC_STRESS_MODES:
+            raise ValueError(
+                f"Static stress-strain record {index} has unsupported mode {mode!r}"
+            )
+        strain = _finite_float(record.get("strain"), f"record {index} strain")
+        if abs(strain) <= _EPS:
+            raise ValueError(
+                "Static mode records must use non-zero strain; pass the explicit "
+                "zero_state separately"
+            )
+        pressure_gpa = {
+            component: conversion
+            * _finite_float(
+                record.get(component),
+                f"record {index} {component}",
+            )
+            for component in _STATIC_PRESSURE_COMPONENTS
+        }
+        parsed.append(
+            {
+                "mode": mode,
+                "strain": strain,
+                "response_gpa": _static_mode_response(mode, pressure_gpa),
+            }
+        )
+
+    fits: list[dict[str, Any]] = []
+    independent_moduli: dict[str, float] = {}
+    for mode in _STATIC_STRESS_MODES:
+        subset = [item for item in parsed if item["mode"] == mode]
+        if not subset:
+            raise ValueError(f"Static stress-strain dataset is missing mode {mode}")
+        nonzero_strains = np.asarray([item["strain"] for item in subset], dtype=float)
+        nonzero_responses = np.asarray(
+            [item["response_gpa"] for item in subset], dtype=float
+        )
+        magnitudes = _unique_magnitudes(nonzero_strains.tolist())
+        if len(magnitudes) < 2:
+            raise ValueError(
+                f"Mode {mode} needs at least two symmetric non-zero strain magnitudes"
+            )
+        for magnitude in magnitudes:
+            positive = _mean_at(nonzero_strains, nonzero_responses, magnitude)
+            negative = _mean_at(nonzero_strains, nonzero_responses, -magnitude)
+            if positive is None or negative is None:
+                raise ValueError(f"Mode {mode} is missing a symmetric pair at {magnitude}")
+
+        strains = np.concatenate((np.asarray([0.0]), nonzero_strains))
+        responses = np.concatenate(
+            (np.asarray([zero_responses_gpa[mode]]), nonzero_responses)
+        )
+        # Retain the full-window line as a diagnostic, but do not let an outer
+        # shell crossing the hard cutoff redefine the quality of the two
+        # smallest strain shells used by the canonical zero-limit estimator.
+        linear = _linear_fit(strains, responses)
+        canonical_magnitudes = magnitudes[:2]
+        canonical_mask = np.asarray([
+            any(
+                math.isclose(abs(float(strain)), magnitude, rel_tol=1.0e-9, abs_tol=1.0e-14)
+                for magnitude in canonical_magnitudes
+            )
+            for strain in nonzero_strains
+        ])
+        canonical_strains = np.concatenate(
+            (np.asarray([0.0]), nonzero_strains[canonical_mask])
+        )
+        canonical_responses = np.concatenate(
+            (np.asarray([zero_responses_gpa[mode]]), nonzero_responses[canonical_mask])
+        )
+        canonical_linear = _linear_fit(canonical_strains, canonical_responses)
+        modulus_factor = _STATIC_MODULUS_FROM_SLOPE[mode]
+        raw_linear_modulus = modulus_factor * linear["slope_gpa"]
+        if not math.isfinite(raw_linear_modulus):
+            raise ValueError(f"Mode {mode} produced a non-finite raw linear modulus")
+
+        central_slopes: list[float] = []
+        for magnitude in magnitudes:
+            positive = _mean_at(nonzero_strains, nonzero_responses, magnitude)
+            negative = _mean_at(nonzero_strains, nonzero_responses, -magnitude)
+            assert positive is not None and negative is not None
+            central_slopes.append((positive - negative) / (2.0 * magnitude))
+        central_moduli = [modulus_factor * value for value in central_slopes]
+        central_std = (
+            float(np.std(central_moduli, ddof=1)) if len(central_moduli) > 1 else 0.0
+        )
+        extrapolation = _zero_strain_modulus_extrapolation(magnitudes, central_moduli)
+        modulus = float(extrapolation["canonical_modulus_gpa"])
+
+        modulus_name = _STATIC_MODULUS_NAMES[mode]
+        independent_moduli[modulus_name] = float(modulus)
+        linear.update(
+            {
+                "mode": mode,
+                "response_definition": _STATIC_RESPONSE_DEFINITIONS[mode],
+                "target_modulus": modulus_name,
+                "modulus_from_slope_factor": modulus_factor,
+                "modulus_gpa": float(modulus),
+                "canonical_estimator": "two-smallest-shell h_squared zero-strain extrapolation",
+                "canonical_window_linear_fit": canonical_linear,
+                "raw_linear_modulus_gpa": float(raw_linear_modulus),
+                "n_samples": int(len(strains)),
+                "n_nonzero_samples": int(len(nonzero_strains)),
+                "n_symmetric_magnitudes": len(magnitudes),
+                "symmetric_magnitudes": magnitudes,
+                "zero_state_response_gpa": zero_responses_gpa[mode],
+                "intercept_minus_zero_state_gpa": (
+                    linear["intercept_gpa"] - zero_responses_gpa[mode]
+                ),
+                "central_difference_slopes_gpa": central_slopes,
+                "central_difference_values_gpa": central_moduli,
+                "central_difference_mean_gpa": float(np.mean(central_moduli)),
+                "central_difference_std_gpa": central_std,
+                "zero_strain_extrapolation": extrapolation,
+                "maximum_zero_strain_extrapolation_drift_percent": extrapolation[
+                    "maximum_zero_strain_extrapolation_drift_percent"
+                ],
+            }
+        )
+        fits.append(linear)
+
+    bulk = independent_moduli["B"]
+    cprime = independent_moduli["Cprime"]
+    c44 = independent_moduli["C44"]
+    c11 = bulk + 4.0 * cprime / 3.0
+    c12 = bulk - 2.0 * cprime / 3.0
+    elasticity = derive_cubic_properties(c11, c12, c44)
+    return {
+        "method": "symmetric three-mode static stress-strain zero-limit extrapolation",
+        "units": {
+            "input_stress": "caller-defined",
+            "elastic_moduli": "GPa",
+            "strain": "dimensionless",
+        },
+        "stress_convention": stress_convention,
+        "stress_to_gpa": conversion,
+        "response_definitions": dict(_STATIC_RESPONSE_DEFINITIONS),
+        "zero_state": {
+            "strain": zero_strain,
+            "input_pressure_components": zero_pressure_raw,
+            "residual_pressure_compression_positive_gpa": zero_pressure_gpa,
+            "mode_responses_gpa": zero_responses_gpa,
+        },
+        "elasticity": elasticity,
+        "fits": fits,
+        "fit_quality": {
+            "minimum_r2": min(
+                item["canonical_window_linear_fit"]["r2"] for item in fits
+            ),
+            "maximum_rmse_gpa": max(
+                item["canonical_window_linear_fit"]["rmse_gpa"] for item in fits
+            ),
+            "minimum_raw_full_window_r2": min(item["r2"] for item in fits),
+            "maximum_raw_full_window_rmse_gpa": max(
+                item["rmse_gpa"] for item in fits
+            ),
+            "maximum_central_difference_std_gpa": max(
+                item["central_difference_std_gpa"] for item in fits
+            ),
+            "maximum_zero_strain_extrapolation_drift_percent": max(
+                item["maximum_zero_strain_extrapolation_drift_percent"]
+                for item in fits
+            ),
+        },
     }
 
 

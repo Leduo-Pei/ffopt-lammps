@@ -6,6 +6,29 @@ expectations while the public API remains in alpha.
 
 ## Unreleased
 
+## 0.3.0a6 - 2026-08-22
+
+### Fixed
+
+- Make symmetric three-mode stress--strain slopes the canonical 0 K cubic
+  elasticity estimator.  The former energy-curvature estimator is invalid for
+  an unshifted hard-cutoff `lj/cut` potential when a neighbour shell crosses
+  the cutoff; it is now retained only as a labelled consistency diagnostic and
+  can neither train the surrogate nor rank candidates.
+- Record the full zero-pressure reference stress tensor and triclinic box
+  geometry in every static candidate, and retain per-strain pressures with
+  explicit units.  Static fit quality now comes from the same stress response
+  that supplies `B`, `Cprime`, and `C44`.
+- Split `static_strain` from `dynamic_strain`. Static central differences use
+  the two smallest magnitudes to extrapolate `M(h)=M0+q*h^2` to zero strain;
+  outer magnitudes audit window drift, while finite-temperature strains remain
+  large enough to resolve the signal above trajectory noise. The legacy
+  `strain` spelling remains a mutually exclusive compatibility alias.
+- Add the public `static_drift VALUE percent` hard eligibility gate (5% by
+  default). It rejects a static candidate when any canonical zero-strain
+  modulus is too sensitive to the outer-shell/full-window extrapolation audit,
+  even when the raw stress fit passes its R2 threshold.
+
 ## 0.3.0a5 - 2026-08-22
 
 ### Changed

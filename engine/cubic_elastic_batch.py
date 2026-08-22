@@ -7,7 +7,8 @@ selection policy is deliberately lexicographic:
 
 1. measured structural gates;
 2. cubic Born stability;
-3. minimum fit R2;
+3. protocol-specific fit quality (minimum R2 and, for static data, maximum
+   zero-strain extrapolation drift);
 4. finite minimax error over independent B/Cprime/C44 targets;
 5. relative RMSE;
 6. same-element artificial-type contrast; and
@@ -589,6 +590,20 @@ def summarize_single_elastic_result(
     fit_r2 = float(
         fit_quality.get("minimum_r2", fit_quality.get("minimum_relevant_r2", math.nan))
     )
+    fit_drift = float(
+        fit_quality.get("maximum_zero_strain_extrapolation_drift_percent", math.nan)
+    )
+    protocol = module.get("protocol", {})
+    drift_limit = float(
+        protocol.get("maximum_zero_strain_extrapolation_drift_percent", math.inf)
+        if isinstance(protocol, Mapping)
+        else math.inf
+    )
+    r2_pass = bool(math.isfinite(fit_r2) and fit_r2 >= minimum_r2)
+    drift_pass = bool(
+        not math.isfinite(drift_limit)
+        or (math.isfinite(fit_drift) and fit_drift <= drift_limit)
+    )
     born = bool(summary["born_stability"]["stable"])
     row.update({
         "calculation_status": "completed",
@@ -603,8 +618,10 @@ def summarize_single_elastic_result(
         "E_hill_gpa": diagnostics["E_hill_gpa"],
         "nu_hill": diagnostics["nu_hill"],
         "minimum_fit_r2": fit_r2,
+        "maximum_static_extrapolation_drift_percent": fit_drift,
+        "maximum_static_extrapolation_drift_limit_percent": drift_limit,
         "born_stability_pass": born,
-        "fit_quality_pass": bool(math.isfinite(fit_r2) and fit_r2 >= minimum_r2),
+        "fit_quality_pass": bool(r2_pass and drift_pass),
     })
     values = {
         "B": row["B_gpa"],
@@ -640,8 +657,10 @@ def summarize_single_elastic_result(
         reasons.append("structural_gate")
     if born_required and not born:
         reasons.append("born_stability")
-    if not row["fit_quality_pass"]:
+    if not r2_pass:
         reasons.append(f"fit_r2<{minimum_r2:g}")
+    if not drift_pass:
+        reasons.append(f"static_drift>{drift_limit:g}%")
     if not finite:
         reasons.append("nonfinite_mechanical_score")
     row["finalist_rejection_reason"] = ";".join(reasons)
@@ -874,11 +893,17 @@ def _protocol_module(config: Mapping[str, Any], protocol: str) -> Mapping[str, A
 def _signed_strains(module: Mapping[str, Any]) -> tuple[float, ...]:
     protocol = module.get("protocol", {})
     magnitudes = sorted({float(value) for value in protocol["strain_magnitudes"]})
-    if len(magnitudes) < 2 or any(
+    minimum = (
+        3
+        if protocol.get("method") == "symmetric_static_stress_zero_limit"
+        else 2
+    )
+    if len(magnitudes) < minimum or any(
         not math.isfinite(value) or value <= 0.0 for value in magnitudes
     ):
         raise CubicElasticBatchError(
-            "elasticity strain_magnitudes need at least two finite positive values"
+            "elasticity strain_magnitudes need at least "
+            f"{minimum} finite positive values for method {protocol.get('method')!r}"
         )
     return tuple([-value for value in reversed(magnitudes)] + magnitudes)
 
@@ -1116,6 +1141,9 @@ def _failed_row(
         "calculation_error": message,
         "born_stability_pass": False,
         "fit_quality_pass": False,
+        "minimum_fit_r2": math.nan,
+        "maximum_static_extrapolation_drift_percent": math.nan,
+        "maximum_static_extrapolation_drift_limit_percent": math.nan,
         "finite_mechanical_score": False,
         "finalist_eligible": False,
         "mechanical_max_error_percent": math.inf,

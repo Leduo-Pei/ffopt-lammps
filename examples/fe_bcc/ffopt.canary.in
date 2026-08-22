@@ -74,9 +74,11 @@ property elasticity
     gate surface 50 percent
     born off
     r2 0.01
+    static_drift 20 percent
     tier 100 percent
 
-    strain 0.004 0.008
+    static_strain 0.0005 0.001 0.002
+    dynamic_strain 0.004 0.008
     replicate 2 2 2
     temperature 300 K
     timestep 1 fs

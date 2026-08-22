@@ -161,6 +161,7 @@ def _static_row(row: dict) -> dict:
         "C44_gpa": 82.5,
         "born_stability_pass": True,
         "minimum_fit_r2": 0.99,
+        "fit_quality_pass": True,
     }
 
 

@@ -24,4 +24,4 @@ unfix BOX
 run 0
 
 write_restart elastic_reference.restart
-print "FFOPT_STATIC_REFERENCE: $(pe) $(vol) $(lx) $(ly) $(lz) $(density)"
+print "FFOPT_STATIC_REFERENCE: $(pe) $(vol) $(lx) $(ly) $(lz) $(xy) $(xz) $(yz) $(pxx) $(pyy) $(pzz) $(pxy) $(pxz) $(pyz) $(density)"

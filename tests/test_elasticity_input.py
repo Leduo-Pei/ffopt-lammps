@@ -156,7 +156,10 @@ def test_cubic_elasticity_contract_compiles_without_polluting_legacy_targets(
                 "unit": "percent",
             },
         },
-        "fit_quality": {"minimum_r2": 0.98},
+        "fit_quality": {
+            "minimum_r2": 0.98,
+            "maximum_static_drift_percent": 5.0,
+        },
         "born_stability": {"required": True},
     }
     assert elasticity["reporting"] == {
@@ -207,10 +210,16 @@ def test_static_only_contract_uses_deterministic_scientific_defaults(
 
     assert list(elasticity["modules"]) == ["static"]
     assert elasticity["modules"]["static"]["protocol"] == {
-        "method": "symmetric_energy_strain",
+        "method": "symmetric_static_stress_zero_limit",
         "strain_magnitudes": [0.002, 0.004, 0.006],
         "replicate": [2, 2, 2],
         "temperature_k": 0.0,
+        "energy_curvature": "diagnostic_only",
+        "energy_stress_consistency_percent": 10.0,
+        "maximum_zero_strain_extrapolation_drift_percent": 5.0,
+        "reference_geometry_relative_tolerance": 1.0e-8,
+        "reference_max_residual_pressure_gpa": 0.1,
+        "reference_max_deviatoric_stress_gpa": 0.1,
     }
 
     baseline_hash = scientific_config_hash(_scientific_config(compiled.config))
@@ -296,6 +305,83 @@ def test_dynamic_only_settings_require_dynamic_module(tmp_path: Path) -> None:
 
     with pytest.raises(InputFileError, match="temperature requires a dynamic module"):
         parse_input_file(path)
+
+
+def test_dynamic_strain_requires_dynamic_module(tmp_path: Path) -> None:
+    block = _elasticity_block(dynamic=False).replace(
+        "    gate lattice 1 percent\n",
+        "    dynamic_strain 0.002 0.004\n    gate lattice 1 percent\n",
+    )
+    path = _write(tmp_path, _project_text(block))
+
+    with pytest.raises(InputFileError, match="dynamic_strain requires a dynamic module"):
+        parse_input_file(path)
+
+
+def test_static_drift_is_public_and_part_of_static_scientific_identity(
+    tmp_path: Path,
+) -> None:
+    block = _elasticity_block(dynamic=False).replace(
+        "    r2 0.98\n",
+        "    r2 0.98\n    static_drift 2.5 percent\n",
+    )
+    compiled = compile_input(parse_input_file(_write(tmp_path, _project_text(block))))
+    elasticity = compiled.config["elasticity"]
+
+    assert elasticity["selection"]["fit_quality"] == {
+        "minimum_r2": 0.98,
+        "maximum_static_drift_percent": 2.5,
+    }
+    assert elasticity["modules"]["static"]["protocol"][
+        "maximum_zero_strain_extrapolation_drift_percent"
+    ] == 2.5
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "static_drift 0 percent",
+        "static_drift -1 percent",
+        "static_drift 5 GPa",
+        "static_drift 5",
+    ],
+)
+def test_static_drift_rejects_nonpositive_values_and_wrong_units(
+    tmp_path: Path, line: str
+) -> None:
+    block = _elasticity_block(dynamic=False).replace(
+        "    r2 0.98\n",
+        f"    r2 0.98\n    {line}\n",
+    )
+
+    with pytest.raises(InputFileError, match="static_drift"):
+        parse_input_file(_write(tmp_path, _project_text(block)))
+
+
+def test_legacy_and_fidelity_specific_strains_are_mutually_exclusive(
+    tmp_path: Path,
+) -> None:
+    block = _elasticity_block().replace(
+        "    strain 0.002 0.004 0.006\n",
+        "    strain 0.002 0.004 0.006\n"
+        "    static_strain 0.0005 0.001 0.002\n",
+    )
+    path = _write(tmp_path, _project_text(block))
+
+    with pytest.raises(InputFileError, match="legacy strain and static_strain"):
+        parse_input_file(path)
+
+
+def test_static_strain_requires_third_magnitude_for_independent_drift_audit(
+    tmp_path: Path,
+) -> None:
+    block = _elasticity_block(dynamic=False).replace(
+        "    strain 0.002 0.004 0.006\n",
+        "    static_strain 0.0005 0.001\n",
+    )
+
+    with pytest.raises(InputFileError, match="static_strain requires at least three"):
+        parse_input_file(_write(tmp_path, _project_text(block)))
 
 
 def test_finalists_require_dynamic_promotion_module(tmp_path: Path) -> None:

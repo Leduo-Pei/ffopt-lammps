@@ -50,8 +50,8 @@ same saved pipeline:
 
 ```bash
 ffopt check ffopt.canary.in
-ffopt run ffopt.canary.in --machine cluster --run-id fe_bcc_canary_a5 --dry-run
-ffopt run ffopt.canary.in --machine cluster --run-id fe_bcc_canary_a5 --watch
+ffopt run ffopt.canary.in --machine cluster --run-id fe_bcc_canary_a6 --dry-run
+ffopt run ffopt.canary.in --machine cluster --run-id fe_bcc_canary_a6 --watch
 ```
 
 Interrupting the local `--watch` process does not require another scientific
@@ -96,7 +96,7 @@ oversubscribe it. These resource fields therefore do not belong in
 structural BO coverage
   -> multi-centre local/global sampling
   -> independent-seed structural audit
-  -> exact 0 K cubic screen
+  -> 0 K cubic stress-slope screen extrapolated to zero strain
   -> constrained-minimax surrogate and AL
   -> exactly 20 diverse candidates in a quick multi-seed 300 K promotion
   -> one promoted winner in an independent long-trajectory validation
@@ -104,11 +104,17 @@ structural BO coverage
 ```
 
 Structure, density, angles, and surface energy are constraints. Their
-continuous violation is zero inside the declared tolerance. The exact static
+continuous violation is zero inside the declared tolerance. The static
 objective is the maximum relative error among independent `B`, `Cprime`, and
-`C44` targets. RMSE and parameter contrast break ties. The requested 20%
-mechanical tier labels result quality but never removes the best structurally
-valid candidate.
+`C44` targets. It uses symmetric stress slopes; energy curvature is
+diagnostic-only because an unshifted LJ cutoff makes energy discontinuous at
+neighbour-shell crossings. `r2 0.98` and `static_drift 5 percent` are separate
+hard quality gates: the first checks the stress fit, while the second rejects a
+zero-strain intercept that changes by more than 5% when the outer strain shell
+audits the inner two-shell extrapolation. Use at least three `static_strain`
+magnitudes so this audit has independent evidence. RMSE and parameter contrast
+break ties. The requested 20% mechanical tier labels result quality but never
+removes the best structurally valid candidate.
 
 Static and finite-temperature elastic calculations use independent target
 triplets and independent protocols. `G`, `E`, and Poisson's ratio are derived

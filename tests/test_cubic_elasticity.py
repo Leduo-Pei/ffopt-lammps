@@ -8,6 +8,7 @@ from engine.cubic_elasticity import (
     cubic_minimax_report,
     derive_cubic_properties,
     fit_cubic_energy_strain,
+    fit_cubic_static_stress_strain,
     fit_cubic_stress_strain,
 )
 
@@ -212,6 +213,233 @@ def test_stress_strain_fit_rejects_asymmetric_or_too_small_design() -> None:
     records = [row for row in records if row["direction"] != "xy" or float(row["strain"]) > 0.0]
     with pytest.raises(ValueError, match="symmetric strain pair"):
         fit_cubic_stress_strain(records)
+
+
+def _static_stress_records(
+    *,
+    bulk: float = 170.0,
+    cprime: float = 50.0,
+    c44: float = 120.0,
+    stress_to_gpa: float = 1.0e-4,
+) -> tuple[list[dict[str, float | str]], dict[str, float | str]]:
+    residual_gpa = {"pxx": 0.30, "pyy": -0.10, "pzz": 0.15, "pxy": 0.04}
+    zero_state: dict[str, float | str] = {
+        "mode": "zero",
+        "strain": 0.0,
+        **{name: value / stress_to_gpa for name, value in residual_gpa.items()},
+    }
+    records: list[dict[str, float | str]] = []
+    for mode in ("hydro", "orthorhombic", "shear"):
+        for strain in (-0.010, -0.007, -0.004, 0.004, 0.007, 0.010):
+            pressure = dict(residual_gpa)
+            if mode == "hydro":
+                for component in ("pxx", "pyy", "pzz"):
+                    pressure[component] += -3.0 * bulk * strain
+            elif mode == "orthorhombic":
+                pressure["pxx"] += -2.0 * cprime * strain
+                pressure["pyy"] += 2.0 * cprime * strain
+            else:
+                pressure["pxy"] += -c44 * strain
+            records.append(
+                {
+                    "mode": mode,
+                    "strain": strain,
+                    **{name: value / stress_to_gpa for name, value in pressure.items()},
+                }
+            )
+    return records, zero_state
+
+
+def test_static_three_mode_stress_fit_recovers_exact_moduli_and_residual() -> None:
+    records, zero_state = _static_stress_records()
+    pressure_only_zero = {
+        component: zero_state[component] for component in ("pxx", "pyy", "pzz", "pxy")
+    }
+
+    result = fit_cubic_static_stress_strain(
+        records,
+        zero_state=pressure_only_zero,
+        stress_convention="compression_positive",
+        stress_to_gpa=1.0e-4,
+    )
+
+    assert result["elasticity"]["independent_targets_gpa"] == pytest.approx(
+        {"B": 170.0, "Cprime": 50.0, "C44": 120.0}
+    )
+    assert result["elasticity"]["elastic_constants_gpa"] == pytest.approx(
+        {"C11": 236.6666666667, "C12": 136.6666666667, "C44": 120.0}
+    )
+    assert result["zero_state"]["residual_pressure_compression_positive_gpa"] == (
+        pytest.approx({"pxx": 0.30, "pyy": -0.10, "pzz": 0.15, "pxy": 0.04})
+    )
+    assert result["fit_quality"]["minimum_r2"] == pytest.approx(1.0)
+    assert result["fit_quality"]["maximum_rmse_gpa"] == pytest.approx(0.0, abs=1.0e-12)
+    assert result["fit_quality"]["maximum_central_difference_std_gpa"] == pytest.approx(
+        0.0, abs=1.0e-12
+    )
+    expected_intercepts = {
+        "hydro": (0.30 - 0.10 + 0.15) / 3.0,
+        "orthorhombic": 0.30 - (-0.10),
+        "shear": 0.04,
+    }
+    assert {item["mode"]: item["intercept_gpa"] for item in result["fits"]} == (
+        pytest.approx(expected_intercepts)
+    )
+    assert all(item["n_symmetric_magnitudes"] == 3 for item in result["fits"])
+    assert all(
+        item["zero_strain_extrapolation"]["canonical_strain_magnitudes"]
+        == pytest.approx([0.004, 0.007])
+        for item in result["fits"]
+    )
+
+
+def test_static_three_mode_stress_fit_cancels_even_terms() -> None:
+    records, zero_state = _static_stress_records(stress_to_gpa=1.0)
+    even_coefficients = {"hydro": 9000.0, "orthorhombic": -3000.0, "shear": 5000.0}
+    for row in records:
+        strain = float(row["strain"])
+        mode = str(row["mode"])
+        even = even_coefficients[mode] * strain**2
+        if mode == "hydro":
+            for component in ("pxx", "pyy", "pzz"):
+                row[component] = float(row[component]) + even
+        elif mode == "orthorhombic":
+            row["pxx"] = float(row["pxx"]) + 0.5 * even
+            row["pyy"] = float(row["pyy"]) - 0.5 * even
+        else:
+            row["pxy"] = float(row["pxy"]) + even
+
+    result = fit_cubic_static_stress_strain(
+        records,
+        zero_state=zero_state,
+        stress_to_gpa=1.0,
+    )
+
+    assert result["elasticity"]["independent_targets_gpa"] == pytest.approx(
+        {"B": 170.0, "Cprime": 50.0, "C44": 120.0}
+    )
+    assert result["fit_quality"]["minimum_r2"] < 1.0
+    assert result["fit_quality"]["maximum_rmse_gpa"] > 0.0
+    assert result["fit_quality"]["maximum_central_difference_std_gpa"] == pytest.approx(
+        0.0, abs=1.0e-12
+    )
+    assert any(abs(item["intercept_minus_zero_state_gpa"]) > 0.0 for item in result["fits"])
+
+
+def test_static_three_mode_stress_fit_reports_central_difference_noise() -> None:
+    records, zero_state = _static_stress_records(stress_to_gpa=1.0)
+    noisy = next(
+        row
+        for row in records
+        if row["mode"] == "shear" and math.isclose(float(row["strain"]), 0.010)
+    )
+    noisy["pxy"] = float(noisy["pxy"]) + 0.02
+
+    result = fit_cubic_static_stress_strain(
+        records,
+        zero_state=zero_state,
+        stress_to_gpa=1.0,
+    )
+
+    shear = next(item for item in result["fits"] if item["mode"] == "shear")
+    assert shear["modulus_gpa"] == pytest.approx(120.0)
+    assert shear["r2"] < 1.0
+    assert shear["rmse_gpa"] > 0.0
+    assert shear["central_difference_std_gpa"] > 0.0
+    assert result["fit_quality"]["maximum_central_difference_std_gpa"] == pytest.approx(
+        shear["central_difference_std_gpa"]
+    )
+    assert shear["maximum_zero_strain_extrapolation_drift_percent"] > 0.0
+
+
+def test_static_three_mode_stress_fit_extrapolates_odd_cubic_response_to_zero() -> None:
+    records, zero_state = _static_stress_records(stress_to_gpa=1.0)
+    cubic_coefficients = {"hydro": 30000.0, "orthorhombic": -15000.0, "shear": 20000.0}
+    for row in records:
+        strain = float(row["strain"])
+        mode = str(row["mode"])
+        cubic = cubic_coefficients[mode] * strain**3
+        if mode == "hydro":
+            for component in ("pxx", "pyy", "pzz"):
+                row[component] = float(row[component]) + cubic
+        elif mode == "orthorhombic":
+            row["pxx"] = float(row["pxx"]) + 0.5 * cubic
+            row["pyy"] = float(row["pyy"]) - 0.5 * cubic
+        else:
+            row["pxy"] = float(row["pxy"]) + cubic
+
+    result = fit_cubic_static_stress_strain(
+        records,
+        zero_state=zero_state,
+        stress_to_gpa=1.0,
+    )
+
+    assert result["elasticity"]["independent_targets_gpa"] == pytest.approx(
+        {"B": 170.0, "Cprime": 50.0, "C44": 120.0}
+    )
+    assert any(
+        not math.isclose(item["raw_linear_modulus_gpa"], item["modulus_gpa"])
+        for item in result["fits"]
+    )
+    assert result["fit_quality"]["maximum_zero_strain_extrapolation_drift_percent"] == (
+        pytest.approx(0.0, abs=1.0e-12)
+    )
+
+
+def test_static_three_mode_stress_fit_rejects_missing_pair_and_nonfinite() -> None:
+    records, zero_state = _static_stress_records(stress_to_gpa=1.0)
+    missing_pair = [
+        row
+        for row in records
+        if not (row["mode"] == "shear" and math.isclose(float(row["strain"]), -0.010))
+    ]
+    with pytest.raises(ValueError, match="missing a symmetric pair"):
+        fit_cubic_static_stress_strain(
+            missing_pair,
+            zero_state=zero_state,
+            stress_to_gpa=1.0,
+        )
+
+    records, zero_state = _static_stress_records(stress_to_gpa=1.0)
+    records[0]["pyy"] = math.nan
+    with pytest.raises(ValueError, match="finite"):
+        fit_cubic_static_stress_strain(
+            records,
+            zero_state=zero_state,
+            stress_to_gpa=1.0,
+        )
+
+
+@pytest.mark.parametrize("bad_conversion", [0.0, -1.0, math.nan, math.inf])
+def test_static_three_mode_stress_fit_requires_lammps_convention_and_conversion(
+    bad_conversion: float,
+) -> None:
+    records, zero_state = _static_stress_records(stress_to_gpa=1.0)
+    with pytest.raises(ValueError, match="stress_to_gpa"):
+        fit_cubic_static_stress_strain(
+            records,
+            zero_state=zero_state,
+            stress_to_gpa=bad_conversion,
+        )
+
+    with pytest.raises(ValueError, match="compression_positive"):
+        fit_cubic_static_stress_strain(
+            records,
+            zero_state=zero_state,
+            stress_convention="tension_positive",
+        )
+
+
+def test_static_three_mode_stress_fit_requires_explicit_zero_state() -> None:
+    records, zero_state = _static_stress_records(stress_to_gpa=1.0)
+    bad_zero = dict(zero_state)
+    bad_zero["strain"] = 0.001
+    with pytest.raises(ValueError, match="zero_state strain must be zero"):
+        fit_cubic_static_stress_strain(
+            records,
+            zero_state=bad_zero,
+            stress_to_gpa=1.0,
+        )
 
 
 def test_cubic_minimax_report_uses_independent_targets_and_aliases() -> None:

@@ -10,8 +10,10 @@ import pytest
 
 from engine.cubic_elastic_batch import (
     BatchArtifactError,
+    Candidate,
     CandidateParameterError,
     CubicElasticBatchError,
+    PreparedCandidate,
     build_parser as build_elastic_batch_parser,
     effective_available_cores,
     load_candidates,
@@ -19,6 +21,7 @@ from engine.cubic_elastic_batch import (
     rank_elastic_results,
     run_elasticity_batch,
     select_finalists,
+    summarize_single_elastic_result,
 )
 from engine.cubic_elastic_runner import (
     ATM_TO_GPA,
@@ -202,6 +205,86 @@ def test_finalist_minimum_never_admits_hard_gate_failure():
     assert list(selected["parameter_key"]) == ["candidate1"]
 
 
+@pytest.mark.parametrize(
+    ("drift, expected_pass, expected_reason"),
+    [
+        (4.999, True, ""),
+        (5.001, False, "static_drift>5%"),
+        (float("nan"), False, "static_drift>5%"),
+    ],
+)
+def test_static_extrapolation_drift_is_a_fail_closed_finalist_gate(
+    tmp_path, drift, expected_pass, expected_reason
+):
+    candidate = Candidate(
+        parameter_key="named:sha256:test",
+        raw_parameters={"epsilon": 6.0, "sigma": 2.3},
+        source_row={},
+        source_rank=1,
+    )
+    prepared = PreparedCandidate(
+        candidate=candidate,
+        resolved_parameters={"epsilon": 6.0, "sigma": 2.3},
+        force_field_include=tmp_path / "force_field.lmp",
+        parameter_contrast={
+            "contrast": 0.0,
+            "epsilon_contrast": 0.0,
+            "sigma_contrast": 0.0,
+        },
+    )
+    summary = {
+        "candidate_directory": str(tmp_path),
+        "candidate_fingerprint": "sha256:test",
+        "elastic_constants_gpa": {"C11": 240.0, "C12": 120.0, "C44": 120.0},
+        "independent_moduli_gpa": {"B": 160.0, "Cprime": 60.0},
+        "derived_diagnostics": {
+            "G_hill_gpa": 90.0,
+            "E_hill_gpa": 227.4,
+            "nu_hill": 0.263,
+        },
+        "fit_quality": {
+            "minimum_r2": 0.999,
+            "maximum_zero_strain_extrapolation_drift_percent": drift,
+        },
+        "born_stability": {"stable": True},
+    }
+    module = {
+        "targets": {
+            "B": {"value": 160.0},
+            "Cprime": {"value": 60.0},
+            "C44": {"value": 120.0},
+        },
+        "protocol": {
+            "maximum_zero_strain_extrapolation_drift_percent": 5.0,
+        },
+    }
+    structural = {
+        "structural_gate_pass": True,
+        "structural_margin": 1.0,
+        "structural_gate_reason": "",
+        "structural_errors": {},
+    }
+
+    row = summarize_single_elastic_result(
+        candidate=candidate,
+        prepared=prepared,
+        structural=structural,
+        summary=summary,
+        module=module,
+        minimum_r2=0.98,
+        born_required=True,
+        quality_tier_percent=20.0,
+    )
+
+    assert row["maximum_static_extrapolation_drift_percent"] == pytest.approx(
+        drift, nan_ok=True
+    )
+    assert row["maximum_static_extrapolation_drift_limit_percent"] == 5.0
+    assert bool(row["fit_quality_pass"]) is expected_pass
+    assert bool(row["finalist_eligible"]) is expected_pass
+    assert row["finalist_rejection_reason"] == expected_reason
+
+
 def test_nested_resource_plan_never_silently_oversubscribes():
     plan = plan_nested_resources(
         available_cores=76,
@@ -339,7 +422,8 @@ property elasticity
     born required
     r2 0.98
     tier 20 percent
-    strain 0.01 0.02
+    static_strain 0.005 0.01 0.02
+    dynamic_strain 0.01 0.02
     replicate 1 1 1
 end
 """,
@@ -434,8 +518,27 @@ class FakeBatchBackend:
         if self.protocol == STATIC_PROTOCOL:
             volume = 1000.0
             reference = -12.5
+            pressures = {
+                name: 0.0
+                for name in (
+                    "pxx_atm",
+                    "pyy_atm",
+                    "pzz_atm",
+                    "pxy_atm",
+                    "pxz_atm",
+                    "pyz_atm",
+                )
+            }
             if state.role == "reference":
                 density = reference
+                geometry = {
+                    "lx_angstrom": 10.0,
+                    "ly_angstrom": 10.0,
+                    "lz_angstrom": 10.0,
+                    "xy_angstrom": 0.0,
+                    "xz_angstrom": 0.0,
+                    "yz_angstrom": 0.0,
+                }
             else:
                 quadratic = {
                     "hydro": 4.5 * bulk,
@@ -443,9 +546,28 @@ class FakeBatchBackend:
                     "shear": 0.5 * c44,
                 }[state.mode]
                 density = reference + quadratic * state.strain**2 + 2.0e4 * state.strain**4
+                geometry = {}
+                if state.mode == "hydro":
+                    pressure = -3.0 * bulk * state.strain / ATM_TO_GPA
+                    pressures.update({
+                        "pxx_atm": pressure,
+                        "pyy_atm": pressure,
+                        "pzz_atm": pressure,
+                    })
+                elif state.mode == "orthorhombic":
+                    pressure = -2.0 * cprime * state.strain / ATM_TO_GPA
+                    pressures.update({
+                        "pxx_atm": pressure,
+                        "pyy_atm": -pressure,
+                    })
+                else:
+                    pressures["pxy_atm"] = -c44 * state.strain / ATM_TO_GPA
             return {
                 "potential_energy_kcal_mol": density * volume / KCAL_PER_MOL_ANGSTROM3_TO_GPA,
                 "volume_angstrom3": volume,
+                "density_g_cm3": 7.874,
+                **geometry,
+                **pressures,
             }
         stress = {name: 0.0 for name in ("sxx", "syy", "szz", "sxy", "sxz", "syz")}
         if state.role != "reference" and state.direction != "zero":

@@ -407,6 +407,10 @@ def build_refinement_spec(
             else 0.98
         ),
         "fit_quality_column": "minimum_fit_r2",
+        # Preserve protocol-specific upstream gates (currently the static
+        # zero-strain extrapolation-drift limit) when refinement reassesses
+        # mechanical evidence.  Missing evidence is intentionally ineligible.
+        "fit_quality_pass_column": "fit_quality_pass",
         "minimum_eligible_finalists": int(
             runtime.get("minimum_eligible_finalists", 1)
         ),

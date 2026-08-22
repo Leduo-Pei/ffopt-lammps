@@ -79,9 +79,14 @@ property elasticity
     gate surface 5 percent
     born required
     r2 0.98
+    static_drift 5 percent
     tier 20 percent
 
-    strain 0.002 0.004 0.006
+    # Static uses small deterministic strains and extrapolates the symmetric
+    # stress response to zero strain.  Dynamic uses larger strains to retain a
+    # measurable signal above finite-temperature stress noise.
+    static_strain  0.0005 0.001 0.002
+    dynamic_strain 0.002  0.004 0.006
     replicate 2 2 2
     temperature 300 K
     timestep 1 fs

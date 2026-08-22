@@ -34,7 +34,11 @@ import tempfile
 from typing import Any, Protocol
 import uuid
 
-from .cubic_elasticity import fit_cubic_energy_strain, fit_cubic_stress_strain
+from .cubic_elasticity import (
+    fit_cubic_energy_strain,
+    fit_cubic_static_stress_strain,
+    fit_cubic_stress_strain,
+)
 from workflow.artifact_manifest import (
     build_artifact_manifest,
     canonical_parameter_key,
@@ -710,7 +714,13 @@ class SingleCandidateCubicElasticRunner:
         return dict(summary)
 
     def run_static(self, strains: Sequence[float]) -> dict[str, Any]:
-        """Run or safely reuse a 0 K three-mode energy-curvature candidate."""
+        """Run or safely reuse a 0 K three-mode stress-slope candidate.
+
+        ``lj/cut`` with the default unshifted energy is discontinuous whenever
+        a neighbour shell crosses the cutoff.  Stress slopes are therefore the
+        canonical 0 K result.  The same states retain an energy-curvature fit
+        only as an explicit, non-ranking consistency diagnostic.
+        """
 
         if self.protocol != STATIC_PROTOCOL:
             raise ValueError(f"runner protocol is {self.protocol!r}, not {STATIC_PROTOCOL!r}")
@@ -722,25 +732,134 @@ class SingleCandidateCubicElasticRunner:
         if reusable is not None:
             return reusable
         reference_record, reference_artifacts = self._run_state(reference, {})
+        pressure_fields = (
+            "pxx_atm",
+            "pyy_atm",
+            "pzz_atm",
+            "pxy_atm",
+            "pxz_atm",
+            "pyz_atm",
+        )
+        module_config = self.scientific_config.get("elasticity_module", {})
+        protocol_config = (
+            module_config.get("protocol", {})
+            if isinstance(module_config, Mapping)
+            else {}
+        )
+        if not isinstance(protocol_config, Mapping):
+            protocol_config = {}
         try:
             reference_energy = float(reference_record["potential_energy_kcal_mol"])
             reference_volume = float(reference_record["volume_angstrom3"])
+            reference_lengths = {
+                name: float(reference_record[name])
+                for name in ("lx_angstrom", "ly_angstrom", "lz_angstrom")
+            }
+            reference_tilts = {
+                name: float(reference_record[name])
+                for name in ("xy_angstrom", "xz_angstrom", "yz_angstrom")
+            }
+            reference_pressures = {
+                name: float(reference_record[name]) for name in pressure_fields
+            }
         except (KeyError, TypeError, ValueError) as exc:
             raise CubicElasticRunnerError(
-                "static reference record needs potential_energy_kcal_mol and volume_angstrom3"
+                "static reference record needs energy, volume, box geometry, and all six "
+                "pressure components"
             ) from exc
-        if not math.isfinite(reference_energy) or not math.isfinite(reference_volume) or reference_volume <= 0.0:
-            raise CubicElasticRunnerError("static reference energy/volume must be finite and volume positive")
+        reference_scalars = [
+            reference_energy,
+            reference_volume,
+            *reference_lengths.values(),
+            *reference_tilts.values(),
+            *reference_pressures.values(),
+        ]
+        if not all(math.isfinite(value) for value in reference_scalars) or reference_volume <= 0.0:
+            raise CubicElasticRunnerError(
+                "static reference observables must be finite and volume/edge lengths positive"
+            )
+        if min(reference_lengths.values()) <= 0.0:
+            raise CubicElasticRunnerError("static reference edge lengths must be positive")
+
+        geometry_tolerance = float(
+            protocol_config.get("reference_geometry_relative_tolerance", 1.0e-8)
+        )
+        pressure_tolerance = float(
+            protocol_config.get("reference_max_residual_pressure_gpa", 0.1)
+        )
+        deviatoric_tolerance = float(
+            protocol_config.get("reference_max_deviatoric_stress_gpa", 0.1)
+        )
+        if not all(
+            math.isfinite(value) and value > 0.0
+            for value in (geometry_tolerance, pressure_tolerance, deviatoric_tolerance)
+        ):
+            raise CubicElasticRunnerError(
+                "static reference geometry/stress tolerances must be finite and positive"
+            )
+        mean_length = sum(reference_lengths.values()) / 3.0
+        edge_spread = (
+            max(reference_lengths.values()) - min(reference_lengths.values())
+        ) / mean_length
+        maximum_relative_tilt = max(abs(value) for value in reference_tilts.values()) / min(
+            reference_lengths.values()
+        )
+        diagonal_gpa = [
+            reference_pressures[name] * ATM_TO_GPA
+            for name in ("pxx_atm", "pyy_atm", "pzz_atm")
+        ]
+        mean_pressure_gpa = sum(diagonal_gpa) / 3.0
+        maximum_deviatoric_gpa = max(
+            *[abs(value - mean_pressure_gpa) for value in diagonal_gpa],
+            *[
+                abs(reference_pressures[name] * ATM_TO_GPA)
+                for name in ("pxy_atm", "pxz_atm", "pyz_atm")
+            ],
+        )
+        reference_quality = {
+            "edge_length_relative_spread": edge_spread,
+            "maximum_relative_tilt": maximum_relative_tilt,
+            "mean_pressure_gpa_compression_positive": mean_pressure_gpa,
+            "maximum_deviatoric_stress_gpa": maximum_deviatoric_gpa,
+            "geometry_relative_tolerance": geometry_tolerance,
+            "maximum_residual_pressure_gpa": pressure_tolerance,
+            "maximum_deviatoric_stress_tolerance_gpa": deviatoric_tolerance,
+        }
+        if edge_spread > geometry_tolerance or maximum_relative_tilt > geometry_tolerance:
+            raise CubicElasticRunnerError(
+                "static cubic reference is not axis-aligned cubic: "
+                f"edge_spread={edge_spread:.6g}, relative_tilt={maximum_relative_tilt:.6g}, "
+                f"limit={geometry_tolerance:.6g}"
+            )
+        if abs(mean_pressure_gpa) > pressure_tolerance:
+            raise CubicElasticRunnerError(
+                "static cubic reference did not reach zero pressure: "
+                f"|P|={abs(mean_pressure_gpa):.6g} GPa, limit={pressure_tolerance:.6g} GPa"
+            )
+        if maximum_deviatoric_gpa > deviatoric_tolerance:
+            raise CubicElasticRunnerError(
+                "static cubic reference retains excessive deviatoric stress: "
+                f"maximum={maximum_deviatoric_gpa:.6g} GPa, "
+                f"limit={deviatoric_tolerance:.6g} GPa"
+            )
         completed = self._run_independent_states(deformation_states, reference_artifacts)
         records: list[dict[str, Any]] = []
         for state, raw in completed:
             try:
                 potential = float(raw["potential_energy_kcal_mol"])
                 volume = float(raw["volume_angstrom3"])
+                pressures = {
+                    name: float(raw[name])
+                    for name in ("pxx_atm", "pyy_atm", "pzz_atm", "pxy_atm")
+                }
             except (KeyError, TypeError, ValueError) as exc:
                 raise CubicElasticRunnerError(
-                    f"static state {state.name!r} needs potential_energy_kcal_mol and volume_angstrom3"
+                    f"static state {state.name!r} needs energy, volume, and pressure components"
                 ) from exc
+            if not all(math.isfinite(value) for value in (potential, volume, *pressures.values())):
+                raise CubicElasticRunnerError(
+                    f"static state {state.name!r} returned a non-finite observable"
+                )
             records.append(
                 {
                     "state": state.name,
@@ -753,16 +872,76 @@ class SingleCandidateCubicElasticRunner:
                     "energy_density_gpa": (
                         potential / reference_volume * KCAL_PER_MOL_ANGSTROM3_TO_GPA
                     ),
+                    **pressures,
                 }
             )
+        stress_records = [
+            {
+                "mode": record["mode"],
+                "strain": record["strain"],
+                "pxx": record["pxx_atm"],
+                "pyy": record["pyy_atm"],
+                "pzz": record["pzz_atm"],
+                "pxy": record["pxy_atm"],
+            }
+            for record in records
+        ]
+        zero_state = {
+            "strain": 0.0,
+            "pxx": reference_pressures["pxx_atm"],
+            "pyy": reference_pressures["pyy_atm"],
+            "pzz": reference_pressures["pzz_atm"],
+            "pxy": reference_pressures["pxy_atm"],
+        }
+        fit = fit_cubic_static_stress_strain(
+            stress_records,
+            zero_state=zero_state,
+            stress_convention="compression_positive",
+            stress_to_gpa=ATM_TO_GPA,
+        )
+
+        # Retain the historical energy estimator as evidence only.  A large
+        # disagreement is expected for unshifted hard cutoffs and must never
+        # replace or reject the canonical stress result.
         reference_density = (
             reference_energy / reference_volume * KCAL_PER_MOL_ANGSTROM3_TO_GPA
         )
-        fit = fit_cubic_energy_strain(
+        energy_fit = fit_cubic_energy_strain(
             records,
             reference_energy_density_gpa=reference_density,
         )
         summary = self._flatten_summary(self.protocol, fit)
+        stress_moduli = fit["elasticity"]["independent_targets_gpa"]
+        energy_moduli = energy_fit["elasticity"]["independent_targets_gpa"]
+        disagreement = {
+            name: 100.0
+            * abs(float(energy_moduli[name]) - float(stress_moduli[name]))
+            / max(abs(float(stress_moduli[name])), 1.0e-14)
+            for name in ("B", "Cprime", "C44")
+        }
+        diagnostic_tolerance = float(
+            protocol_config.get("energy_stress_consistency_percent", 10.0)
+        )
+        if not math.isfinite(diagnostic_tolerance) or diagnostic_tolerance <= 0.0:
+            raise CubicElasticRunnerError(
+                "energy/stress diagnostic tolerance must be finite and positive"
+            )
+        summary["energy_curvature_diagnostic"] = {
+            "selection_role": "diagnostic_only",
+            "reason": (
+                "unshifted hard-cutoff energies can jump when neighbour shells cross the cutoff"
+            ),
+            "fit_method": energy_fit["method"],
+            "independent_moduli_gpa": dict(energy_moduli),
+            "fit_quality": dict(energy_fit["fit_quality"]),
+            "relative_disagreement_from_stress_percent": disagreement,
+            "maximum_relative_disagreement_percent": max(disagreement.values()),
+            "consistency_tolerance_percent": diagnostic_tolerance,
+            "consistent_with_stress": bool(
+                max(disagreement.values()) <= diagnostic_tolerance
+            ),
+            "used_for_selection": False,
+        }
         summary.update(
             {
                 "candidate_id": self.candidate_id,
@@ -770,6 +949,7 @@ class SingleCandidateCubicElasticRunner:
                     self.identity_path.read_text(encoding="ascii")
                 )["candidate_fingerprint"],
                 "reference": dict(reference_record),
+                "reference_quality": reference_quality,
                 "strain_values": list(values),
                 "resource_budget": self.resource_budget.to_dict(),
                 "trajectory_seed": self.trajectory_seed,
@@ -915,6 +1095,15 @@ class LammpsTemplateElasticBackend:
                 "lx_angstrom",
                 "ly_angstrom",
                 "lz_angstrom",
+                "xy_angstrom",
+                "xz_angstrom",
+                "yz_angstrom",
+                "pxx_atm",
+                "pyy_atm",
+                "pzz_atm",
+                "pxy_atm",
+                "pxz_atm",
+                "pyz_atm",
                 "density_g_cm3",
             )
         if state.protocol == STATIC_PROTOCOL:
