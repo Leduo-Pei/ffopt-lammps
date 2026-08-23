@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 
 import pytest
@@ -82,6 +83,43 @@ def test_checkpoint_with_same_identity_resumes_normally(tmp_path):
     assert reader.train_Y.tolist() == [[0.25]]
 
 
+def test_checkpoint_round_trips_coverage_fallback_diagnostics(tmp_path):
+    config = _optimizer_config()
+    writer = _checkpoint_optimizer(tmp_path / "run", config)
+    writer.coverage_surrogate_fallbacks = [{
+        "round": 3,
+        "component": "objective_gp",
+        "error_type": "RuntimeError",
+        "message": "test failure",
+        "fallback": "classifier_probability_with_novelty_uncertainty",
+    }]
+    writer._save_checkpoint()
+
+    reader = _checkpoint_optimizer(tmp_path / "run", config)
+    assert reader.load_checkpoint(
+        str(Path(writer.ckpt_dir) / "latest.json")
+    )
+    assert reader.coverage_surrogate_fallbacks == (
+        writer.coverage_surrogate_fallbacks
+    )
+
+
+def test_checkpoint_rejects_invalid_coverage_fallbacks_before_state_load(tmp_path):
+    config = _optimizer_config()
+    writer = _checkpoint_optimizer(tmp_path / "run", config)
+    writer._save_checkpoint()
+    checkpoint = Path(writer.ckpt_dir) / "latest.json"
+    document = json.loads(checkpoint.read_text(encoding="utf-8"))
+    document["coverage_surrogate_fallbacks"] = ["not-an-object"]
+    checkpoint.write_text(json.dumps(document), encoding="utf-8")
+
+    reader = _checkpoint_optimizer(tmp_path / "run", config)
+    reader.current_round = 0
+    with pytest.raises(ValueError, match="list of objects"):
+        reader.load_checkpoint(str(checkpoint))
+    assert reader.current_round == 0
+
+
 @pytest.mark.parametrize(
     "change",
     [
@@ -126,6 +164,32 @@ def test_legacy_checkpoint_is_rejected_before_loading_state(tmp_path):
     optimizer.current_round = 0
 
     with pytest.raises(CheckpointIdentityError, match="legacy checkpoints"):
+        optimizer.load_checkpoint(str(checkpoint))
+    assert optimizer.current_round == 0
+
+
+def test_previous_identity_schema_is_rejected(tmp_path):
+    optimizer = _checkpoint_optimizer(tmp_path / "run", _optimizer_config())
+    optimizer._save_checkpoint()
+    checkpoint = Path(optimizer.ckpt_dir) / "latest.json"
+    document = json.loads(checkpoint.read_text(encoding="utf-8"))
+    document["checkpoint_identity"]["schema_version"] = 1
+    checkpoint.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(CheckpointIdentityError, match="unsupported identity schema"):
+        optimizer.load_checkpoint(str(checkpoint))
+
+
+def test_current_checkpoint_requires_coverage_surrogate_provenance(tmp_path):
+    optimizer = _checkpoint_optimizer(tmp_path / "run", _optimizer_config())
+    optimizer._save_checkpoint()
+    checkpoint = Path(optimizer.ckpt_dir) / "latest.json"
+    document = json.loads(checkpoint.read_text(encoding="utf-8"))
+    del document["coverage_surrogate_fallbacks"]
+    checkpoint.write_text(json.dumps(document), encoding="utf-8")
+    optimizer.current_round = 0
+
+    with pytest.raises(CheckpointIdentityError, match="no coverage-surrogate"):
         optimizer.load_checkpoint(str(checkpoint))
     assert optimizer.current_round == 0
 

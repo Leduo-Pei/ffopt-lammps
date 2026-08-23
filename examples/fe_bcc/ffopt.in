@@ -118,7 +118,9 @@ bo
     initial_points 76
     batch_size 38
     max_rounds 40
-    coverage archive 96 pool 16384 feasible 0.50 boundary 0.25 uncertainty 0.15 global 0.10
+    # In 3 free dimensions, require at least 8 dispersed strict points spanning
+    # rank 3, 4 genuinely outside near-boundary anchors, and no surrogate fallback.
+    coverage archive 96 pool 16384 feasible 0.50 boundary 0.25 uncertainty 0.15 global 0.10 min_archive 8 min_boundary 4 min_separation 0.001 min_weak_span 0.001 max_fallbacks 0
 end
 
 sample

@@ -6,6 +6,45 @@ expectations while the public API remains in alpha.
 
 ## Unreleased
 
+## 0.3.0a7 - 2026-08-24
+
+### Changed
+
+- Qualify structural-coverage BO on two independent axes: surrogate-guidance
+  integrity and measured feasible-region evidence.  The summary now records
+  unique fallback rounds, the model component and actual fallback used,
+  normalized feasible-archive affine rank, and genuine outside-boundary anchor
+  counts.  Material sampling accepts complete coverage canonically, labels thin
+  but non-empty evidence as recovery-only, and stops before compute when no
+  strict feasible seed exists.
+- Require canonical multi-center evidence to be meaningfully dispersed as well
+  as full rank. The first dimension-aware maximin subset must pass normalized
+  pair-separation and weakest-direction RMS-span gates; almost coincident point
+  clouds remain explicitly recovery-only.
+- Expose concise `coverage min_archive`, `min_anchors`, and `max_fallbacks`
+  controls in `ffopt.in`, with dimension-aware defaults.  Sampling provenance
+  pins the coverage summary alongside the feasible and boundary source files.
+
+### Fixed
+
+- Copy capped coverage-GP objective arrays before replacing non-finite values.
+  This restores model-guided acquisition beyond 512 observations under
+  Pandas copy-on-write instead of silently degrading later BO rounds to
+  novelty selection.
+- Preserve the surviving model signal when only one coverage surrogate fails:
+  the objective GP can replace a failed feasibility classifier, while a valid
+  classifier remains authoritative when only the objective GP fails.
+- Parse immutable `.json` runtime configurations as strict JSON, rejecting
+  duplicate keys, non-finite or overflowing numbers, and YAML-only syntax.
+  Legacy YAML remains supported and cross-format includes use each file's own
+  parser, eliminating numeric-type drift between pipeline provenance and BO
+  checkpoint identity.
+- Bind direct material sampling to the exact coverage summary and hashed
+  feasible/boundary CSV artifacts. Boundary quota now uses only measured
+  outside anchors: a farther point is labelled recovery-only, while a campaign
+  with no outside evidence reallocates that quota to global exploration instead
+  of oversampling the feasible interior.
+
 ## 0.3.0a6 - 2026-08-22
 
 ### Fixed

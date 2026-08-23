@@ -195,6 +195,9 @@ def test_material_pipeline_installs_commands_and_explicit_coverage_sources(
     assert Path(sample[sample.index("--boundary-source") + 1]) == (
         runner.root / "bo" / "coverage_anchors.csv"
     )
+    assert Path(sample[sample.index("--coverage-summary") + 1]) == (
+        runner.root / "bo" / "coverage_summary.json"
+    )
     assert sample[sample.index("--boundary-fraction") + 1] == "0.2"
     audit = specs["audit"].command
     audit_sources = [

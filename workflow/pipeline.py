@@ -200,7 +200,13 @@ class PipelineRunner:
         input_hash = hashlib.sha256(input_bytes).hexdigest()
         self.input_snapshot_path = provenance / f"input_{input_hash[:16]}.in"
         self._config_snapshot = (
-            json.dumps(serialized, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
+            json.dumps(
+                serialized,
+                indent=2,
+                ensure_ascii=False,
+                sort_keys=True,
+                allow_nan=False,
+            ) + "\n"
         )
         self._input_snapshot = input_bytes
         environment = {
@@ -418,6 +424,8 @@ class PipelineRunner:
         if boundary_source is not None:
             command.extend([
                 "--boundary-source", str(boundary_source),
+                "--coverage-summary",
+                str(self.root / "bo" / "coverage_summary.json"),
                 "--boundary-fraction",
                 str(settings.get("boundary_fraction", 0.0)),
             ])

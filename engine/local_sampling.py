@@ -87,6 +87,162 @@ def file_identity(path: Path) -> dict[str, object]:
     }
 
 
+def read_coverage_quality(path: Path | None) -> dict[str, object] | None:
+    """Classify BO coverage before a material sample spends compute time."""
+    if path is None:
+        return None
+    source = path.resolve()
+    try:
+        document = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Cannot read BO coverage summary {source}: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ValueError("BO coverage summary root must be an object")
+    schema = str(document.get("schema", ""))
+    counts = document.get("counts", {})
+    if not isinstance(counts, dict):
+        raise ValueError("BO coverage summary counts must be an object")
+
+    def count(name: str, *, required: bool = True) -> int | None:
+        if name not in counts:
+            if required:
+                raise ValueError(f"BO coverage summary is missing count {name!r}")
+            return None
+        value = counts[name]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(
+                f"BO coverage summary count {name!r} must be a non-negative integer"
+            )
+        return value
+
+    strict = count("feasible_archive")
+    assert strict is not None
+    anchors = count("coverage_anchors", required=False)
+    artifacts: dict[str, dict[str, object]] | None = None
+    if schema == "ffopt-structural-coverage-summary-v2":
+        quality = document.get("coverage_quality", {})
+        if not isinstance(quality, dict):
+            raise ValueError("BO coverage summary quality must be an object")
+        status = str(quality.get("status", ""))
+        if status not in {"canonical_usable", "recovery_required", "insufficient"}:
+            raise ValueError(f"Unknown BO coverage quality status: {status!r}")
+        guidance = str(quality.get("model_guidance", ""))
+        evidence = str(quality.get("coverage_evidence", ""))
+        if guidance not in {"healthy", "degraded", "failed"}:
+            raise ValueError(
+                f"Unknown BO coverage model-guidance status: {guidance!r}"
+            )
+        if evidence not in {"complete", "recovery_eligible", "insufficient"}:
+            raise ValueError(
+                f"Unknown BO coverage evidence status: {evidence!r}"
+            )
+        expected_status = (
+            "canonical_usable"
+            if evidence == "complete" and guidance != "failed"
+            else "insufficient"
+            if evidence == "insufficient"
+            else "recovery_required"
+        )
+        if status != expected_status:
+            raise ValueError(
+                "BO coverage summary has inconsistent quality states: "
+                f"status={status!r}, model_guidance={guidance!r}, "
+                f"coverage_evidence={evidence!r}"
+            )
+        if (evidence == "insufficient") != (strict == 0):
+            raise ValueError(
+                "BO coverage summary has inconsistent feasible_archive count "
+                "and coverage-evidence status"
+            )
+        files = document.get("files")
+        if strict > 0:
+            if anchors is None:
+                raise ValueError(
+                    "BO coverage summary is missing count 'coverage_anchors'"
+                )
+            if not isinstance(files, dict):
+                raise ValueError("BO coverage summary files must be an object")
+            artifacts = {}
+            for role in ("feasible_archive", "coverage_anchors"):
+                artifact = files.get(role)
+                if not isinstance(artifact, dict):
+                    raise ValueError(
+                        f"BO coverage summary file {role!r} must be an object"
+                    )
+                name = artifact.get("name")
+                sha256 = artifact.get("sha256")
+                size = artifact.get("size_bytes")
+                if (
+                    not isinstance(name, str)
+                    or not name
+                    or not isinstance(sha256, str)
+                    or len(sha256) != 64
+                    or any(ch not in "0123456789abcdef" for ch in sha256)
+                    or isinstance(size, bool)
+                    or not isinstance(size, int)
+                    or size < 0
+                ):
+                    raise ValueError(
+                        f"BO coverage summary file {role!r} has invalid identity"
+                    )
+                artifacts[role] = {
+                    "name": name,
+                    "sha256": sha256,
+                    "size_bytes": size,
+                }
+    elif schema == "ffopt-structural-coverage-summary-v1":
+        # Historical summaries did not record model-guidance integrity.  Exact
+        # feasible rows remain useful recovery seeds, never canonical coverage.
+        status = "recovery_required" if strict > 0 else "insufficient"
+    else:
+        raise ValueError(f"Unsupported BO coverage summary schema: {schema!r}")
+    if status == "insufficient" or strict < 1:
+        raise ValueError(
+            "BO coverage is insufficient: no strict feasible seed is available "
+            "for material sampling"
+        )
+    return {
+        "path": str(source),
+        "schema": schema,
+        "status": status,
+        "feasible_archive": strict,
+        "coverage_anchors": anchors,
+        "artifacts": artifacts,
+    }
+
+
+def verify_coverage_source(
+    quality: dict[str, object],
+    *,
+    role: str,
+    path: Path,
+    row_count: int,
+) -> None:
+    """Bind one direct-CLI source table to the BO coverage contract."""
+    count_key = "feasible_archive" if role == "feasible_archive" else "coverage_anchors"
+    expected_count = quality.get(count_key)
+    if expected_count is not None and row_count != int(expected_count):
+        raise ValueError(
+            f"BO coverage {role} row count mismatch: summary declares "
+            f"{expected_count}, source contains {row_count} valid rows"
+        )
+    artifacts = quality.get("artifacts")
+    if artifacts is None:
+        return
+    if not isinstance(artifacts, dict) or role not in artifacts:
+        raise ValueError(f"BO coverage summary has no {role} artifact identity")
+    expected = artifacts[role]
+    actual = file_identity(path)
+    if (
+        path.name != expected["name"]
+        or actual["size_bytes"] != expected["size_bytes"]
+        or actual["sha256"] != expected["sha256"]
+    ):
+        raise ValueError(
+            f"BO coverage {role} source does not match the summary artifact identity"
+        )
+
+
 def atomic_json(document: dict[str, object], path: Path) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(
@@ -205,15 +361,15 @@ def generate_design(
     allocation = sampling_allocation(
         n_points, global_fraction, boundary_fraction
     )
-    # A campaign may legitimately observe no strict feasible BO point yet.  In
-    # that case the closest measured boundary anchors are the only defensible
-    # local centers.  Conversely, if no near-boundary row exists, reallocate
-    # that requested quota to exact feasible local centers.  The caller records
-    # requested and realized counts in metadata.json.
+    # A campaign may legitimately observe no strict feasible BO point yet. In
+    # that case the closest measured outside anchors are the only defensible
+    # local centers. Conversely, if no measured outside row exists, reallocate
+    # that quota globally instead of oversampling the known feasible interior.
+    # The caller records requested and realized counts in metadata.json.
     local_source = source if not source.empty else boundary_source
     boundary_requested = allocation["boundary_local"]
     if boundary_requested and boundary_source.empty:
-        allocation["local_elite"] += boundary_requested
+        allocation["global_sobol"] += boundary_requested
         allocation["boundary_local"] = 0
     elite, centers = _select_centers(
         local_source, names, lo, span, elite_centers, center_selection,
@@ -461,6 +617,12 @@ def main() -> None:
         help="Optional measured near-boundary centers used by material workflows.",
     )
     parser.add_argument(
+        "--coverage-summary",
+        type=Path,
+        default=None,
+        help="Material BO coverage contract; insufficient evidence fails closed.",
+    )
+    parser.add_argument(
         "--boundary-fraction",
         type=float,
         default=0.0,
@@ -485,6 +647,49 @@ def main() -> None:
         name for name, info in config["targets"].items()
         if float(info.get("weight", 1.0)) > 0.0
     ]
+    if args.boundary_source is not None and args.coverage_summary is None:
+        raise ValueError(
+            "--coverage-summary is required with --boundary-source so material "
+            "sampling cannot bypass the BO coverage gate"
+        )
+    coverage_quality = read_coverage_quality(args.coverage_summary)
+    source = read_candidate_source(args.source, param_names)
+    if coverage_quality is not None:
+        verify_coverage_source(
+            coverage_quality,
+            role="feasible_archive",
+            path=args.source,
+            row_count=len(source),
+        )
+    boundary_source = source.head(0).copy()
+    boundary_source_fallback = None
+    if args.boundary_source is not None:
+        raw_boundary = read_candidate_source(args.boundary_source, param_names)
+        assert coverage_quality is not None
+        verify_coverage_source(
+            coverage_quality,
+            role="coverage_anchors",
+            path=args.boundary_source,
+            row_count=len(raw_boundary),
+        )
+        if "anchor_class" in raw_boundary.columns:
+            near = raw_boundary.loc[
+                raw_boundary["anchor_class"].astype(str).eq("near_boundary")
+            ].copy()
+            if near.empty and not raw_boundary.empty:
+                near = raw_boundary.loc[
+                    raw_boundary["anchor_class"].astype(str).eq(
+                        "outside_recovery"
+                    )
+                ].copy()
+                if not near.empty:
+                    boundary_source_fallback = (
+                        "no canonical near_boundary anchors; used closest "
+                        "outside_recovery measurements"
+                    )
+            boundary_source = near.reset_index(drop=True)
+        else:
+            boundary_source = raw_boundary
     args.output_dir.mkdir(parents=True, exist_ok=True)
     work_root = args.output_dir / "work"
     work_root.mkdir(exist_ok=True)
@@ -492,36 +697,23 @@ def main() -> None:
     result_path = args.output_dir / "local_results.csv"
     replicate_path = args.output_dir / "local_replicates.csv"
     metadata_path = args.output_dir / "metadata.json"
-
-    source = read_candidate_source(args.source, param_names)
-    boundary_source = source.head(0).copy()
-    boundary_source_fallback = None
-    if args.boundary_source is not None:
-        raw_boundary = read_candidate_source(args.boundary_source, param_names)
-        if "anchor_class" in raw_boundary.columns:
-            near = raw_boundary.loc[
-                raw_boundary["anchor_class"].astype(str).eq("near_boundary")
-            ].copy()
-            if near.empty and not raw_boundary.empty:
-                boundary_source_fallback = (
-                    "no near_boundary anchors; used all measured anchors"
-                )
-                near = raw_boundary
-            boundary_source = near.reset_index(drop=True)
-        else:
-            boundary_source = raw_boundary
     requested_allocation = sampling_allocation(
         args.n_points, args.global_fraction, args.boundary_fraction
     )
     design_contract = {
-        "schema_version": 1,
-        "algorithm": "local_boundary_global_v1",
+        "schema_version": 2,
+        "algorithm": "local_boundary_global_v2",
         "config": file_identity(Path(args.config)),
         "source": file_identity(args.source),
         "boundary_source": (
             file_identity(args.boundary_source)
             if args.boundary_source is not None else None
         ),
+        "coverage_summary": (
+            file_identity(args.coverage_summary)
+            if args.coverage_summary is not None else None
+        ),
+        "coverage_quality": coverage_quality,
         "parameter_space": [list(item) for item in param_space],
         "n_points": int(args.n_points),
         "elite_centers": int(args.elite_centers),
@@ -587,8 +779,8 @@ def main() -> None:
         reallocations = []
         if requested_allocation["boundary_local"] and boundary_source.empty:
             reallocations.append(
-                "boundary_local quota reallocated to local_elite because no "
-                "boundary center was available"
+                "boundary_local quota reallocated to global_sobol because no "
+                "measured outside boundary center was available"
             )
         if source.empty and not boundary_source.empty:
             reallocations.append(
@@ -604,6 +796,11 @@ def main() -> None:
                 str(args.boundary_source)
                 if args.boundary_source is not None else None
             ),
+            "coverage_summary": (
+                str(args.coverage_summary)
+                if args.coverage_summary is not None else None
+            ),
+            "coverage_quality": coverage_quality,
             "n_points": args.n_points,
             "elite_centers": args.elite_centers,
             "center_selection": args.center_selection,

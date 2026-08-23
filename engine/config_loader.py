@@ -3,15 +3,18 @@
 Internal runtime-config loader for the force-field workflow.
 
 The public ``ffopt.in`` file is compiled to an immutable JSON snapshot before
-engine stages start. JSON is valid YAML, so ``yaml.safe_load`` reads that
-snapshot while retaining compatibility with prerelease YAML checkpoints and
-their optional ``include`` lists. Includes are an internal compatibility API,
-not part of the public one-input workflow.
+engine stages start. Runtime ``.json`` files are parsed as strict JSON so their
+numeric types are identical to the pipeline provenance identity. Prerelease
+YAML configs retain ``yaml.safe_load`` and their optional ``include`` lists.
+Includes are an internal compatibility API, not part of the public one-input
+workflow.
 """
 
 from __future__ import annotations
 
 import copy
+import json
+import math
 import os
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
@@ -54,10 +57,9 @@ def _load_one(path: Path, stack: List[Path], sources: List[str]) -> Dict[str, An
     if not path.exists():
         raise FileNotFoundError(f"config file not found: {path}")
 
-    with open(path, encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
+    data = _load_document(path)
     if not isinstance(data, dict):
-        raise ConfigIncludeError(f"top-level YAML must be a mapping: {path}")
+        raise ConfigIncludeError(f"top-level config must be a mapping: {path}")
 
     merged: Dict[str, Any] = {}
     includes = data.get("include", [])
@@ -75,6 +77,53 @@ def _load_one(path: Path, stack: List[Path], sources: List[str]) -> Dict[str, An
     merged = deep_merge(merged, current)
     sources.append(str(path))
     return merged
+
+
+def _load_document(path: Path) -> Any:
+    """Load immutable JSON strictly while preserving legacy YAML semantics."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ConfigIncludeError(f"cannot read config {path}: {exc}") from exc
+
+    is_json = path.suffix.lower() == ".json"
+    if is_json:
+        def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ConfigIncludeError(
+                        f"duplicate JSON key {key!r} in {path}"
+                    )
+                result[key] = value
+            return result
+
+        def reject_constant(value: str) -> Any:
+            raise ValueError(f"non-standard JSON number {value!r}")
+
+        def finite_float(value: str) -> float:
+            parsed = float(value)
+            if not math.isfinite(parsed):
+                raise ValueError(f"non-finite JSON number {value!r}")
+            return parsed
+
+        try:
+            data = json.loads(
+                text,
+                object_pairs_hook=unique_object,
+                parse_constant=reject_constant,
+                parse_float=finite_float,
+            )
+        except ConfigIncludeError:
+            raise
+        except ValueError as exc:
+            raise ConfigIncludeError(f"invalid JSON config {path}: {exc}") from exc
+    else:
+        try:
+            data = yaml.safe_load(text)
+        except yaml.YAMLError as exc:
+            raise ConfigIncludeError(f"invalid YAML config {path}: {exc}") from exc
+    return {} if data is None and not is_json else data
 
 
 def _resolve_include(base_dir: Path, item: Any) -> Path:

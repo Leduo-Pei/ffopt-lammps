@@ -1184,7 +1184,13 @@ def _stage_line(document: FFOptInput, stage: str, *keys: str) -> int:
     return next((lines[key] for key in keys if key in lines), 1)
 
 
-def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: dict[str, Any]) -> None:
+def _apply_stage_settings(
+    document: FFOptInput,
+    config: dict[str, Any],
+    stages: dict[str, Any],
+    *,
+    dimensions: int,
+) -> None:
     if "screen" in document.workflow:
         stages.setdefault("screen", {})
     if "finalists" in document.workflow:
@@ -1337,6 +1343,12 @@ def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: 
                     "boundary": "boundary_fraction",
                     "uncertainty": "uncertainty_fraction",
                     "global": "global_fraction",
+                    "min_archive": "minimum_archive",
+                    "min_anchors": "minimum_boundary_anchors",
+                    "min_boundary": "minimum_boundary_anchors",
+                    "max_fallbacks": "maximum_fallback_rounds",
+                    "min_separation": "minimum_archive_separation_normalized",
+                    "min_weak_span": "minimum_weak_span_normalized",
                 }
                 pairs = dict(zip(values[::2], values[1::2]))
                 unknown = {str(item).lower() for item in pairs} - set(aliases)
@@ -1485,7 +1497,21 @@ def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: 
         coverage.setdefault("boundary_fraction", 0.25)
         coverage.setdefault("uncertainty_fraction", 0.15)
         coverage.setdefault("global_fraction", 0.10)
-        for key in ("archive_target", "candidate_pool"):
+        coverage.setdefault(
+            "minimum_archive",
+            min(coverage["archive_target"], max(8, 2 * (dimensions + 1))),
+        )
+        coverage.setdefault(
+            "minimum_boundary_anchors",
+            min(coverage["archive_target"], max(4, dimensions + 1)),
+        )
+        coverage.setdefault("maximum_fallback_rounds", 0)
+        coverage.setdefault("minimum_archive_separation_normalized", 1.0e-3)
+        coverage.setdefault("minimum_weak_span_normalized", 1.0e-3)
+        for key in (
+            "archive_target", "candidate_pool", "minimum_archive",
+            "minimum_boundary_anchors",
+        ):
             value = coverage[key]
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise InputFileError(
@@ -1493,6 +1519,57 @@ def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: 
                     _stage_line(document, "bo", "coverage"),
                     f"BO coverage {key} must be a positive integer",
                 )
+        maximum_fallbacks = coverage["maximum_fallback_rounds"]
+        if (
+            isinstance(maximum_fallbacks, bool)
+            or not isinstance(maximum_fallbacks, int)
+            or maximum_fallbacks < 0
+        ):
+            raise InputFileError(
+                document.path,
+                _stage_line(document, "bo", "coverage"),
+                "BO coverage maximum_fallback_rounds must be a non-negative integer",
+            )
+        for minimum_key in ("minimum_archive", "minimum_boundary_anchors"):
+            if coverage[minimum_key] > coverage["archive_target"]:
+                raise InputFileError(
+                    document.path,
+                    _stage_line(document, "bo", "coverage"),
+                    f"BO coverage {minimum_key} cannot exceed archive_target",
+                )
+        if coverage["archive_target"] < dimensions + 1:
+            raise InputFileError(
+                document.path,
+                _stage_line(document, "bo", "coverage"),
+                "BO coverage archive_target must be at least parameter "
+                f"dimensions + 1 ({dimensions + 1}) for full affine rank",
+            )
+        for key in (
+            "minimum_archive_separation_normalized",
+            "minimum_weak_span_normalized",
+        ):
+            value = coverage[key]
+            if isinstance(value, bool):
+                raise InputFileError(
+                    document.path,
+                    _stage_line(document, "bo", "coverage"),
+                    f"BO coverage {key} must be finite and non-negative",
+                )
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError) as exc:
+                raise InputFileError(
+                    document.path,
+                    _stage_line(document, "bo", "coverage"),
+                    f"BO coverage {key} must be finite and non-negative",
+                ) from exc
+            if not math.isfinite(numeric) or numeric < 0.0:
+                raise InputFileError(
+                    document.path,
+                    _stage_line(document, "bo", "coverage"),
+                    f"BO coverage {key} must be finite and non-negative",
+                )
+            coverage[key] = numeric
         fraction_keys = (
             "feasible_fraction", "boundary_fraction",
             "uncertainty_fraction", "global_fraction",
@@ -1536,6 +1613,13 @@ def _apply_stage_settings(document: FFOptInput, config: dict[str, Any], stages: 
                 _stage_line(document, "bo", *public_keys),
                 f"BO {key} must be a positive integer",
             )
+    if objective == "feasible_coverage" and optimization["n_initial"] < 3:
+        raise InputFileError(
+            document.path,
+            _stage_line(document, "bo", "initial_points"),
+            "BO feasible_coverage requires at least 3 initial_points before "
+            "model-guided acquisition",
+        )
     random_seed = optimization.get("random_seed")
     if isinstance(random_seed, bool) or not isinstance(random_seed, int):
         raise InputFileError(
@@ -2187,7 +2271,7 @@ def compile_input(document: FFOptInput) -> CompiledInput:
         },
         "audit": {"top_k": 8, "seeds": [101, 202, 303]},
     }
-    _apply_stage_settings(document, config, stages)
+    _apply_stage_settings(document, config, stages, dimensions=dimensions)
     config.setdefault("workflow", {})["active_properties"] = list(config["targets"])
 
     pipeline_stages = list(document.workflow)

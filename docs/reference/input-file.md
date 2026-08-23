@@ -499,8 +499,23 @@ instead of preferring the experimental centre. The concise allocation syntax
 is:
 
 ```text
-coverage archive 96 pool 16384 feasible 0.50 boundary 0.25 uncertainty 0.15 global 0.10
+coverage archive 96 pool 16384 feasible 0.50 boundary 0.25 uncertainty 0.15 global 0.10 min_archive 8 min_boundary 4 min_separation 0.001 min_weak_span 0.001 max_fallbacks 0
 ```
+
+`min_archive` defaults to `min(archive, max(8, 2*(dimensions+1)))` and the
+strict points must also have full affine rank in the normalized free-parameter
+space. `min_boundary` counts only genuinely outside `near_boundary` anchors;
+strict points repeated in the anchor table do not count. Its default is
+`min(archive, max(4, dimensions+1))`. `min_separation` is the smallest pair
+distance among the first `min_archive` maximin centers in normalized parameter
+space. `min_weak_span` is their RMS spread along the weakest singular-vector
+direction. Both default to `0.001`, so a numerically full-rank but practically
+coincident cloud cannot masquerade as diverse coverage. `max_fallbacks` is the
+maximum number of unique BO rounds allowed to lose part of their surrogate
+guidance, defaulting to zero. The machine-readable coverage report separates
+exact evidence from model-guidance health. Thin but non-empty evidence is
+marked recovery-only and may enter Sample/Audit; zero strict feasible seeds
+stop Sample before LAMMPS.
 
 The explicit initial parameter vector from the `type` rows is evaluated once
 as a warm-start centre in addition to the Latin-hypercube points. Therefore,

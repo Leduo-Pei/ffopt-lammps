@@ -70,7 +70,7 @@ conda deactivate
 conda activate ffopt
 python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 python -m pip install \
-  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a6/ffopt_lammps-0.3.0a6-py3-none-any.whl"
+  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a7/ffopt_lammps-0.3.0a7-py3-none-any.whl"
 ```
 
 FFOpt also exports `PYTHONNOUSERSITE=1` in generated SLURM scripts so packages
@@ -90,7 +90,7 @@ python -m pip check
 lmp -help | head
 ```
 
-Expected: executable paths contain `/envs/ffopt/`, FFOpt reports `0.3.0a6`,
+Expected: executable paths contain `/envs/ffopt/`, FFOpt reports `0.3.0a7`,
 user-site reports `False`, `pip check` reports no broken requirements, and CPU
 PyTorch reports CUDA `False`.
 

@@ -282,7 +282,7 @@ def test_elemental_public_workflow_compiles_to_repeated_constrained_al(tmp_path)
     source += """
 bo
     objective feasible_coverage
-    coverage archive 96 pool 16384 feasible 0.50 boundary 0.25 uncertainty 0.15 global 0.10
+    coverage archive 96 pool 16384 feasible 0.50 boundary 0.25 uncertainty 0.15 global 0.10 min_archive 12 min_anchors 6 max_fallbacks 2
 end
 
 screen
@@ -375,6 +375,11 @@ end
         "boundary_fraction": 0.25,
         "uncertainty_fraction": 0.15,
         "global_fraction": 0.10,
+        "minimum_archive": 12,
+        "minimum_boundary_anchors": 6,
+        "maximum_fallback_rounds": 2,
+        "minimum_archive_separation_normalized": 0.001,
+        "minimum_weak_span_normalized": 0.001,
     }
     assert compiled.config["active_learning"]["acquisition"] == "constrained_minimax"
     assert compiled.config["active_learning"]["early_stop"] == {
@@ -548,7 +553,66 @@ end
         "boundary_fraction": 0.25,
         "uncertainty_fraction": 0.15,
         "global_fraction": 0.10,
+        "minimum_archive": 8,
+        "minimum_boundary_anchors": 4,
+        "maximum_fallback_rounds": 0,
+        "minimum_archive_separation_normalized": 0.001,
+        "minimum_weak_span_normalized": 0.001,
     }
+
+
+@pytest.mark.parametrize(
+    "settings, message",
+    [
+        (
+            "archive 3",
+            "archive_target must be at least parameter dimensions \\+ 1",
+        ),
+        ("min_archive 97", "minimum_archive cannot exceed archive_target"),
+        (
+            "min_anchors 97",
+            "minimum_boundary_anchors cannot exceed archive_target",
+        ),
+        (
+            "max_fallbacks -1",
+            "maximum_fallback_rounds must be a non-negative integer",
+        ),
+        (
+            "min_separation -0.1",
+            "minimum_archive_separation_normalized must be finite and non-negative",
+        ),
+        (
+            "min_weak_span nan",
+            "minimum_weak_span_normalized must be finite and non-negative",
+        ),
+    ],
+)
+def test_feasible_coverage_quality_gates_are_validated(
+    tmp_path,
+    settings,
+    message,
+):
+    source = _input_text(data=_elemental_data(tmp_path)) + f"""
+bo
+    objective feasible_coverage
+    coverage {settings}
+end
+"""
+
+    with pytest.raises(InputFileError, match=message):
+        compile_input(parse_input_file(_write(tmp_path, source)))
+
+
+def test_feasible_coverage_requires_three_initial_points(tmp_path):
+    source = _input_text(data=_elemental_data(tmp_path)) + """
+bo
+    objective feasible_coverage
+    initial_points 2
+end
+"""
+
+    with pytest.raises(InputFileError, match="at least 3 initial_points"):
+        compile_input(parse_input_file(_write(tmp_path, source)))
 
 
 def test_elemental_workflow_rejects_legacy_and_out_of_order_stages(tmp_path):
