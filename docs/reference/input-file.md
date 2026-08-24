@@ -40,6 +40,7 @@ molecule-specific meaning.
 ```text
 parameters
     range charge  delta  0.30
+    cutoff 8.0 A
     charge_limit 1.0
     neutrality derive N1
     mixing epsilon geometric
@@ -95,6 +96,35 @@ for readability but is not required.
 Every free parameter needs either a global or per-type range. Fixed parameters
 still need an initial value in each `type` row but do not need a range. A
 per-type range overrides the global range for that label and parameter.
+
+### Global cutoff
+
+```text
+cutoff VALUE A
+```
+
+Every input must declare exactly one positive LJ cutoff in the `parameters`
+block. It is a scientific part of the force field, not a property-specific
+runtime convenience: bulk, surface, sublimation, adsorption, static
+elasticity, dynamic promotion, and final validation all inherit the same
+value. There is no hidden default, and property blocks cannot override it.
+Changing the cutoff changes the scientific and artifact fingerprints, so an
+existing campaign cannot resume across that change.
+
+For `material elemental` with `crystal bcc`, the declared cutoff must satisfy
+`cutoff >= 2.5 * sigma_max`, where `sigma_max` is the largest sigma value
+allowed anywhere in the declared optimization domain. For example, a global
+`range sigma absolute 0.001 5.0` requires `cutoff 12.5 A`. This check covers
+the complete search space, rather than only the initial type values.
+
+Elemental-BCC periodic cells must also satisfy
+`cutoff <= 0.45 * h_min`, where `h_min` is the shortest perpendicular face
+height after the property-specific replicate. FFOpt computes face heights from
+the full box vectors, so this remains valid for triclinic cells. The 0.45
+factor leaves 10% headroom relative to the half-box limit for NPT contraction
+and elastic strain. Enlarge the replicate if the lower sigma-domain bound and
+this upper box-size bound cannot both be met. The generated force-field include
+also locks `pair_modify shift no tail no`.
 
 ### `fix`
 
@@ -223,7 +253,6 @@ accepted and ignored.
 | `temperature` | NPT temperature | `300 K` |
 | `pressure` | NPT pressure | `1 atm` |
 | `timestep` | LAMMPS timestep | `1 fs` |
-| `cutoff` | LJ and real-space Coulomb cutoff | `8 A` |
 | `equilibration` | Discarded NPT timesteps | `20000` |
 | `production` | Averaged NPT timesteps | `40000` |
 | `seed` | Velocity-initialization seed | `101` |
@@ -273,8 +302,8 @@ corrections. The validation manifest records this definition.
 
 `temperature` records the experimental target temperature (default
 `298.15 K`); the bulk simulation temperature is controlled by the bulk block
-and defaults to `300 K`. `cutoff` optionally overrides only the isolated-
-molecule minimization cutoff and otherwise inherits the bulk cutoff. The
+and defaults to `300 K`. The isolated-molecule minimization uses the global
+cutoff declared in `parameters`; it cannot introduce a second cutoff. The
 number of atoms per molecule is read from the required single-molecule data
 file and is not a user parameter.
 
@@ -303,10 +332,11 @@ in kcal/mol. Omit `target` when no experimental reference exists; FFOpt then
 computes adsorption only during final validation and does not train or
 optimize against it.
 
-The only optional adsorption settings are `metal LABEL` (default `Au`) and
-`cutoff VALUE A` (default `7 A`). Because schema 1 adsorption is deterministic
-minimization, temperature, timestep, random seed, equilibration, and production
-settings are rejected instead of being accepted and ignored.
+The only optional adsorption setting is `metal LABEL` (default `Au`). The
+complex, slab, and molecule all use the global cutoff declared in
+`parameters`. Because schema 1 adsorption is deterministic minimization,
+property-local cutoff, temperature, timestep, random seed, equilibration, and
+production settings are rejected instead of being accepted and ignored.
 
 Schema 1 assumes that `metal LABEL` identifies one fixed, uncharged substrate
 type whose LJ parameters remain in each data file. FFOpt updates the molecular
@@ -334,14 +364,22 @@ property elasticity
     gate surface 5 percent
     born required
     r2 0.98
+    static_drift 5 percent
     tier 20 percent
-    strain 0.002 0.004 0.006
+    static_strain  0.0005 0.001 0.002
+    dynamic_strain 0.002  0.004 0.006
     replicate 2 2 2
     temperature 300 K
     timestep 1 fs
-    equilibration 20000
+    npt_equilibration 20000
+    nvt_equilibration 20000
     production 40000
     seeds 101 202 303
+
+    validation_strain 0.001 0.003
+    validation_npt_equilibration 200000
+    validation_nvt_equilibration 50000
+    validation_production 500000
     validation_seeds 404 505 606
 end
 ```
@@ -355,25 +393,49 @@ and `nu` are rejected as fit targets. Hill `G`, Hill `E`, and Poisson's ratio
 are derived once and reported as diagnostics.
 
 Static elasticity is ranked by maximum relative error inside the declared
-structural gates, not added to the first-stage weighted structural RMSE. The
-`r2` and optional Born-stability requirement are eligibility checks. `tier` is
-a reporting band only: missing the requested band does not discard the best
-structurally feasible mechanical compromise.
+structural gates, not added to the first-stage weighted structural RMSE. Its
+canonical values come from symmetric three-mode pressure slopes extrapolated
+to zero strain with the two smallest magnitudes. The raw linear fit, outer
+strain shells, and energy curvature remain diagnostics. Energy curvature is
+never used for ranking because an unshifted hard-cutoff potential has discrete
+energy jumps when neighbour shells cross the cutoff. The `r2`, `static_drift`,
+and optional Born-stability requirement are eligibility checks. `static_drift
+5 percent` rejects a candidate when any of the `B`, `Cprime`, or `C44`
+zero-strain intercepts changes by more than 5% under the outer-shell/full-window
+extrapolation audits. It complements R2: a nearly linear-looking fit can still
+be too dependent on the chosen strain window. The default is 5% when the line
+is omitted; production inputs should state it explicitly. `tier` is a reporting
+band only: missing the requested band does not discard the best structurally
+feasible mechanical compromise.
 
-`strain` lists positive magnitudes; the evaluator generates the symmetric
-positive/negative perturbations and the undeformed reference. At least two
-strictly increasing magnitudes in `(0, 0.05]` are required. `replicate` belongs
-to the elasticity calculation and is distinct from bulk `cells_in_data`.
-Dynamic-only settings have deterministic defaults of `300 K`, `1 fs`, 20000
-equilibration steps, 40000 production steps, and seeds `101 202 303`; supplying
-them without a dynamic module is an error. `seeds` are the finite-temperature
-promotion trajectories. Optional `validation_seeds` declare a disjoint holdout
-set for final validation; overlap is rejected because replaying the promotion
-trajectories is not independent evidence. Older inputs without
-`validation_seeds` retain their previous compiled shape, and the validation
-report explicitly identifies any compatibility fallback that reuses promotion
-seeds. All explicit values and defaults are part of the scientific
-configuration hash.
+`static_strain` and `dynamic_strain` list their independent positive
+magnitudes; each evaluator generates symmetric positive/negative perturbations
+and an undeformed reference. Values must be strictly increasing and lie in
+`(0, 0.05]`. Static requires at least three magnitudes: the inner two define the
+canonical intercept and the third provides the independent `static_drift`
+audit. Dynamic requires at least two. Small deterministic static strains
+provide a zero-strain tangent, while larger dynamic strains preserve signal
+above thermal noise. The legacy `strain` spelling still sets both lists, but
+cannot be mixed with either fidelity-specific spelling and must therefore meet
+the three-magnitude static requirement. `replicate` belongs to the elasticity
+calculation and is distinct from bulk `cells_in_data`.
+Dynamic promotion and final validation are two separately fingerprinted
+protocols. `npt_equilibration`, `nvt_equilibration`, and `production` control the
+promotion NPT equilibration, NVT equilibration, and NVT production lengths;
+`seeds` are its trajectories. The packaged Fe workflow uses this quick
+multi-seed protocol for all 20 finalists. `validation_strain`,
+`validation_npt_equilibration`, `validation_nvt_equilibration`, and
+`validation_production` define the longer protocol used only for the promoted
+winner. `validation_seeds` must be present when a validation-specific override
+is used and must be disjoint from promotion seeds; replaying promotion is not
+independent evidence. Use at least two holdout seeds when trajectory-to-
+trajectory uncertainty is required; the packaged Fe production example uses
+three. A one-seed standard deviation is not an uncertainty estimate. All
+values, including the shared global cutoff, are part
+of the scientific identity and cannot be mixed during resume. The legacy
+`equilibration` and `validation_equilibration` spellings remain aliases for the
+corresponding NVT settings, but an input cannot combine an alias with its
+explicit `*_nvt_equilibration` form.
 
 ## Targets, weights, and tolerances
 
@@ -437,8 +499,23 @@ instead of preferring the experimental centre. The concise allocation syntax
 is:
 
 ```text
-coverage archive 96 pool 16384 feasible 0.50 boundary 0.25 uncertainty 0.15 global 0.10
+coverage archive 96 pool 16384 feasible 0.50 boundary 0.25 uncertainty 0.15 global 0.10 min_archive 8 min_boundary 4 min_separation 0.001 min_weak_span 0.001 max_fallbacks 0
 ```
+
+`min_archive` defaults to `min(archive, max(8, 2*(dimensions+1)))` and the
+strict points must also have full affine rank in the normalized free-parameter
+space. `min_boundary` counts only genuinely outside `near_boundary` anchors;
+strict points repeated in the anchor table do not count. Its default is
+`min(archive, max(4, dimensions+1))`. `min_separation` is the smallest pair
+distance among the first `min_archive` maximin centers in normalized parameter
+space. `min_weak_span` is their RMS spread along the weakest singular-vector
+direction. Both default to `0.001`, so a numerically full-rank but practically
+coincident cloud cannot masquerade as diverse coverage. `max_fallbacks` is the
+maximum number of unique BO rounds allowed to lose part of their surrogate
+guidance, defaulting to zero. The machine-readable coverage report separates
+exact evidence from model-guidance health. Thin but non-empty evidence is
+marked recovery-only and may enter Sample/Audit; zero strict feasible seeds
+stop Sample before LAMMPS.
 
 The explicit initial parameter vector from the `type` rows is evaluated once
 as a warm-start centre in addition to the Latin-hypercube points. Therefore,
@@ -577,16 +654,20 @@ screen
 end
 
 finalists
-    minimum 10
+    minimum 20
     maximum 20
     window 1.0
-    diverse 1
+    diverse 4
+    require_minimum yes
 end
 ```
 
 Finalists are selected by exact 0 K minimax rank plus a reserved diverse
 branch. Their finite-temperature order is recomputed and may differ from the
-static order; both ranks and evidence levels remain in the result bundle.
+static order; both ranks and evidence levels remain in the result bundle. With
+`require_minimum yes`, `minimum` is a hard preflight floor: if fewer than 20
+unique hard-gate candidates are eligible, the stage stops before launching any
+finite-temperature LAMMPS work. It never silently substitutes a smaller set.
 
 ## Robust audit and finalization
 

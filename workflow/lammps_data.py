@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
+import math
+import operator
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Sequence
 
 
 SECTION_NAMES = {
@@ -24,6 +26,120 @@ SECTION_NAMES = {
     "Dihedrals",
     "Impropers",
 }
+
+
+Vector3 = tuple[float, float, float]
+BoxBounds = tuple[tuple[float, float], tuple[float, float], tuple[float, float]]
+
+
+def _cross(left: Vector3, right: Vector3) -> Vector3:
+    return (
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
+    )
+
+
+def _dot(left: Vector3, right: Vector3) -> float:
+    return sum(a * b for a, b in zip(left, right))
+
+
+def _norm(vector: Vector3) -> float:
+    return math.sqrt(_dot(vector, vector))
+
+
+def _replicate_factors(values: Sequence[int]) -> tuple[int, int, int]:
+    try:
+        raw = tuple(values)
+    except TypeError as exc:
+        raise ValueError("replicate must contain three positive integers") from exc
+    if len(raw) != 3 or any(isinstance(value, bool) for value in raw):
+        raise ValueError("replicate must contain three positive integers")
+    try:
+        factors = tuple(operator.index(value) for value in raw)
+    except TypeError as exc:
+        raise ValueError("replicate must contain three positive integers") from exc
+    if any(value < 1 for value in factors):
+        raise ValueError("replicate must contain three positive integers")
+    return factors  # type: ignore[return-value]
+
+
+@dataclass(frozen=True)
+class LammpsBoxSummary:
+    """One orthogonal or restricted-triclinic LAMMPS simulation box.
+
+    ``vectors`` are the three edge vectors ``a``, ``b`` and ``c``. The
+    perpendicular face heights are the minimum-image dimensions relevant to
+    cutoff validation; unlike ``lx``, ``ly`` and ``lz``, they remain correct
+    for tilted boxes.
+    """
+
+    origin: Vector3
+    vectors: tuple[Vector3, Vector3, Vector3]
+    bounds: BoxBounds
+    tilt_factors: Vector3
+    representation: str
+
+    def __post_init__(self) -> None:
+        values = (
+            *self.origin,
+            *(component for vector in self.vectors for component in vector),
+            *(component for bound in self.bounds for component in bound),
+            *self.tilt_factors,
+        )
+        if any(not math.isfinite(float(value)) for value in values):
+            raise ValueError("LAMMPS box values must be finite")
+        if self.representation not in {"orthogonal", "restricted_triclinic"}:
+            raise ValueError(
+                "LAMMPS box representation must be orthogonal or restricted_triclinic"
+            )
+        if self.volume <= 0.0:
+            raise ValueError("LAMMPS box vectors must form a right-handed volume")
+
+    @property
+    def volume(self) -> float:
+        a, b, c = self.vectors
+        return _dot(a, _cross(b, c))
+
+    def replicated_vectors(
+        self, replicate: Sequence[int] = (1, 1, 1)
+    ) -> tuple[Vector3, Vector3, Vector3]:
+        factors = _replicate_factors(replicate)
+        return tuple(
+            tuple(float(factor) * component for component in vector)
+            for vector, factor in zip(self.vectors, factors)
+        )  # type: ignore[return-value]
+
+    def periodic_face_heights(
+        self, replicate: Sequence[int] = (1, 1, 1)
+    ) -> Vector3:
+        """Return heights normal to the ``bc``, ``ca`` and ``ab`` faces."""
+
+        a, b, c = self.replicated_vectors(replicate)
+        volume = _dot(a, _cross(b, c))
+        face_areas = (
+            _norm(_cross(b, c)),
+            _norm(_cross(c, a)),
+            _norm(_cross(a, b)),
+        )
+        if volume <= 0.0 or any(area <= 0.0 for area in face_areas):
+            raise ValueError("LAMMPS box vectors do not form a valid periodic volume")
+        return tuple(volume / area for area in face_areas)  # type: ignore[return-value]
+
+    @property
+    def face_heights(self) -> Vector3:
+        return self.periodic_face_heights()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "representation": self.representation,
+            "origin": list(self.origin),
+            "bounds": [list(bound) for bound in self.bounds],
+            "tilt_factors": list(self.tilt_factors),
+            "vectors": [list(vector) for vector in self.vectors],
+            "volume": self.volume,
+            "periodic_face_heights": list(self.face_heights),
+        }
 
 
 @dataclass(frozen=True)
@@ -61,6 +177,25 @@ class LammpsDataSummary:
     total_charge: float | None
     atom_types: list[AtomTypeSummary]
     section_styles: dict[str, str]
+    box: LammpsBoxSummary | None = None
+
+    @property
+    def box_vectors(self) -> tuple[Vector3, Vector3, Vector3] | None:
+        return self.box.vectors if self.box is not None else None
+
+    def replicated_box_vectors(
+        self, replicate: Sequence[int] = (1, 1, 1)
+    ) -> tuple[Vector3, Vector3, Vector3]:
+        if self.box is None:
+            raise ValueError(f"LAMMPS data file contains no complete box: {self.path}")
+        return self.box.replicated_vectors(replicate)
+
+    def periodic_face_heights(
+        self, replicate: Sequence[int] = (1, 1, 1)
+    ) -> Vector3:
+        if self.box is None:
+            raise ValueError(f"LAMMPS data file contains no complete box: {self.path}")
+        return self.box.periodic_face_heights(replicate)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -72,6 +207,7 @@ class LammpsDataSummary:
             "total_charge": self.total_charge,
             "section_styles": self.section_styles,
             "atom_types": [item.to_dict() for item in self.atom_types],
+            "box": self.box.to_dict() if self.box is not None else None,
         }
 
 
@@ -88,6 +224,91 @@ def _numeric_payload(line: str) -> tuple[list[str], str]:
     return payload.split(), comment.strip()
 
 
+def _box_number(source: Path, line: int, value: str, label: str) -> float:
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"invalid {label} in LAMMPS data file {source}:{line}: {value!r}"
+        ) from exc
+    if not math.isfinite(number):
+        raise ValueError(
+            f"non-finite {label} in LAMMPS data file {source}:{line}: {value!r}"
+        )
+    return number
+
+
+def _inspect_box(source: Path, lines: Sequence[str]) -> LammpsBoxSummary | None:
+    axis_labels = {
+        ("xlo", "xhi"): "x",
+        ("ylo", "yhi"): "y",
+        ("zlo", "zhi"): "z",
+    }
+    bounds: dict[str, tuple[float, float]] = {}
+    tilt_factors: Vector3 | None = None
+
+    for line_number, line in enumerate(lines, start=1):
+        header, _qualifier = _section_header(line)
+        if header is not None:
+            break
+        columns, _comment = _numeric_payload(line)
+        labels = (
+            (columns[-2].lower(), columns[-1].lower())
+            if len(columns) == 4
+            else None
+        )
+        if labels in axis_labels:
+            axis = axis_labels[labels]
+            if axis in bounds:
+                raise ValueError(
+                    f"duplicate {axis} box bounds in LAMMPS data file "
+                    f"{source}:{line_number}"
+                )
+            lower = _box_number(source, line_number, columns[0], f"{axis}lo")
+            upper = _box_number(source, line_number, columns[1], f"{axis}hi")
+            if upper <= lower:
+                raise ValueError(
+                    f"LAMMPS {axis}hi must exceed {axis}lo in {source}:{line_number}"
+                )
+            bounds[axis] = (lower, upper)
+            continue
+        if (
+            len(columns) == 6
+            and tuple(value.lower() for value in columns[-3:])
+            == ("xy", "xz", "yz")
+        ):
+            if tilt_factors is not None:
+                raise ValueError(
+                    f"duplicate triclinic tilt factors in LAMMPS data file "
+                    f"{source}:{line_number}"
+                )
+            tilt_factors = tuple(
+                _box_number(source, line_number, value, label)
+                for value, label in zip(columns[:3], ("xy", "xz", "yz"))
+            )  # type: ignore[assignment]
+
+    if not bounds and tilt_factors is None:
+        return None
+    if set(bounds) != {"x", "y", "z"}:
+        missing = sorted({"x", "y", "z"} - set(bounds))
+        raise ValueError(
+            f"incomplete LAMMPS box in {source}; missing bounds for {missing}"
+        )
+    xy, xz, yz = tilt_factors or (0.0, 0.0, 0.0)
+    x, y, z = bounds["x"], bounds["y"], bounds["z"]
+    lx, ly, lz = x[1] - x[0], y[1] - y[0], z[1] - z[0]
+    representation = (
+        "restricted_triclinic" if tilt_factors is not None else "orthogonal"
+    )
+    return LammpsBoxSummary(
+        origin=(x[0], y[0], z[0]),
+        vectors=((lx, 0.0, 0.0), (xy, ly, 0.0), (xz, yz, lz)),
+        bounds=(x, y, z),
+        tilt_factors=(xy, xz, yz),
+        representation=representation,
+    )
+
+
 def inspect_lammps_data(path: str | Path) -> LammpsDataSummary:
     source = Path(path).expanduser().resolve()
     if not source.exists():
@@ -95,6 +316,8 @@ def inspect_lammps_data(path: str | Path) -> LammpsDataSummary:
     lines = source.read_text(encoding="utf-8", errors="replace").splitlines()
     if not lines:
         raise ValueError(f"LAMMPS data file is empty: {source}")
+
+    box = _inspect_box(source, lines)
 
     declared: dict[str, int] = {}
     for line in lines[:80]:
@@ -219,4 +442,5 @@ def inspect_lammps_data(path: str | Path) -> LammpsDataSummary:
         total_charge=sum(charge_values) if charge_values else None,
         atom_types=summaries,
         section_styles=section_styles,
+        box=box,
     )

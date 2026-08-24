@@ -23,9 +23,10 @@ from engine.parameter_space import build_parameter_space
 from .project import Project, compose_config
 from .material_pipeline import (
     MATERIAL_EXECUTABLE_KINDS,
+    MATERIAL_MANIFEST_COMMAND_TOKENS,
     build_refinement_spec,
     load_refinement_state,
-    validate_material_al_stage_outputs,
+    validate_material_stage_outputs,
     write_skipped_refinement_stage,
 )
 from .stage_registry import (
@@ -199,7 +200,13 @@ class PipelineRunner:
         input_hash = hashlib.sha256(input_bytes).hexdigest()
         self.input_snapshot_path = provenance / f"input_{input_hash[:16]}.in"
         self._config_snapshot = (
-            json.dumps(serialized, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
+            json.dumps(
+                serialized,
+                indent=2,
+                ensure_ascii=False,
+                sort_keys=True,
+                allow_nan=False,
+            ) + "\n"
         )
         self._input_snapshot = input_bytes
         environment = {
@@ -417,6 +424,8 @@ class PipelineRunner:
         if boundary_source is not None:
             command.extend([
                 "--boundary-source", str(boundary_source),
+                "--coverage-summary",
+                str(self.root / "bo" / "coverage_summary.json"),
                 "--boundary-fraction",
                 str(settings.get("boundary_fraction", 0.0)),
             ])
@@ -531,9 +540,17 @@ class PipelineRunner:
             )
             if value is not None:
                 command.extend([option, str(converter(value))])
+        if bool(settings.get("require_minimum", False)):
+            command.append("--require-minimum")
         return command
 
-    def _stage_command(self, name: str, output: Path) -> list[str]:
+    def _stage_command(
+        self,
+        name: str,
+        output: Path,
+        *,
+        stage_signature: str | None = None,
+    ) -> list[str]:
         command_token = self._node(name).command_token
         bo_dir = self.root / "bo"
         sample_file = self.root / "sample" / "local_results.csv"
@@ -542,8 +559,21 @@ class PipelineRunner:
             command = self._python_module(
                 "engine.run", "--config", self.config_path, "--output-dir", output
             )
+            if stage_signature is not None:
+                command.extend(["--stage-signature", stage_signature])
             if self.resume:
-                command.append("--resume")
+                checkpoint_dir = Path(str(
+                    self.config.get("checkpoint", {}).get(
+                        "directory", "checkpoints"
+                    )
+                ))
+                checkpoint = checkpoint_dir / "latest.json"
+                if not checkpoint_dir.is_absolute():
+                    checkpoint = output / checkpoint
+                command.extend([
+                    "--resume",
+                    "--checkpoint", str(checkpoint),
+                ])
             return command
         if command_token == "sample":
             return self._sample_command(output)
@@ -636,7 +666,6 @@ class PipelineRunner:
                 self.root / "candidates" / "static_screen_candidates.csv",
                 "--output-dir", output,
                 "--protocol", "static",
-                "--evaluate-structural-failures",
                 *self._elastic_batch_resource_args(name),
                 *self._finalist_selection_args(name),
             )
@@ -785,7 +814,9 @@ class PipelineRunner:
             specs.append(StageSpec(
                 name=name,
                 signature=signature,
-                command=self._stage_command(name, output),
+                command=self._stage_command(
+                    name, output, stage_signature=signature
+                ),
                 output_dir=output,
                 artifacts=self._stage_artifacts(name, output),
                 kind=node.kind,
@@ -1032,7 +1063,27 @@ class PipelineRunner:
                 return values[0].split()[0].rstrip("+")
         return "UNKNOWN" if successful_queries else "QUERY_UNAVAILABLE"
 
-    def _refresh_waiting(self, state: WorkflowState, record: StageRecord) -> str:
+    def _material_stage_outputs_valid(
+        self,
+        spec: StageSpec,
+    ) -> tuple[bool, str]:
+        if not (
+            self.material_workflow
+            and spec.command_token in MATERIAL_MANIFEST_COMMAND_TOKENS
+        ):
+            return True, "stage does not use a material artifact manifest"
+        return validate_material_stage_outputs(
+            spec.output_dir,
+            command_token=spec.command_token,
+            expected_artifacts=spec.artifacts,
+        )
+
+    def _refresh_waiting(
+        self,
+        state: WorkflowState,
+        record: StageRecord,
+        spec: StageSpec | None = None,
+    ) -> str:
         if not record.job_id:
             state.transition(record.name, "failed", message="Missing SLURM job id")
             return "failed"
@@ -1049,7 +1100,12 @@ class PipelineRunner:
             )
             return "waiting"
         if scheduler_state in indeterminate:
-            if WorkflowState.artifacts_exist(record):
+            artifacts_valid = WorkflowState.artifacts_exist(record)
+            validation = (True, "legacy artifact existence verified")
+            if artifacts_valid and spec is not None:
+                validation = self._material_stage_outputs_valid(spec)
+                artifacts_valid = validation[0]
+            if artifacts_valid:
                 state.transition(
                     record.name,
                     "completed",
@@ -1069,6 +1125,18 @@ class PipelineRunner:
             )
             return "waiting"
         if WorkflowState.artifacts_exist(record):
+            if spec is not None:
+                valid, reason = self._material_stage_outputs_valid(spec)
+                if not valid:
+                    state.transition(
+                        record.name,
+                        "failed",
+                        message=(
+                            f"SLURM {record.job_id}: {scheduler_state}; "
+                            f"material manifest verification failed: {reason}"
+                        ),
+                    )
+                    return "failed"
             state.transition(
                 record.name,
                 "completed",
@@ -1162,6 +1230,17 @@ class PipelineRunner:
             missing = [str(path) for path in spec.artifacts if not path.exists()]
             state.transition(spec.name, "failed", message=f"Missing artifacts: {missing}")
             raise RuntimeError(f"Stage {spec.name!r} did not create: {missing}")
+        valid, reason = self._material_stage_outputs_valid(spec)
+        if not valid:
+            state.transition(
+                spec.name,
+                "failed",
+                message=f"Material manifest verification failed: {reason}",
+            )
+            raise RuntimeError(
+                f"Pipeline stage {spec.name!r} published invalid material artifacts: "
+                f"{reason}"
+            )
         state.transition(spec.name, "completed")
         print(f"[{spec.name}] completed")
 
@@ -1223,29 +1302,44 @@ class PipelineRunner:
                 spec.artifacts,
             )
             if spec.name not in selected:
-                if (
+                is_upstream = (
                     self.from_stage
                     and self.stage_names.index(spec.name)
                     < self.stage_names.index(self.from_stage)
-                    and not state.is_complete(spec.name, spec.signature)
-                ):
-                    raise RuntimeError(
-                        f"Cannot start from {self.from_stage!r}: upstream stage "
-                        f"{spec.name!r} is not complete. Run without --from-stage "
-                        "or choose an earlier stage."
-                    )
+                )
+                if is_upstream:
+                    if not state.is_complete(spec.name, spec.signature):
+                        raise RuntimeError(
+                            f"Cannot start from {self.from_stage!r}: upstream stage "
+                            f"{spec.name!r} is not complete. Run without --from-stage "
+                            "or choose an earlier stage."
+                        )
+                    if (
+                        self.material_workflow
+                        and spec.command_token in MATERIAL_MANIFEST_COMMAND_TOKENS
+                    ):
+                        valid, reason = self._material_stage_outputs_valid(spec)
+                        if not valid:
+                            raise RuntimeError(
+                                f"Cannot start from {self.from_stage!r}: upstream "
+                                f"material stage {spec.name!r} failed manifest "
+                                f"verification: {reason}. Run from {spec.name!r} "
+                                "or choose an earlier stage."
+                            )
                 continue
             if state.is_complete(spec.name, spec.signature):
-                if spec.command_token == "constrained-al":
-                    valid, reason = validate_material_al_stage_outputs(
-                        spec.output_dir
-                    )
+                if (
+                    self.material_workflow
+                    and spec.command_token in MATERIAL_MANIFEST_COMMAND_TOKENS
+                ):
+                    valid, reason = self._material_stage_outputs_valid(spec)
                     if not valid:
                         state.transition(
                             spec.name,
                             "pending",
-                            message=f"Material AL manifest verification failed: {reason}",
+                            message=f"Material manifest verification failed: {reason}",
                         )
+                        record = state.get(spec.name)
                     else:
                         existing = state.get(spec.name)
                         disposition = (
@@ -1272,7 +1366,7 @@ class PipelineRunner:
                 state.transition(spec.name, "pending", message="Completed artifacts are missing")
                 record = state.get(spec.name)  # type: ignore[assignment]
             if record and record.status == "waiting" and self.backend == "slurm":
-                refreshed = self._refresh_waiting(state, record)
+                refreshed = self._refresh_waiting(state, record, spec)
                 if refreshed == "completed":
                     continue
                 if refreshed == "waiting":
@@ -1328,6 +1422,17 @@ class PipelineRunner:
                     "The scientific input changed after this pipeline started. "
                     "Use --new to create an independent run instead of mixing checkpoints."
                 )
+            for spec in specs:
+                if spec.kind != "bo":
+                    continue
+                existing = state.get(spec.name)
+                if existing is not None and existing.signature != spec.signature:
+                    raise RuntimeError(
+                        "The BO stage signature changed after this pipeline started. "
+                        "Its existing checkpoint cannot be passed to a different "
+                        "objective, coverage policy, target, cutoff, or optimization "
+                        "configuration. Use --new to create an independent run."
+                    )
             self._write_provenance()
             state.initialize({
                 "project": self.project.name,

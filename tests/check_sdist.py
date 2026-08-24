@@ -26,6 +26,9 @@ required = {
     "docs/reference/input-file.md",
     "examples/btah/README.md",
     "examples/btah/acceptance.in",
+    "examples/fe_bcc/README.md",
+    "examples/fe_bcc/ffopt.in",
+    "examples/fe_bcc/ffopt.canary.in",
 }
 missing = sorted(required - relative)
 if missing:

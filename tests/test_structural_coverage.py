@@ -136,6 +136,30 @@ def test_archives_keep_strict_science_separate_from_boundary_anchors() -> None:
     }
 
 
+def test_archive_labels_far_outside_point_for_recovery_not_canonical_boundary():
+    frame = pd.DataFrame({
+        "p1": [0.2, 0.4, 0.9],
+        "p2": [0.2, 0.4, 0.9],
+        "success": [True, True, True],
+        "structural_feasible": [True, True, False],
+        "structural_band_max_ratio": [0.4, 0.8, 4.5],
+        "fit_objective": [0.1, 0.2, 0.3],
+    })
+
+    _strict, anchors = build_coverage_archives(
+        frame,
+        parameter_names=["p1", "p2"],
+        parameter_bounds=np.asarray([[0.0, 1.0], [0.0, 1.0]]),
+        archive_target=3,
+        anchor_max_band_ratio=3.0,
+    )
+
+    assert "near_boundary" not in set(anchors["anchor_class"])
+    assert anchors.loc[anchors["p1"] == 0.9, "anchor_class"].item() == (
+        "outside_recovery"
+    )
+
+
 def test_report_representative_prioritizes_exact_gate_then_fit_objective() -> None:
     frame = pd.DataFrame([
         {

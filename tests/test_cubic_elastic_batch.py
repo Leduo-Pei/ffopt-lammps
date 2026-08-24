@@ -10,7 +10,10 @@ import pytest
 
 from engine.cubic_elastic_batch import (
     BatchArtifactError,
+    Candidate,
     CandidateParameterError,
+    CubicElasticBatchError,
+    PreparedCandidate,
     build_parser as build_elastic_batch_parser,
     effective_available_cores,
     load_candidates,
@@ -18,6 +21,7 @@ from engine.cubic_elastic_batch import (
     rank_elastic_results,
     run_elasticity_batch,
     select_finalists,
+    summarize_single_elastic_result,
 )
 from engine.cubic_elastic_runner import (
     ATM_TO_GPA,
@@ -74,6 +78,18 @@ def test_gate_order_prevents_perfect_mechanics_from_rescuing_bad_structure():
     assert list(selected["parameter_key"]) == ["candidate1"]
 
 
+def test_ranking_preserves_explicit_born_optional_eligibility():
+    row = _rank_row("candidate1", 25.0, 20.0, born=False)
+    # The evaluator owns the born-required policy.  An eligible row with a
+    # failed Born diagnostic represents a project that explicitly set born off.
+    row["finalist_eligible"] = True
+
+    ranked = rank_elastic_results(pd.DataFrame([row]))
+
+    assert bool(ranked.iloc[0]["finalist_eligible"])
+    assert not bool(ranked.iloc[0]["born_stability_pass"])
+
+
 def test_dynamic_ranking_can_reverse_static_rank_and_retains_best_effort():
     static = pd.DataFrame([
         _rank_row("candidate1", 10.0, 8.0),
@@ -122,6 +138,42 @@ def test_refinement_aliases_are_directly_accepted_by_finalist_selection():
     assert len(selected) == 1
     assert bool(selected.iloc[0]["finalist_eligible"])
     assert selected.iloc[0]["finalist_selection_role"] == "near_optimal_quality"
+
+
+def test_missing_refinement_aliases_do_not_erase_recomputed_gates():
+    row = _rank_row("candidate1", 22.0, 15.0)
+    row.update({
+        "structural_feasible": None,
+        "structural_minimum_margin": None,
+        "mechanical_stability_gate_pass": None,
+        "mechanical_fit_gate_pass": None,
+        "mechanical_eligible": None,
+    })
+
+    ranked = rank_elastic_results(pd.DataFrame([row]))
+
+    assert bool(ranked.iloc[0]["structural_gate_pass"])
+    assert ranked.iloc[0]["structural_margin"] == pytest.approx(0.5)
+    assert bool(ranked.iloc[0]["born_stability_pass"])
+    assert bool(ranked.iloc[0]["fit_quality_pass"])
+    assert bool(ranked.iloc[0]["finalist_eligible"])
+
+
+def test_explicit_refinement_alias_still_supersedes_stale_gate():
+    row = _rank_row("candidate1", 22.0, 15.0)
+    row.update({
+        "structural_feasible": False,
+        "structural_minimum_margin": -0.25,
+        "mechanical_stability_gate_pass": True,
+        "mechanical_fit_gate_pass": True,
+        "mechanical_eligible": False,
+    })
+
+    ranked = rank_elastic_results(pd.DataFrame([row]))
+
+    assert not bool(ranked.iloc[0]["structural_gate_pass"])
+    assert ranked.iloc[0]["structural_margin"] == pytest.approx(-0.25)
+    assert not bool(ranked.iloc[0]["finalist_eligible"])
 
 
 def test_near_optimal_selection_keeps_quality_primary_and_adds_diversity():
@@ -189,6 +241,86 @@ def test_finalist_minimum_never_admits_hard_gate_failure():
     assert list(selected["parameter_key"]) == ["candidate1"]
 
 
+@pytest.mark.parametrize(
+    ("drift, expected_pass, expected_reason"),
+    [
+        (4.999, True, ""),
+        (5.001, False, "static_drift>5%"),
+        (float("nan"), False, "static_drift>5%"),
+    ],
+)
+def test_static_extrapolation_drift_is_a_fail_closed_finalist_gate(
+    tmp_path, drift, expected_pass, expected_reason
+):
+    candidate = Candidate(
+        parameter_key="named:sha256:test",
+        raw_parameters={"epsilon": 6.0, "sigma": 2.3},
+        source_row={},
+        source_rank=1,
+    )
+    prepared = PreparedCandidate(
+        candidate=candidate,
+        resolved_parameters={"epsilon": 6.0, "sigma": 2.3},
+        force_field_include=tmp_path / "force_field.lmp",
+        parameter_contrast={
+            "contrast": 0.0,
+            "epsilon_contrast": 0.0,
+            "sigma_contrast": 0.0,
+        },
+    )
+    summary = {
+        "candidate_directory": str(tmp_path),
+        "candidate_fingerprint": "sha256:test",
+        "elastic_constants_gpa": {"C11": 240.0, "C12": 120.0, "C44": 120.0},
+        "independent_moduli_gpa": {"B": 160.0, "Cprime": 60.0},
+        "derived_diagnostics": {
+            "G_hill_gpa": 90.0,
+            "E_hill_gpa": 227.4,
+            "nu_hill": 0.263,
+        },
+        "fit_quality": {
+            "minimum_r2": 0.999,
+            "maximum_zero_strain_extrapolation_drift_percent": drift,
+        },
+        "born_stability": {"stable": True},
+    }
+    module = {
+        "targets": {
+            "B": {"value": 160.0},
+            "Cprime": {"value": 60.0},
+            "C44": {"value": 120.0},
+        },
+        "protocol": {
+            "maximum_zero_strain_extrapolation_drift_percent": 5.0,
+        },
+    }
+    structural = {
+        "structural_gate_pass": True,
+        "structural_margin": 1.0,
+        "structural_gate_reason": "",
+        "structural_errors": {},
+    }
+
+    row = summarize_single_elastic_result(
+        candidate=candidate,
+        prepared=prepared,
+        structural=structural,
+        summary=summary,
+        module=module,
+        minimum_r2=0.98,
+        born_required=True,
+        quality_tier_percent=20.0,
+    )
+
+    assert row["maximum_static_extrapolation_drift_percent"] == pytest.approx(
+        drift, nan_ok=True
+    )
+    assert row["maximum_static_extrapolation_drift_limit_percent"] == 5.0
+    assert bool(row["fit_quality_pass"]) is expected_pass
+    assert bool(row["finalist_eligible"]) is expected_pass
+    assert row["finalist_rejection_reason"] == expected_reason
+
+
 def test_nested_resource_plan_never_silently_oversubscribes():
     plan = plan_nested_resources(
         available_cores=76,
@@ -241,9 +373,9 @@ def _bcc_data() -> str:
 2 atoms
 2 atom types
 
-0.0 2.8665 xlo xhi
-0.0 2.8665 ylo yhi
-0.0 2.8665 zlo zhi
+0.0 30.0 xlo xhi
+0.0 30.0 ylo yhi
+0.0 30.0 zlo zhi
 
 Masses
 
@@ -278,6 +410,7 @@ workflow bo validate
 parameters
     range epsilon absolute 0.001 10
     range sigma absolute 0.001 5
+    cutoff 12.5 A
     mixing default
     tie epsilon all
     difference sigma Fe_corner Fe_body max 0.75 A
@@ -325,7 +458,8 @@ property elasticity
     born required
     r2 0.98
     tier 20 percent
-    strain 0.01 0.02
+    static_strain 0.005 0.01 0.02
+    dynamic_strain 0.01 0.02
     replicate 1 1 1
 end
 """,
@@ -420,8 +554,27 @@ class FakeBatchBackend:
         if self.protocol == STATIC_PROTOCOL:
             volume = 1000.0
             reference = -12.5
+            pressures = {
+                name: 0.0
+                for name in (
+                    "pxx_atm",
+                    "pyy_atm",
+                    "pzz_atm",
+                    "pxy_atm",
+                    "pxz_atm",
+                    "pyz_atm",
+                )
+            }
             if state.role == "reference":
                 density = reference
+                geometry = {
+                    "lx_angstrom": 10.0,
+                    "ly_angstrom": 10.0,
+                    "lz_angstrom": 10.0,
+                    "xy_angstrom": 0.0,
+                    "xz_angstrom": 0.0,
+                    "yz_angstrom": 0.0,
+                }
             else:
                 quadratic = {
                     "hydro": 4.5 * bulk,
@@ -429,9 +582,28 @@ class FakeBatchBackend:
                     "shear": 0.5 * c44,
                 }[state.mode]
                 density = reference + quadratic * state.strain**2 + 2.0e4 * state.strain**4
+                geometry = {}
+                if state.mode == "hydro":
+                    pressure = -3.0 * bulk * state.strain / ATM_TO_GPA
+                    pressures.update({
+                        "pxx_atm": pressure,
+                        "pyy_atm": pressure,
+                        "pzz_atm": pressure,
+                    })
+                elif state.mode == "orthorhombic":
+                    pressure = -2.0 * cprime * state.strain / ATM_TO_GPA
+                    pressures.update({
+                        "pxx_atm": pressure,
+                        "pyy_atm": -pressure,
+                    })
+                else:
+                    pressures["pxy_atm"] = -c44 * state.strain / ATM_TO_GPA
             return {
                 "potential_energy_kcal_mol": density * volume / KCAL_PER_MOL_ANGSTROM3_TO_GPA,
                 "volume_angstrom3": volume,
+                "density_g_cm3": 7.874,
+                **geometry,
+                **pressures,
             }
         stress = {name: 0.0 for name in ("sxx", "syy", "szz", "sxy", "sxz", "syz")}
         if state.role != "reference" and state.direction != "zero":
@@ -628,6 +800,33 @@ def test_zero_structural_eligible_is_successful_manifested_outcome(tmp_path):
     assert (output / "stage_manifest.json").is_file()
 
 
+def test_static_batch_runs_only_hard_gate_pass_rows(tmp_path):
+    config_path, config = _compiled_config(tmp_path)
+    candidates = tmp_path / "mixed-structure.csv"
+    frame = _candidate_frame(config)
+    frame.loc[frame.index[0], "calc_a"] = 3.2
+    frame.to_csv(candidates, index=False)
+    output = tmp_path / "mixed-static"
+    factory = FakeBackendFactory(tmp_path)
+
+    ranked = run_elasticity_batch(
+        config_path=config_path,
+        parameters_path=candidates,
+        output_dir=output,
+        protocol="static",
+        resources=_resources(),
+        top_n=2,
+        diversity_slots=0,
+        backend_factory=factory,
+    )
+
+    status_by_epsilon = dict(zip(ranked["Fe_corner_epsilon"], ranked["calculation_status"]))
+    assert status_by_epsilon == {5.0: "skipped_structural_gate", 7.0: "completed"}
+    assert not any(key[0] == 5.0 for key in factory.calls)
+    assert any(key[0] == 7.0 for key in factory.calls)
+    assert (output / "stage_manifest.json").is_file()
+
+
 def test_dynamic_zero_eligible_is_successful_without_launching_seeds(tmp_path):
     config_path, config = _compiled_config(tmp_path)
     candidates = tmp_path / "zero-finalists.csv"
@@ -662,6 +861,45 @@ def test_dynamic_zero_eligible_is_successful_without_launching_seeds(tmp_path):
         "zero_hard_gate_eligible"
     )
     assert (output / "stage_manifest.json").is_file()
+
+
+def test_dynamic_required_minimum_fails_before_lammps_launch(tmp_path):
+    config_path, config = _compiled_config(tmp_path)
+    candidates = tmp_path / "thin-finalists.csv"
+    frame = _candidate_frame(config).iloc[:1].copy()
+    frame["structural_gate_pass"] = True
+    frame["born_stability_pass"] = True
+    frame["fit_quality_pass"] = True
+    frame["finite_mechanical_score"] = True
+    frame["finalist_eligible"] = True
+    frame["mechanical_max_error_percent"] = 5.0
+    frame["mechanical_rmse_percent"] = 4.0
+    frame["same_element_parameter_contrast"] = 0.0
+    frame["structural_margin"] = 0.5
+    frame.to_csv(candidates, index=False)
+    output = tmp_path / "dynamic-thin"
+    factory = FakeBackendFactory(tmp_path)
+
+    with pytest.raises(CubicElasticBatchError, match="only 1 are eligible"):
+        run_elasticity_batch(
+            config_path=config_path,
+            parameters_path=candidates,
+            output_dir=output,
+            protocol="dynamic",
+            resources=_resources(),
+            top_n=2,
+            minimum=2,
+            require_minimum=True,
+            diversity_slots=0,
+            backend_factory=factory,
+        )
+
+    assert not factory.calls
+    summary = json.loads((output / "batch_summary.json").read_text())
+    assert summary["status"] == "insufficient_eligible_finalists"
+    assert summary["required_finalists"] == 2
+    assert summary["launched_lammps_work_units"] == 0
+    assert not (output / "stage_manifest.json").exists()
 
 
 def test_recorded_parameter_key_detects_value_tampering(tmp_path):

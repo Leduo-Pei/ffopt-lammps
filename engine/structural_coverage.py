@@ -401,18 +401,24 @@ def build_coverage_archives(
         exact_feasible = _truthy(pool["structural_feasible"])
     else:
         exact_feasible = pd.Series(True, index=pool.index)
-    strict = pool.loc[
+    strict_mask = (
         exact_feasible
         & (pool["structural_band_max_ratio"] <= 1.0 + 1.0e-12)
-    ].copy()
+    )
+    strict = pool.loc[strict_mask].copy()
     anchors = pool.loc[
         pool["structural_band_max_ratio"] <= float(anchor_max_band_ratio)
     ].copy()
-    if anchors.empty and not pool.empty:
-        anchors = pool.nsmallest(
-            min(max(1, archive_target // 4), len(pool)),
+    outside = pool.loc[~strict_mask].copy()
+    if anchors.index.intersection(outside.index).empty and not outside.empty:
+        # Retain the closest measured outside points for recovery even if they
+        # lie beyond the canonical near-boundary band. They are labelled
+        # outside_recovery below and cannot satisfy the canonical anchor gate.
+        recovery = outside.nsmallest(
+            min(max(1, archive_target // 4), len(outside)),
             "structural_band_max_ratio",
         )
+        anchors = pd.concat([anchors, recovery], ignore_index=False)
 
     bounds = np.asarray(parameter_bounds, dtype=float)
     if bounds.shape != (len(parameter_names), 2):
@@ -504,11 +510,15 @@ def build_coverage_archives(
         if "structural_feasible" in coverage_anchors
         else coverage_anchors["structural_band_max_ratio"] <= 1.0 + 1.0e-12
     )
-    coverage_anchors["anchor_class"] = np.where(
-        anchor_exact_feasible
-        & (coverage_anchors["structural_band_max_ratio"] <= 1.0 + 1.0e-12),
-        "strict_feasible",
-        "near_boundary",
+    anchor_ratios = coverage_anchors["structural_band_max_ratio"].to_numpy(float)
+    coverage_anchors["anchor_class"] = np.select(
+        [
+            anchor_exact_feasible.to_numpy(bool)
+            & (anchor_ratios <= 1.0 + 1.0e-12),
+            anchor_ratios <= float(anchor_max_band_ratio),
+        ],
+        ["strict_feasible", "near_boundary"],
+        default="outside_recovery",
     )
     return feasible_archive, coverage_anchors
 

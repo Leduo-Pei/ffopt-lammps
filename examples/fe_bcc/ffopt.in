@@ -8,6 +8,9 @@ workflow bo sample audit screen nn al finalists validate
 parameters
     range epsilon absolute 0.001 10.0
     range sigma   absolute 0.001 5.0
+    # Global LJ protocol inherited by bulk, surface, and both elastic modules.
+    # 12.5 A = 2.5 * maximum sigma bound (5 A).
+    cutoff 12.5 A
     mixing default
 
     # Corner/body are an ordered two-sublattice surrogate.  Keep their well
@@ -76,29 +79,48 @@ property elasticity
     gate surface 5 percent
     born required
     r2 0.98
+    static_drift 5 percent
     tier 20 percent
 
-    strain 0.002 0.004 0.006
+    # Static uses small deterministic strains and extrapolates the symmetric
+    # stress response to zero strain.  Dynamic uses larger strains to retain a
+    # measurable signal above finite-temperature stress noise.
+    static_strain  0.0005 0.001 0.002
+    dynamic_strain 0.002  0.004 0.006
     replicate 2 2 2
     temperature 300 K
     timestep 1 fs
-    equilibration 20000
+    # Quick multi-seed promotion for the 20 finalist candidates.
+    npt_equilibration 20000
+    nvt_equilibration 20000
     production 40000
-    # Promotion and final validation use disjoint deterministic trajectories.
     seeds 101 202 303
+
+    # Independent production-grade holdout for the single promoted winner.
+    # This restores the converged legacy trajectory length without applying it
+    # to every candidate.
+    validation_strain 0.001 0.003
+    validation_npt_equilibration 200000
+    validation_nvt_equilibration 50000
+    validation_production 500000
     validation_seeds 404 505 606
 end
 
 bo
     method auto
     objective feasible_coverage
+    # Evaluate the known feasible initial point before launching LHS/BO.  Any
+    # cutoff/data/protocol drift stops the run after this single calculation.
+    warm_start_gate structural
     # The public audit stage below is the sole replicated structural audit.
     # Disable the optimizer's legacy internal audit to avoid duplicate LAMMPS work.
     stability_audit off
     initial_points 76
     batch_size 38
     max_rounds 40
-    coverage archive 96 pool 16384 feasible 0.50 boundary 0.25 uncertainty 0.15 global 0.10
+    # In 3 free dimensions, require at least 8 dispersed strict points spanning
+    # rank 3, 4 genuinely outside near-boundary anchors, and no surrogate fallback.
+    coverage archive 96 pool 16384 feasible 0.50 boundary 0.25 uncertainty 0.15 global 0.10 min_archive 8 min_boundary 4 min_separation 0.001 min_weak_span 0.001 max_fallbacks 0
 end
 
 sample
@@ -145,10 +167,12 @@ al
 end
 
 finalists
-    minimum 10
+    minimum 20
     maximum 20
     window 1.0
-    diverse 1
+    diverse 4
+    # Never hide a thin candidate pool by silently promoting fewer points.
+    require_minimum yes
 end
 
 validate

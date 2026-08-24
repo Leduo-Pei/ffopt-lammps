@@ -7,7 +7,11 @@ import pandas as pd
 import pytest
 
 from workflow.material_candidates import collect_material_candidates
-from workflow.material_pipeline import build_refinement_spec
+from workflow.material_pipeline import (
+    build_refinement_spec,
+    validate_material_stage_outputs,
+)
+from workflow.material_screen import select_static_screen_candidates
 from workflow.pipeline import PipelineRunner
 from workflow.project import Project
 from workflow.state import WorkflowState
@@ -69,7 +73,10 @@ def _material_config() -> dict:
                     "density": {"maximum_relative_error_percent": 1.0},
                     "surface": {"maximum_relative_error_percent": 5.0},
                 },
-                "fit_quality": {"minimum_r2": 0.98},
+                "fit_quality": {
+                    "minimum_r2": 0.98,
+                    "maximum_static_drift_percent": 5.0,
+                },
                 "born_stability": {"required": True},
             },
             "reporting": {"mechanical_tier_percent": 20.0},
@@ -151,9 +158,52 @@ def test_compiled_elasticity_maps_to_generic_refinement_contract():
     ]
     assert spec["stability_column"] == "born_stability_pass"
     assert spec["fit_quality_column"] == "minimum_fit_r2"
+    assert spec["fit_quality_pass_column"] == "fit_quality_pass"
     assert next(
         item for item in spec["structural_constraints"] if item["name"] == "alpha"
     )["mode"] == "absolute"
+
+
+def test_static_screen_uses_strict_core_before_buffer_quota():
+    config = _material_config()
+    rows = []
+    for index in range(8):
+        strict = index < 6
+        rows.append({
+            "parameter_key": f"candidate-{index}",
+            "FeA_epsilon": 1.0 + 0.1 * index,
+            "FeA_sigma": 2.0 + 0.01 * index,
+            "FeB_sigma": 2.4 + 0.01 * index,
+            "success": True,
+            "objective": 10.0 + index if strict else 0.0,
+            "calc_a": 2.86 if strict else 3.10,
+            "calc_b": 2.86 if strict else 3.10,
+            "calc_c": 2.86 if strict else 3.10,
+            "calc_alpha": 90.0,
+            "calc_beta": 90.0,
+            "calc_gamma_ang": 90.0,
+            "calc_density": 7.87 if strict else 8.50,
+            "calc_surf_energy": 2.34,
+        })
+
+    selected = select_static_screen_candidates(
+        pd.DataFrame(rows),
+        config=config,
+        settings={
+            "minimum": 4,
+            "per_dimension": 1,
+            "maximum": 4,
+            "core_fraction": 0.5,
+            "buffer_multiplier": 1.5,
+            "objective_elite_fraction": 0.25,
+        },
+    )
+
+    assert len(selected) == 4
+    assert selected["structural_gate_pass"].all()
+    assert set(selected["screen_region"]) == {"core"}
+    assert set(selected["screen_core_quota"]) == {4}
+    assert set(selected["screen_configured_core_fraction"]) == {0.5}
 
 
 def test_material_pipeline_installs_commands_and_explicit_coverage_sources(
@@ -188,6 +238,9 @@ def test_material_pipeline_installs_commands_and_explicit_coverage_sources(
     assert Path(sample[sample.index("--boundary-source") + 1]) == (
         runner.root / "bo" / "coverage_anchors.csv"
     )
+    assert Path(sample[sample.index("--coverage-summary") + 1]) == (
+        runner.root / "bo" / "coverage_summary.json"
+    )
     assert sample[sample.index("--boundary-fraction") + 1] == "0.2"
     audit = specs["audit"].command
     audit_sources = [
@@ -216,6 +269,7 @@ def test_material_pipeline_installs_commands_and_explicit_coverage_sources(
     assert specs["static"].command[
         specs["static"].command.index("--parameters") + 1
     ] == str(runner.root / "candidates" / "static_screen_candidates.csv")
+    assert "--evaluate-structural-failures" not in specs["static"].command
     for option, expected in (
         ("--available-cores", "8"),
         ("--cores-per-state", "1"),
@@ -572,8 +626,8 @@ def test_terminal_al_rounds_are_traceably_skipped_and_reused(
     # This test isolates terminal-round propagation; manifest corruption and
     # forced rerun behaviour are covered by the material AL end-to-end test.
     monkeypatch.setattr(
-        "workflow.pipeline.validate_material_al_stage_outputs",
-        lambda _path: (True, "fixture manifest accepted"),
+        "workflow.pipeline.validate_material_stage_outputs",
+        lambda *_args, **_kwargs: (True, "fixture manifest accepted"),
     )
     runner = PipelineRunner(project=project, machine="local", run_id="skip")
     assert runner.run() == "completed"
@@ -696,3 +750,159 @@ def test_candidate_collector_does_not_replace_audited_evidence_with_nn_row(
     assert len(observed) == 1
     assert observed.loc[0, "calc_a"] == pytest.approx(2.86)
     assert bool(observed.loc[0, "audit_certified"])
+
+
+def _publish_candidate_stage(tmp_path: Path) -> Path:
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps(_material_config()), encoding="utf-8")
+    source = tmp_path / "source.csv"
+    pd.DataFrame([{
+        "FeA_epsilon": 1.0,
+        "FeA_sigma": 2.0,
+        "FeB_sigma": 3.0,
+        "calc_a": 2.86,
+        "success": True,
+    }]).to_csv(source, index=False)
+    output = tmp_path / "candidates"
+    collect_material_candidates(
+        config_path=config,
+        source_paths=[source],
+        nn_result_path=None,
+        output_dir=output,
+    )
+    return output
+
+
+@pytest.mark.parametrize("damage", ["output_hash", "directory", "manifest"])
+def test_material_stage_manifest_fails_closed_for_damaged_artifacts(
+    tmp_path: Path,
+    damage: str,
+):
+    output = _publish_candidate_stage(tmp_path)
+    artifacts = [
+        output / "candidates.csv",
+        output / "candidate_pool.csv",
+        output / "static_screen_candidates.csv",
+        output / "candidates_summary.json",
+        output / "stage_manifest.json",
+    ]
+    assert validate_material_stage_outputs(
+        output,
+        command_token="candidates",
+        expected_artifacts=artifacts,
+    )[0]
+
+    if damage == "output_hash":
+        artifacts[0].write_text("tampered\n", encoding="utf-8")
+    elif damage == "directory":
+        artifacts[0].unlink()
+        artifacts[0].mkdir()
+    else:
+        artifacts[-1].write_text("{broken", encoding="utf-8")
+
+    valid, reason = validate_material_stage_outputs(
+        output,
+        command_token="candidates",
+        expected_artifacts=artifacts,
+    )
+    assert not valid
+    if damage == "directory":
+        assert "not a regular file" in reason
+    elif damage == "output_hash":
+        assert "hash mismatch" in reason
+    else:
+        assert "invalid JSON manifest" in reason
+
+
+def test_local_material_completion_rejects_invalid_manifest(tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    config = _material_config()
+    monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: config)
+    runner = PipelineRunner(project=project, machine="local", run_id="bad-local")
+    spec = next(item for item in runner.build_specs() if item.name == "candidates")
+    for artifact in spec.artifacts:
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text("not-manifested\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "workflow.pipeline.subprocess.run",
+        lambda *_args, **_kwargs: type("Result", (), {"returncode": 0})(),
+    )
+
+    with WorkflowState(runner.state_path) as state:
+        state.prepare(
+            spec.name, spec.signature, spec.command, spec.output_dir, spec.artifacts
+        )
+        with pytest.raises(RuntimeError, match="invalid material artifacts"):
+            runner._run_local(state, spec)
+        assert state.get(spec.name).status == "failed"
+
+
+def test_slurm_material_completion_rejects_invalid_manifest(tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    config = _material_config()
+    config["machine"]["backend"] = "slurm"
+    config["parallel"]["max_workers"] = 1
+    config["cluster"] = {"bo": {}}
+    monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: config)
+    runner = PipelineRunner(
+        project=project, machine="cluster", run_id="bad-slurm", resume=True
+    )
+    spec = next(item for item in runner.build_specs() if item.name == "candidates")
+    for artifact in spec.artifacts:
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text("not-manifested\n", encoding="utf-8")
+    monkeypatch.setattr(runner, "_slurm_state", lambda _job_id: "COMPLETED")
+
+    with WorkflowState(runner.state_path) as state:
+        state.prepare(
+            spec.name, spec.signature, spec.command, spec.output_dir, spec.artifacts
+        )
+        record = state.transition(spec.name, "waiting", job_id="123")
+        assert runner._refresh_waiting(state, record, spec) == "failed"
+        failed = state.get(spec.name)
+        assert failed.status == "failed"
+        assert "manifest verification failed" in failed.message
+
+
+def test_resume_does_not_reuse_tampered_material_stage(tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    config = _material_config()
+    monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: config)
+    runner = PipelineRunner(
+        project=project, machine="local", run_id="bad-resume", resume=True
+    )
+    spec = next(item for item in runner.build_specs() if item.name == "candidates")
+    config_path = tmp_path / "candidate-config.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    source = tmp_path / "candidate-source.csv"
+    pd.DataFrame([{
+        "FeA_epsilon": 1.0,
+        "FeA_sigma": 2.0,
+        "FeB_sigma": 3.0,
+        "calc_a": 2.86,
+        "success": True,
+    }]).to_csv(source, index=False)
+    collect_material_candidates(
+        config_path=config_path,
+        source_paths=[source],
+        nn_result_path=None,
+        output_dir=spec.output_dir,
+    )
+    with WorkflowState(runner.state_path) as state:
+        state.prepare(
+            spec.name, spec.signature, spec.command, spec.output_dir, spec.artifacts
+        )
+        state.transition(spec.name, "completed")
+
+    (spec.output_dir / "candidates.csv").write_text("tampered\n", encoding="utf-8")
+    rerun: list[str] = []
+
+    def fake_run_local(_state, pending_spec):
+        rerun.append(pending_spec.name)
+
+    monkeypatch.setattr(runner, "_run_local", fake_run_local)
+    with WorkflowState(runner.state_path) as state:
+        assert runner._run_once(state, [spec]) == "completed"
+        assert state.get(spec.name).status == "pending"
+        assert "manifest verification failed" in state.get(spec.name).message.lower()
+    assert rerun == ["candidates"]

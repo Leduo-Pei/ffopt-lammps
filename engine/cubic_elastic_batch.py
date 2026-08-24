@@ -7,7 +7,8 @@ selection policy is deliberately lexicographic:
 
 1. measured structural gates;
 2. cubic Born stability;
-3. minimum fit R2;
+3. protocol-specific fit quality (minimum R2 and, for static data, maximum
+   zero-strain extrapolation drift);
 4. finite minimax error over independent B/Cprime/C44 targets;
 5. relative RMSE;
 6. same-element artificial-type contrast; and
@@ -589,6 +590,20 @@ def summarize_single_elastic_result(
     fit_r2 = float(
         fit_quality.get("minimum_r2", fit_quality.get("minimum_relevant_r2", math.nan))
     )
+    fit_drift = float(
+        fit_quality.get("maximum_zero_strain_extrapolation_drift_percent", math.nan)
+    )
+    protocol = module.get("protocol", {})
+    drift_limit = float(
+        protocol.get("maximum_zero_strain_extrapolation_drift_percent", math.inf)
+        if isinstance(protocol, Mapping)
+        else math.inf
+    )
+    r2_pass = bool(math.isfinite(fit_r2) and fit_r2 >= minimum_r2)
+    drift_pass = bool(
+        not math.isfinite(drift_limit)
+        or (math.isfinite(fit_drift) and fit_drift <= drift_limit)
+    )
     born = bool(summary["born_stability"]["stable"])
     row.update({
         "calculation_status": "completed",
@@ -603,8 +618,10 @@ def summarize_single_elastic_result(
         "E_hill_gpa": diagnostics["E_hill_gpa"],
         "nu_hill": diagnostics["nu_hill"],
         "minimum_fit_r2": fit_r2,
+        "maximum_static_extrapolation_drift_percent": fit_drift,
+        "maximum_static_extrapolation_drift_limit_percent": drift_limit,
         "born_stability_pass": born,
-        "fit_quality_pass": bool(math.isfinite(fit_r2) and fit_r2 >= minimum_r2),
+        "fit_quality_pass": bool(r2_pass and drift_pass),
     })
     values = {
         "B": row["B_gpa"],
@@ -640,8 +657,10 @@ def summarize_single_elastic_result(
         reasons.append("structural_gate")
     if born_required and not born:
         reasons.append("born_stability")
-    if not row["fit_quality_pass"]:
+    if not r2_pass:
         reasons.append(f"fit_r2<{minimum_r2:g}")
+    if not drift_pass:
+        reasons.append(f"static_drift>{drift_limit:g}%")
     if not finite:
         reasons.append("nonfinite_mechanical_score")
     row["finalist_rejection_reason"] = ";".join(reasons)
@@ -670,9 +689,18 @@ def normalize_ranking_contract(frame: pd.DataFrame) -> pd.DataFrame:
     for target, source in aliases.items():
         # Constrained-refinement gate columns are newer, explicit decisions;
         # when both are present they supersede any stale evidence copied from
-        # the structural/static input table.
+        # the structural/static input table.  Concatenated BO/Sample/Audit
+        # frames can contain these alias columns only because another source
+        # declared them, leaving NaN in the current row.  A missing alias is
+        # not a decision and must never erase a freshly recomputed gate.
         if source in normalized:
-            normalized[target] = normalized[source]
+            present = normalized[source].notna()
+            if target not in normalized:
+                normalized[target] = normalized[source]
+            elif bool(present.any()):
+                normalized[target] = normalized[target].where(
+                    ~present, normalized[source]
+                )
     if "finite_mechanical_score" not in normalized:
         maximum = pd.to_numeric(
             normalized.get(
@@ -721,12 +749,13 @@ def rank_elastic_results(frame: pd.DataFrame) -> pd.DataFrame:
     )
     # Fail closed if an upstream table contains an inconsistent eligibility
     # flag.  The auditable gate evidence, rather than that convenience flag,
-    # decides whether a row may enter finalist selection.
+    # decides whether a row may enter finalist selection. ``recorded_eligible``
+    # already applies Born stability only when the input declares it required;
+    # do not silently turn ``born off`` back into a hard gate here.
     recorded_eligible = _truth_series(ranked, "finalist_eligible")
     ranked["finalist_eligible"] = (
         recorded_eligible
         & ranked["structural_gate_pass"]
-        & ranked["born_stability_pass"]
         & ranked["fit_quality_pass"]
         & ranked["finite_mechanical_score"]
     )
@@ -873,11 +902,17 @@ def _protocol_module(config: Mapping[str, Any], protocol: str) -> Mapping[str, A
 def _signed_strains(module: Mapping[str, Any]) -> tuple[float, ...]:
     protocol = module.get("protocol", {})
     magnitudes = sorted({float(value) for value in protocol["strain_magnitudes"]})
-    if len(magnitudes) < 2 or any(
+    minimum = (
+        3
+        if protocol.get("method") == "symmetric_static_stress_zero_limit"
+        else 2
+    )
+    if len(magnitudes) < minimum or any(
         not math.isfinite(value) or value <= 0.0 for value in magnitudes
     ):
         raise CubicElasticBatchError(
-            "elasticity strain_magnitudes need at least two finite positive values"
+            "elasticity strain_magnitudes need at least "
+            f"{minimum} finite positive values for method {protocol.get('method')!r}"
         )
     return tuple([-value for value in reversed(magnitudes)] + magnitudes)
 
@@ -1115,6 +1150,9 @@ def _failed_row(
         "calculation_error": message,
         "born_stability_pass": False,
         "fit_quality_pass": False,
+        "minimum_fit_r2": math.nan,
+        "maximum_static_extrapolation_drift_percent": math.nan,
+        "maximum_static_extrapolation_drift_limit_percent": math.nan,
         "finite_mechanical_score": False,
         "finalist_eligible": False,
         "mechanical_max_error_percent": math.inf,
@@ -1230,6 +1268,7 @@ def _stage_scientific_config(
     protocol: str,
     top_n: int,
     minimum: int,
+    require_minimum: bool,
     near_optimal_window_percent: float,
     diversity_slots: int,
     evaluate_structural_failures: bool,
@@ -1239,10 +1278,22 @@ def _stage_scientific_config(
         "elasticity": config["elasticity"],
         "material": config.get("material", {}),
         "crystal": config.get("crystal", {}),
+        # Keep the force-field protocol self-describing.  The immutable input
+        # config hash already rejects cross-cutoff reuse, while this explicit
+        # subset also makes the scientific hash explain *why* it changed.
+        "lammps_protocol": {
+            key: config.get("lammps", {}).get(key)
+            for key in (
+                "pair_style", "cutoff", "mixing_rule", "shift",
+                "tail_correction",
+            )
+            if key in config.get("lammps", {})
+        },
         "parameter_space": build_parameter_space(dict(config)),
         "finalist_selection": {
             "top_n": top_n,
             "minimum": minimum,
+            "require_minimum": bool(require_minimum),
             "near_optimal_window_percent": near_optimal_window_percent,
             "diversity_slots": diversity_slots,
         },
@@ -1318,7 +1369,10 @@ def _best_candidate_document(
         return {
             "schema_version": 1,
             "status": "zero_hard_gate_eligible",
-            "message": "No candidate passed structure, Born, R2, and finite-score gates.",
+            "message": (
+                "No candidate passed structure, Born, protocol fit-quality, "
+                "and finite-score gates."
+            ),
         }
     row = eligible.iloc[0]
     within = bool(row["within_quality_tier"])
@@ -1335,7 +1389,8 @@ def _best_candidate_document(
             "within_quality_tier": within,
             "best_effort": not within,
             "selection_rule": (
-                "structure -> Born -> R2 gates; then M_infinity -> RMSE -> "
+                "structure -> Born -> protocol fit-quality gates; then "
+                "M_infinity -> RMSE -> "
                 "same-element contrast -> structural margin"
             ),
         },
@@ -1353,6 +1408,7 @@ def run_elasticity_batch(
     near_optimal_window_percent: float = 5.0,
     diversity_slots: int = 2,
     minimum: int = 1,
+    require_minimum: bool = False,
     evaluate_structural_failures: bool = False,
     backend_factory: BackendFactory = default_backend_factory,
 ) -> pd.DataFrame:
@@ -1369,11 +1425,13 @@ def run_elasticity_batch(
     module = _protocol_module(config, canonical_protocol)
     parameter_space = build_parameter_space(config)
     candidates = load_candidates(parameter_source, parameter_space)
+    input_candidate_count = len(candidates)
     scientific = _stage_scientific_config(
         config,
         protocol=canonical_protocol,
         top_n=top_n,
         minimum=minimum,
+        require_minimum=require_minimum,
         near_optimal_window_percent=near_optimal_window_percent,
         diversity_slots=diversity_slots,
         evaluate_structural_failures=evaluate_structural_failures,
@@ -1410,6 +1468,26 @@ def run_elasticity_batch(
             diversity_slots=diversity_slots,
             minimum=minimum,
         )
+        if require_minimum and len(selected_input) < minimum:
+            outputs = _output_paths(destination, canonical_protocol)
+            _write_frame(outputs["finalists"], selected_input)
+            _write_json(
+                outputs["batch_summary"],
+                {
+                    "schema_version": 1,
+                    "protocol": canonical_protocol,
+                    "status": "insufficient_eligible_finalists",
+                    "input_candidates": input_candidate_count,
+                    "required_finalists": int(minimum),
+                    "selected_finalists": len(selected_input),
+                    "launched_lammps_work_units": 0,
+                },
+            )
+            raise CubicElasticBatchError(
+                "insufficient_eligible_finalists: dynamic promotion requires "
+                f"at least {minimum} unique hard-gate candidates, but only "
+                f"{len(selected_input)} are eligible; no LAMMPS work was launched"
+            )
         selected_keys = set(selected_input["parameter_key"].astype(str))
         candidates = [item for item in candidates if item.parameter_key in selected_keys]
 
@@ -1576,7 +1654,7 @@ def run_elasticity_batch(
     summary_document = {
         "schema_version": 1,
         "protocol": canonical_protocol,
-        "input_candidates": len(candidates),
+        "input_candidates": input_candidate_count,
         "completed_work_units": len(completed),
         "failed_work_units": incomplete_failures,
         "hard_gate_eligible": int(
@@ -1586,6 +1664,8 @@ def run_elasticity_batch(
             ranked["within_quality_tier"].sum() if "within_quality_tier" in ranked else 0
         ),
         "selected_finalists": len(finalists),
+        "required_finalists": int(minimum),
+        "require_minimum": bool(require_minimum),
         "scientific_outcome": (
             "incomplete_failures" if incomplete_failures else best["status"]
         ),
@@ -1658,6 +1738,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--omp-threads-per-state", type=int, default=1)
     parser.add_argument("--top-n", type=int, default=20)
     parser.add_argument("--minimum", type=int, default=1)
+    parser.add_argument(
+        "--require-minimum",
+        action="store_true",
+        help="Fail before launching LAMMPS when fewer than --minimum candidates pass",
+    )
     parser.add_argument("--near-optimal-window-percent", type=float, default=5.0)
     parser.add_argument("--diversity-slots", type=int, default=2)
     parser.add_argument(
@@ -1688,6 +1773,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         resources=resources,
         top_n=arguments.top_n,
         minimum=arguments.minimum,
+        require_minimum=arguments.require_minimum,
         near_optimal_window_percent=arguments.near_optimal_window_percent,
         diversity_slots=arguments.diversity_slots,
         evaluate_structural_failures=arguments.evaluate_structural_failures,

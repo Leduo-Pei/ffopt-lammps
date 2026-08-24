@@ -10,7 +10,7 @@ import pytest
 from engine.cubic_elastic_batch import plan_nested_resources
 from engine.lammps_interface import EvalResult
 from engine.material_results_report import write_top_parameters_report
-from engine.material_validation import run_material_validation
+from engine.material_validation import MaterialValidationError, run_material_validation
 from engine.parameter_space import build_parameter_space
 from workflow.artifact_manifest import canonical_parameter_key
 
@@ -216,6 +216,7 @@ class FakeElasticBatch:
         self.mechanical_error = mechanical_error
         self.structural_pass = structural_pass
         self.dynamic_seeds = None
+        self.dynamic_protocol = None
 
     def __call__(self, **kwargs):
         protocol = kwargs["protocol"]
@@ -224,9 +225,10 @@ class FakeElasticBatch:
             runtime_config = json.loads(
                 Path(kwargs["config_path"]).read_text(encoding="utf-8")
             )
-            self.dynamic_seeds = runtime_config["elasticity"]["modules"][
+            self.dynamic_protocol = runtime_config["elasticity"]["modules"][
                 "dynamic"
-            ]["protocol"]["seeds"]
+            ]["protocol"]
+            self.dynamic_seeds = self.dynamic_protocol["seeds"]
         output.mkdir(parents=True, exist_ok=True)
         result_name = "static_results.csv" if protocol == "static" else "dynamic_results.csv"
         result_path = output / result_name
@@ -295,12 +297,18 @@ def _run_validation(
     mechanical_error=25.0,
     include_top=False,
     validation_seeds=None,
+    validation_protocol=None,
 ):
     config_path, config = _config(tmp_path)
     if validation_seeds is not None:
         config["elasticity"]["modules"]["dynamic"]["validation_protocol"] = {
             "seeds": list(validation_seeds)
         }
+        config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    if validation_protocol is not None:
+        config["elasticity"]["modules"]["dynamic"]["validation_protocol"] = dict(
+            validation_protocol
+        )
         config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
     parameter_path = tmp_path / "best_candidate.json"
     parameter_path.write_text(
@@ -442,7 +450,7 @@ def test_validation_releases_structural_pool_before_elastic_batches(tmp_path):
     assert reuse_runner.scheduler_pool is None
 
 
-def test_validation_releases_structural_pool_when_structure_fails(tmp_path):
+def test_transient_structure_failure_releases_pool_and_resumes_successfully(tmp_path):
     config_path, config = _config(tmp_path)
     parameter_path = tmp_path / "best_candidate.json"
     parameter_path.write_text(
@@ -462,35 +470,75 @@ def test_validation_releases_structural_pool_when_structure_fails(tmp_path):
         raise RuntimeError("structural failure")
 
     runner.evaluate_batch = fail_structure
-    batch = FakeElasticBatch(
-        calls=runner.calls,
-        mechanical_error=10.0,
-        structural_pass=False,
+
+    output = tmp_path / "failed_validation"
+    resources = plan_nested_resources(
+        available_cores=4,
+        cores_per_state=2,
+        candidate_workers=1,
+        state_workers=2,
     )
 
-    def assert_released_then_run_elastic(**kwargs):
-        assert scheduler_pool.closed
-        assert runner.scheduler_pool is None
-        return batch(**kwargs)
+    def forbidden_elastic(**_kwargs):
+        raise AssertionError("transient structure failure must not publish elastic input")
 
-    summary = run_material_validation(
-        config_path=config_path,
-        parameters_path=parameter_path,
-        output_dir=tmp_path / "failed_validation",
-        resources=plan_nested_resources(
-            available_cores=4,
-            cores_per_state=2,
-            candidate_workers=1,
-            state_workers=2,
-        ),
-        runner_factory=lambda _config: runner,
-        elastic_batch_runner=assert_released_then_run_elastic,
-        elastic_backend_factory=lambda **_kwargs: None,
-    )
+    with pytest.raises(MaterialValidationError, match="next run will retry"):
+        run_material_validation(
+            config_path=config_path,
+            parameters_path=parameter_path,
+            output_dir=output,
+            resources=resources,
+            runner_factory=lambda _config: runner,
+            elastic_batch_runner=forbidden_elastic,
+            elastic_backend_factory=lambda **_kwargs: None,
+        )
 
     assert scheduler_pool.closed
     assert runner.scheduler_pool is None
-    assert summary["status"] == "rejected"
+    assert not (output / "elastic_candidate.csv").exists()
+    assert not (output / "elasticity_static").exists()
+
+    # Reproduce the exact stale bridge left by releases that continued after
+    # the failed structural attempt.  The retry must preserve it in a recovery
+    # archive instead of allowing the immutable CSV to block valid progress.
+    stale = {"parameter_key": canonical_parameter_key(_parameters(config))}
+    stale.update(_parameters(config))
+    pd.DataFrame([stale]).to_csv(output / "elastic_candidate.csv", index=False)
+    stale_static = output / "elasticity_static"
+    stale_static.mkdir()
+    (stale_static / "legacy_partial.txt").write_text("partial\n", encoding="ascii")
+
+    resumed_runner = FakeValidationRunner(
+        config,
+        calls=runner.calls,
+        input_file=fake_input,
+    )
+    resumed_batch = FakeElasticBatch(
+        calls=runner.calls,
+        mechanical_error=10.0,
+        structural_pass=True,
+    )
+    summary = run_material_validation(
+        config_path=config_path,
+        parameters_path=parameter_path,
+        output_dir=output,
+        resources=resources,
+        runner_factory=lambda _config: resumed_runner,
+        elastic_batch_runner=resumed_batch,
+        elastic_backend_factory=lambda **_kwargs: None,
+    )
+
+    assert summary["status"] == "accepted"
+    assert summary["execution_complete"] is True
+    assert runner.calls == {"structure": 1, "static": 1, "dynamic": 1}
+    recovered = output / "_incomplete_structure_attempts" / "attempt_0001"
+    assert (recovered / "structure" / "structure_result.json").is_file()
+    assert (recovered / "elastic_candidate.csv").is_file()
+    assert (recovered / "elasticity_static" / "legacy_partial.txt").is_file()
+    recovery = json.loads((recovered / "recovery.json").read_text())
+    assert recovery["reason"] == (
+        "legacy_failed_structure_published_downstream_artifacts"
+    )
 
 
 def test_mechanical_tier_excess_is_manifested_best_effort_and_resumes(tmp_path):
@@ -568,6 +616,25 @@ def test_final_validation_uses_explicit_holdout_dynamic_seeds(tmp_path):
     assert batch.dynamic_seeds == [404, 505, 606]
 
 
+def test_final_validation_applies_complete_long_dynamic_protocol(tmp_path):
+    long_protocol = {
+        "strain_magnitudes": [0.001, 0.003],
+        "equilibration_steps": 200000,
+        "nvt_equilibration_steps": 50000,
+        "production_steps": 500000,
+        "seeds": [404, 505, 606],
+    }
+    _summary, _output, _calls, *_prefix, batch, _static, _dynamic = _run_validation(
+        tmp_path,
+        mechanical_error=10.0,
+        validation_protocol=long_protocol,
+    )
+
+    assert batch.dynamic_protocol is not None
+    for key, value in long_protocol.items():
+        assert batch.dynamic_protocol[key] == value
+
+
 def test_structural_failure_is_rejected_but_static_evidence_is_still_run(tmp_path):
     summary, output, calls, *_rest = _run_validation(
         tmp_path, fail_structure=True, mechanical_error=5.0
@@ -589,7 +656,10 @@ def test_zero_eligible_finalists_publish_rejected_terminal_bundle_and_resume(tmp
     outcome.write_text(json.dumps({
         "schema_version": 1,
         "status": "zero_hard_gate_eligible",
-        "message": "No candidate passed structure, Born, R2, and finite-score gates.",
+        "message": (
+            "No candidate passed structure, Born, protocol fit-quality, "
+            "and finite-score gates."
+        ),
     }), encoding="utf-8")
     static_ranking = tmp_path / "static.csv"
     dynamic_ranking = tmp_path / "dynamic.csv"

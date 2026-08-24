@@ -6,6 +6,117 @@ expectations while the public API remains in alpha.
 
 ## Unreleased
 
+## 0.3.0a8 - 2026-08-24
+
+### Changed
+
+- Apply the declared structure/surface hard gate before the initial static
+  elastic screen. Candidates outside that gate remain explicit skipped
+  evidence and no longer launch unnecessary 0 K strain calculations; exact
+  constrained-AL promotions retain their existing retryable-failure contract.
+- Fill the bounded initial static design from every available strict-core
+  candidate before retaining relaxed/global shortfall rows. A historical
+  `core_fraction` below one can no longer displace hard-gate-eligible
+  mechanical labels with rows that the elastic batch must skip.
+
+### Fixed
+
+- Preserve freshly recomputed structural, Born, fit-quality, and eligibility
+  decisions when mixed BO/Sample/Audit tables contain a refinement alias
+  column that is null for the current row. Previously, a null
+  `structural_feasible` value could overwrite a valid hard-gate pass after an
+  otherwise successful static calculation and collapse a multi-point eligible
+  set to the warm-start row alone.
+
+## 0.3.0a7 - 2026-08-24
+
+### Changed
+
+- Qualify structural-coverage BO on two independent axes: surrogate-guidance
+  integrity and measured feasible-region evidence.  The summary now records
+  unique fallback rounds, the model component and actual fallback used,
+  normalized feasible-archive affine rank, and genuine outside-boundary anchor
+  counts.  Material sampling accepts complete coverage canonically, labels thin
+  but non-empty evidence as recovery-only, and stops before compute when no
+  strict feasible seed exists.
+- Require canonical multi-center evidence to be meaningfully dispersed as well
+  as full rank. The first dimension-aware maximin subset must pass normalized
+  pair-separation and weakest-direction RMS-span gates; almost coincident point
+  clouds remain explicitly recovery-only.
+- Expose concise `coverage min_archive`, `min_anchors`, and `max_fallbacks`
+  controls in `ffopt.in`, with dimension-aware defaults.  Sampling provenance
+  pins the coverage summary alongside the feasible and boundary source files.
+
+### Fixed
+
+- Copy capped coverage-GP objective arrays before replacing non-finite values.
+  This restores model-guided acquisition beyond 512 observations under
+  Pandas copy-on-write instead of silently degrading later BO rounds to
+  novelty selection.
+- Preserve the surviving model signal when only one coverage surrogate fails:
+  the objective GP can replace a failed feasibility classifier, while a valid
+  classifier remains authoritative when only the objective GP fails.
+- Parse immutable `.json` runtime configurations as strict JSON, rejecting
+  duplicate keys, non-finite or overflowing numbers, and YAML-only syntax.
+  Legacy YAML remains supported and cross-format includes use each file's own
+  parser, eliminating numeric-type drift between pipeline provenance and BO
+  checkpoint identity.
+- Bind direct material sampling to the exact coverage summary and hashed
+  feasible/boundary CSV artifacts. Boundary quota now uses only measured
+  outside anchors: a farther point is labelled recovery-only, while a campaign
+  with no outside evidence reallocates that quota to global exploration instead
+  of oversampling the feasible interior.
+
+## 0.3.0a6 - 2026-08-22
+
+### Fixed
+
+- Make symmetric three-mode stress--strain slopes the canonical 0 K cubic
+  elasticity estimator.  The former energy-curvature estimator is invalid for
+  an unshifted hard-cutoff `lj/cut` potential when a neighbour shell crosses
+  the cutoff; it is now retained only as a labelled consistency diagnostic and
+  can neither train the surrogate nor rank candidates.
+- Record the full zero-pressure reference stress tensor and triclinic box
+  geometry in every static candidate, and retain per-strain pressures with
+  explicit units.  Static fit quality now comes from the same stress response
+  that supplies `B`, `Cprime`, and `C44`.
+- Split `static_strain` from `dynamic_strain`. Static central differences use
+  the two smallest magnitudes to extrapolate `M(h)=M0+q*h^2` to zero strain;
+  outer magnitudes audit window drift, while finite-temperature strains remain
+  large enough to resolve the signal above trajectory noise. The legacy
+  `strain` spelling remains a mutually exclusive compatibility alias.
+- Add the public `static_drift VALUE percent` hard eligibility gate (5% by
+  default). It rejects a static candidate when any canonical zero-strain
+  modulus is too sensitive to the outer-shell/full-window extrapolation audit,
+  even when the raw stress fit passes its R2 threshold.
+- Close the downstream qualification chain: constrained refinement now
+  requires the recorded protocol-specific `fit_quality_pass` flag in addition
+  to its scalar R2 check, and Top-N evidence reports retain the measured static
+  drift and configured limit.
+
+## 0.3.0a5 - 2026-08-22
+
+### Changed
+
+- Require one explicit global `cutoff VALUE A` in the `parameters` block and
+  lock that value across every fitted and validation property. No workflow may
+  fall back to a hidden cutoff; elemental BCC inputs additionally require
+  `cutoff >= 2.5 * sigma_max`, where `sigma_max` is the largest declared sigma
+  optimization bound. Periodic BCC cells also require
+  `cutoff <= 0.45 * h_min` after replication, using triclinic-safe face
+  heights; generated includes explicitly lock `shift no` and `tail no`.
+- Separate the inexpensive multi-seed 300 K finalist promotion protocol from
+  the independent long-trajectory validation protocol for the promoted winner,
+  and record both protocols in the scientific identity.
+- Make the production Fe workflow require a hard floor of 20 structurally and
+  mechanically eligible finalists. If fewer than 20 survive, promotion stops
+  before launching any finite-temperature LAMMPS work instead of silently
+  evaluating a smaller set.
+- Evaluate the declared BO centre once as a structural warm-start gate before
+  launching LHS candidates, retaining the successful result as exact evidence
+  and stopping cheaply when the data/cutoff/protocol no longer reproduces the
+  known feasible baseline.
+
 ### Fixed
 
 - Select the nested single-node MPI launcher dialect explicitly and fail on
@@ -21,6 +132,23 @@ expectations while the public API remains in alpha.
 - Separate local-workstation and SLURM instructions in generated projects,
   clarify that `local` bypasses the scheduler, and identify `--partition` as a
   site-specific SLURM partition rather than a node name.
+- Fingerprint the bytes, size, resolved path, and role of every LAMMPS data
+  input. A coordinate-only edit at the same path now changes the pipeline
+  scientific identity and cannot reuse old stage evidence.
+- Bind every BO checkpoint to the exact pipeline-stage signature, scientific
+  configuration, optimization policy, resolved BO method, and ordered parameter
+  space. Explicit and automatic resume both reject legacy or incompatible
+  `train_X`/`train_Y` before loading them.
+- Treat an unsuccessful structural-validation execution as retryable rather
+  than publishing an elastic candidate from incomplete properties. Downstream
+  artifacts left by affected prereleases are moved into a recoverable attempt
+  archive before the retry.
+- Verify manifest identity, regular-file type, declared outputs, and SHA-256 for
+  every material-stage completion or reuse path, including local execution,
+  SLURM completion, resume, and `--from-stage` upstream checks.
+- Honor `born off` during elastic ranking and reject a `finalists` workflow at
+  input-validation time unless its dynamic elasticity module has the required
+  `promotion` role.
 
 ## 0.3.0a4 - 2026-08-21
 

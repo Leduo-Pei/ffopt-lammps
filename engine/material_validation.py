@@ -390,6 +390,89 @@ def _candidate_csv(
     _write_immutable_bytes(path, content)
 
 
+def _archive_failed_structure_dependents(
+    *,
+    destination: Path,
+    structure_dir: Path,
+    candidate_csv: Path,
+    static_dir: Path,
+    dynamic_dir: Path,
+    final_outputs: Mapping[str, Path],
+    final_manifest: Path,
+) -> Path | None:
+    """Quarantine downstream files published by a legacy failed attempt.
+
+    A structural calculation that did not complete has no stage manifest and
+    is retryable.  Older releases nevertheless continued into the elastic
+    batches and published ``elastic_candidate.csv`` from the incomplete
+    property mapping.  A later successful structural retry then correctly
+    disagreed with that immutable CSV and could not resume.
+
+    Only the unambiguous legacy state is recoverable here: a failed structure
+    result, no structure manifest, no final manifest, and at least one derived
+    downstream artifact.  Completed or inconsistent states still fail closed.
+    The old evidence is moved, never deleted.
+    """
+
+    structure_result = structure_dir / "structure_result.json"
+    structure_manifest = structure_dir / "stage_manifest.json"
+    if final_manifest.exists() or structure_manifest.exists() or not structure_result.is_file():
+        return None
+    try:
+        document = json.loads(structure_result.read_text(encoding="ascii"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise MaterialValidationArtifactError(
+            "unmanifested structural validation result is unreadable; "
+            f"refusing automatic recovery: {structure_result}: {exc}"
+        ) from exc
+    if not isinstance(document, Mapping):
+        raise MaterialValidationArtifactError(
+            "unmanifested structural validation result is not a JSON object; "
+            f"refusing automatic recovery: {structure_result}"
+        )
+    if _truth(document.get("success", False)):
+        return None
+
+    derived: list[tuple[str, Path]] = [
+        ("elastic_candidate.csv", candidate_csv),
+        ("elasticity_static", static_dir),
+        ("elasticity_dynamic", dynamic_dir),
+        *(
+            (f"final_{name}", path)
+            for name, path in sorted(final_outputs.items())
+        ),
+    ]
+    if not any(path.exists() for _name, path in derived):
+        return None
+
+    archive_root = destination / "_incomplete_structure_attempts"
+    archive_root.mkdir(parents=True, exist_ok=True)
+    attempt_number = 1
+    while (archive_root / f"attempt_{attempt_number:04d}").exists():
+        attempt_number += 1
+    attempt = archive_root / f"attempt_{attempt_number:04d}"
+    attempt.mkdir()
+
+    moved: list[dict[str, str]] = []
+    entries = [("structure", structure_dir), *derived]
+    seen: set[Path] = set()
+    for name, source in entries:
+        source = source.resolve()
+        if source in seen or not source.exists():
+            continue
+        seen.add(source)
+        target = attempt / name
+        os.replace(source, target)
+        moved.append({"source": str(source), "archived": str(target.resolve())})
+    _write_json(attempt / "recovery.json", {
+        "schema_version": 1,
+        "reason": "legacy_failed_structure_published_downstream_artifacts",
+        "structure_error": str(document.get("error", "")),
+        "moved": moved,
+    })
+    return attempt
+
+
 def _dynamic_required(config: Mapping[str, Any]) -> bool:
     elasticity = config.get("elasticity", {})
     modules = elasticity.get("modules", {}) if isinstance(elasticity, Mapping) else {}
@@ -1079,6 +1162,22 @@ def run_material_validation(
     structure_dir = destination / "candidate_runs" / candidate.digest / "final_validation" / "structure"
     candidate_csv = destination / "elastic_candidate.csv"
 
+    recovered_attempt = _archive_failed_structure_dependents(
+        destination=destination,
+        structure_dir=structure_dir,
+        candidate_csv=candidate_csv,
+        static_dir=static_dir,
+        dynamic_dir=dynamic_dir,
+        final_outputs=final_outputs,
+        final_manifest=final_manifest,
+    )
+    if recovered_attempt is not None:
+        print(
+            "Archived downstream artifacts from an incomplete structural "
+            f"attempt: {recovered_attempt}",
+            flush=True,
+        )
+
     def final_inputs() -> dict[str, Path]:
         inputs = {
             "compiled_config": config_source,
@@ -1147,6 +1246,14 @@ def run_material_validation(
         )
     finally:
         _release_structural_scheduler_pool(runner)
+    if not _truth(structural_result.get("success", False)):
+        detail = str(structural_result.get("error", "")).strip()
+        suffix = f": {detail}" if detail else ""
+        raise MaterialValidationError(
+            "structural/surface validation did not complete successfully; "
+            "no elastic candidate was published and the next run will retry"
+            f"{suffix}"
+        )
     structural_gate = assess_structural_gates(
         structural_result.get("properties", {}), config
     )

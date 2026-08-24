@@ -2,10 +2,10 @@
 
 The structural campaign may contain thousands of exact BO/sample/audit rows.
 Static elasticity is deliberately calculated only for a bounded design whose
-size scales with the free-parameter dimension.  Selection preserves objective
-elites and fills the remaining quota by maximin distance, while recording
-whether every row came from the strict structural core, the relaxed buffer, or
-the global safeguard.
+size scales with the free-parameter dimension.  Every available strict-core
+row is preferred up to that bound; relaxed-buffer and global rows only document
+a shortfall and are skipped by the elastic batch. Selection preserves strict
+objective elites and fills by maximin distance while recording every role.
 """
 
 from __future__ import annotations
@@ -124,9 +124,8 @@ def select_static_screen_candidates(
     per_dimension = int(settings.get("per_dimension", 160))
     maximum = int(settings.get("maximum", 1200))
     target = min(len(selected_frame), maximum, max(minimum, dimensions * per_dimension))
-    core_fraction = float(settings.get("core_fraction", 0.75))
+    configured_core_fraction = float(settings.get("core_fraction", 0.75))
     elite_fraction = float(settings.get("objective_elite_fraction", 0.10))
-    core_quota = min(target, int(round(target * core_fraction)))
     elite_count = min(target, int(math.ceil(target * elite_fraction)))
 
     objective = _objective(selected_frame)
@@ -138,22 +137,25 @@ def select_static_screen_candidates(
     coordinates = _normalised_coordinates(selected_frame, parameter_space)
     selected: list[int] = []
     roles: dict[int, str] = {}
+    core_indices = np.flatnonzero(strict).tolist()
+    # The historical core_fraction setting is a lower-bound design hint, not
+    # permission to spend static-mechanics capacity outside the declared hard
+    # gate.  Use every available strict row up to the bounded target.  Only
+    # when strict evidence is genuinely thin may buffer/global rows fill the
+    # published design, where the batch records them as skipped evidence.
+    core_quota = min(target, len(core_indices))
 
-    # Objective elites are never lost to geometric thinning. Prefer strict
-    # core rows, then the relaxed buffer, then the global safeguard.
+    # Objective elites are never lost to geometric thinning, but an excellent
+    # structural objective outside the hard gate cannot displace an eligible
+    # static-mechanics candidate.
     elite_order = sorted(
-        range(len(selected_frame)),
-        key=lambda index: (
-            0 if strict[index] else 1 if buffer[index] else 2,
-            float(objective[index]),
-            keys[index],
-        ),
-    )[:elite_count]
+        core_indices,
+        key=lambda index: (float(objective[index]), keys[index]),
+    )[:min(elite_count, core_quota)]
     selected.extend(elite_order)
     roles.update({index: "objective_elite" for index in elite_order})
 
-    core_indices = np.flatnonzero(strict).tolist()
-    needed_core = max(0, core_quota - sum(strict[index] for index in selected))
+    needed_core = max(0, core_quota - len(selected))
     chosen = _maximin_fill(
         candidates=core_indices,
         count=needed_core,
@@ -190,6 +192,7 @@ def select_static_screen_candidates(
     )
     result["screen_target_count"] = target
     result["screen_core_quota"] = core_quota
+    result["screen_configured_core_fraction"] = configured_core_fraction
     result["screen_buffer_multiplier"] = buffer_multiplier
     return result
 

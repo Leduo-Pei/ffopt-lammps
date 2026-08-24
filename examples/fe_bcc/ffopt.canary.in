@@ -14,6 +14,7 @@ workflow bo sample audit screen nn al finalists validate
 parameters
     range epsilon absolute 5.5 6.5
     range sigma   absolute 1.8 2.8
+    cutoff 8.0 A
     mixing default
     tie epsilon all
     difference sigma Fe_corner Fe_body max 0.75 A
@@ -27,7 +28,7 @@ end
 property bulk
     data data/Fe_a_2type_555.data
     cells_in_data 5 5 5
-    replicate 1 1 1
+    replicate 2 2 2
     temperature 300 K
     pressure 1 atm
     tdamp 100 fs
@@ -48,7 +49,7 @@ property surface
     complete data/Fe_a_2type_555_complete.data
     split    data/Fe_a_2type_555_split.data
     facet 110
-    replicate 1 1 1
+    replicate 2 1 1
     target 2.340 J/m2 weight 1.0 tolerance 1.170
 end
 
@@ -73,10 +74,12 @@ property elasticity
     gate surface 50 percent
     born off
     r2 0.01
+    static_drift 20 percent
     tier 100 percent
 
-    strain 0.004 0.008
-    replicate 1 1 1
+    static_strain 0.0005 0.001 0.002
+    dynamic_strain 0.004 0.008
+    replicate 2 2 2
     temperature 300 K
     timestep 1 fs
     equilibration 1000
@@ -88,6 +91,7 @@ end
 bo
     method auto
     objective feasible_coverage
+    warm_start_gate structural
     stability_audit off
     initial_points 4
     batch_size 2

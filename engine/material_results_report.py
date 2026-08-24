@@ -35,6 +35,8 @@ _EVIDENCE_COLUMNS = (
     "mechanical_rmse_percent",
     "structural_margin",
     "minimum_fit_r2",
+    "maximum_static_extrapolation_drift_percent",
+    "maximum_static_extrapolation_drift_limit_percent",
     "same_element_parameter_contrast",
     "structural_gate_pass",
     "born_stability_pass",

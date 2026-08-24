@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import sys
 
 import pandas as pd
@@ -11,6 +12,7 @@ import engine.stability_audit as stability_audit
 from engine.local_sampling import (
     completed_candidate_ids,
     generate_design,
+    read_coverage_quality,
     read_candidate_source,
     sampling_allocation,
 )
@@ -21,6 +23,118 @@ class _FeasibleRunner:
     @staticmethod
     def feasibility_error(_parameters: dict[str, float]) -> None:
         return None
+
+
+def test_sampling_coverage_gate_distinguishes_recovery_and_insufficient(tmp_path):
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text(json.dumps({
+        "schema": "ffopt-structural-coverage-summary-v1",
+        "counts": {"feasible_archive": 2},
+    }), encoding="utf-8")
+    assert read_coverage_quality(legacy) == {
+        "path": str(legacy.resolve()),
+        "schema": "ffopt-structural-coverage-summary-v1",
+        "status": "recovery_required",
+        "feasible_archive": 2,
+        "coverage_anchors": None,
+        "artifacts": None,
+    }
+
+    current = tmp_path / "current.json"
+    current.write_text(json.dumps({
+        "schema": "ffopt-structural-coverage-summary-v2",
+        "counts": {"feasible_archive": 0, "coverage_anchors": 0},
+        "coverage_quality": {
+            "status": "insufficient",
+            "model_guidance": "healthy",
+            "coverage_evidence": "insufficient",
+        },
+    }), encoding="utf-8")
+    with pytest.raises(ValueError, match="no strict feasible seed"):
+        read_coverage_quality(current)
+
+
+def _write_coverage_summary(
+    path: Path,
+    source: Path,
+    boundary: Path,
+    *,
+    status: str = "canonical_usable",
+    guidance: str = "healthy",
+    evidence: str = "complete",
+) -> None:
+    def artifact(candidate: Path) -> dict[str, object]:
+        identity = local_sampling.file_identity(candidate)
+        return {
+            "name": candidate.name,
+            "sha256": identity["sha256"],
+            "size_bytes": identity["size_bytes"],
+        }
+
+    path.write_text(json.dumps({
+        "schema": "ffopt-structural-coverage-summary-v2",
+        "counts": {
+            "feasible_archive": len(pd.read_csv(source)),
+            "coverage_anchors": len(pd.read_csv(boundary)),
+        },
+        "coverage_quality": {
+            "status": status,
+            "model_guidance": guidance,
+            "coverage_evidence": evidence,
+        },
+        "files": {
+            "feasible_archive": artifact(source),
+            "coverage_anchors": artifact(boundary),
+        },
+    }), encoding="utf-8")
+
+
+def test_v2_coverage_quality_rejects_inconsistent_state(tmp_path):
+    path = tmp_path / "inconsistent.json"
+    path.write_text(json.dumps({
+        "schema": "ffopt-structural-coverage-summary-v2",
+        "counts": {"feasible_archive": 2, "coverage_anchors": 2},
+        "coverage_quality": {
+            "status": "canonical_usable",
+            "model_guidance": "failed",
+            "coverage_evidence": "complete",
+        },
+    }), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="inconsistent quality states"):
+        read_coverage_quality(path)
+
+
+def test_coverage_source_verification_checks_count_and_hash(tmp_path):
+    source = tmp_path / "feasible.csv"
+    boundary = tmp_path / "boundary.csv"
+    _source([(0.2, 0.2, 0.01), (0.8, 0.8, 0.02)]).to_csv(
+        source, index=False
+    )
+    _source([(0.1, 0.5, 0.03)]).to_csv(boundary, index=False)
+    summary = tmp_path / "coverage_summary.json"
+    _write_coverage_summary(summary, source, boundary)
+    quality = read_coverage_quality(summary)
+    assert quality is not None
+
+    with pytest.raises(ValueError, match="row count mismatch"):
+        local_sampling.verify_coverage_source(
+            quality,
+            role="feasible_archive",
+            path=source,
+            row_count=1,
+        )
+
+    changed = pd.read_csv(source)
+    changed.loc[0, "objective"] = 0.009
+    changed.to_csv(source, index=False)
+    with pytest.raises(ValueError, match="summary artifact identity"):
+        local_sampling.verify_coverage_source(
+            quality,
+            role="feasible_archive",
+            path=source,
+            row_count=2,
+        )
 
 
 def _source(rows: list[tuple[float, float, float]]) -> pd.DataFrame:
@@ -99,8 +213,8 @@ def test_missing_boundary_centers_are_explicitly_reallocated() -> None:
         boundary_fraction=0.30,
     )
     assert design["sampling_mode"].value_counts().to_dict() == {
-        "local_elite": 8,
-        "global_sobol": 2,
+        "local_elite": 5,
+        "global_sobol": 5,
     }
 
 
@@ -169,6 +283,79 @@ def _patch_design_only_runtime(monkeypatch, module) -> None:
     )
 
 
+def test_boundary_sampling_requires_coverage_summary(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _patch_design_only_runtime(monkeypatch, local_sampling)
+    config = tmp_path / "runtime.json"
+    config.write_text("{}", encoding="utf-8")
+    source = tmp_path / "feasible.csv"
+    boundary = tmp_path / "boundary.csv"
+    _source([(0.25, 0.25, 0.01)]).to_csv(source, index=False)
+    _source([(0.05, 0.5, 0.03)]).to_csv(boundary, index=False)
+    monkeypatch.setattr(sys, "argv", [
+        "local_sampling",
+        "--config", str(config),
+        "--source", str(source),
+        "--boundary-source", str(boundary),
+        "--output-dir", str(tmp_path / "sample"),
+        "--design-only",
+    ])
+
+    with pytest.raises(ValueError, match="coverage-summary is required"):
+        local_sampling.main()
+    assert not (tmp_path / "sample").exists()
+
+
+def test_strict_only_anchors_reallocate_boundary_quota_to_global(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _patch_design_only_runtime(monkeypatch, local_sampling)
+    config = tmp_path / "runtime.json"
+    config.write_text("{}", encoding="utf-8")
+    source = tmp_path / "feasible.csv"
+    boundary = tmp_path / "boundary.csv"
+    output = tmp_path / "sample"
+    _source([(0.25, 0.25, 0.01), (0.75, 0.75, 0.02)]).to_csv(
+        source, index=False
+    )
+    boundary_frame = _source([(0.25, 0.25, 0.01), (0.75, 0.75, 0.02)])
+    boundary_frame["anchor_class"] = "strict_feasible"
+    boundary_frame.to_csv(boundary, index=False)
+    coverage = tmp_path / "coverage_summary.json"
+    _write_coverage_summary(
+        coverage,
+        source,
+        boundary,
+        status="recovery_required",
+        evidence="recovery_eligible",
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "local_sampling",
+        "--config", str(config),
+        "--source", str(source),
+        "--boundary-source", str(boundary),
+        "--coverage-summary", str(coverage),
+        "--output-dir", str(output),
+        "--n-points", "4",
+        "--elite-centers", "2",
+        "--radii", "0.02",
+        "--global-fraction", "0.25",
+        "--boundary-fraction", "0.25",
+        "--design-only",
+    ])
+
+    local_sampling.main()
+
+    counts = pd.read_csv(output / "design.csv")["sampling_mode"].value_counts()
+    assert counts.to_dict() == {"local_elite": 2, "global_sobol": 2}
+    metadata = json.loads((output / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["realized_allocation"] == {
+        "local_elite": 2,
+        "global_sobol": 2,
+    }
+
+
 def test_sampling_resume_rejects_changed_source_content(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -184,11 +371,14 @@ def test_sampling_resume_rejects_changed_source_content(
     boundary_frame = _source([(0.05, 0.5, 0.03), (0.95, 0.5, 0.04)])
     boundary_frame["anchor_class"] = "near_boundary"
     boundary_frame.to_csv(boundary, index=False)
+    coverage = tmp_path / "coverage_summary.json"
+    _write_coverage_summary(coverage, source, boundary)
     arguments = [
         "local_sampling",
         "--config", str(config),
         "--source", str(source),
         "--boundary-source", str(boundary),
+        "--coverage-summary", str(coverage),
         "--output-dir", str(output),
         "--n-points", "4",
         "--elite-centers", "2",
@@ -205,7 +395,7 @@ def test_sampling_resume_rejects_changed_source_content(
     changed = pd.read_csv(source)
     changed.loc[0, "objective"] = 0.009
     changed.to_csv(source, index=False)
-    with pytest.raises(ValueError, match="does not match the current config"):
+    with pytest.raises(ValueError, match="summary artifact identity"):
         local_sampling.main()
 
 

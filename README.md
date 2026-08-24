@@ -6,6 +6,7 @@
 [![License](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
 
 [中文完整手册](docs/zh_CN/USER_GUIDE.md) |
+[English documentation](docs/README.md) |
 [First-run guide](docs/tutorials/quickstart.md) |
 [`ffopt.in` reference](docs/reference/input-file.md) |
 [Releases](https://github.com/Leduo-Pei/ffopt-lammps/releases)
@@ -78,7 +79,7 @@ wheels and are not yet published on PyPI:
 
 ```bash
 python -m pip install \
-  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a4/ffopt_lammps-0.3.0a4-py3-none-any.whl"
+  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a8/ffopt_lammps-0.3.0a8-py3-none-any.whl"
 ```
 
 For development:
@@ -198,6 +199,7 @@ workflow bo sample nn al audit finalize validate
 
 parameters
     range charge  delta  0.30
+    cutoff 8.0 A
     charge_limit 1.0
     neutrality derive N1
     mixing epsilon geometric
@@ -211,7 +213,11 @@ end
 This compact example is charge-only, so only charge needs a range. No `fix`
 line plus epsilon/sigma/charge ranges produces full optimization. The derived
 charge is removed from the independent search space and recovered from exact
-total neutrality.
+total neutrality. `cutoff` is one required global scientific setting shared by
+all fitted and validation properties; FFOpt never substitutes a hidden
+property-specific default. Elemental BCC inputs must use at least
+`2.5 * sigma_max` over the complete declared sigma search domain and at most
+`0.45 * h_min` for every replicated periodic cell.
 
 ## Documentation
 

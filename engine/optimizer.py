@@ -20,6 +20,7 @@ Pareto BO:
   posthoc        = Pareto front extracted from all valid evaluations after BO
 """
 
+import hashlib
 import math
 import os
 import csv
@@ -29,7 +30,7 @@ import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -53,6 +54,7 @@ from sklearn.preprocessing import StandardScaler
 from .config_loader import save_config_snapshot
 
 from utils.objective_rescoring import active_targets, objective_provenance
+from workflow.artifact_manifest import sha256_file
 
         # SAASBO
 try:
@@ -86,6 +88,50 @@ warnings.filterwarnings("ignore", message=".*qNoisyExpectedImprovement.*")
 warnings.filterwarnings("ignore", category=RuntimeWarning, module="botorch.optim")
 warnings.filterwarnings("ignore", message=".*added jitter.*")
 warnings.filterwarnings("ignore", message=".*A not p.d..*")
+
+
+BO_CHECKPOINT_IDENTITY_SCHEMA = 2
+
+
+class CheckpointIdentityError(RuntimeError):
+    """Raised before state is loaded from an incompatible BO checkpoint."""
+
+
+def _canonical_hash(value: Any) -> str:
+    payload = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _bo_checkpoint_scientific_config(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Return BO science inputs without host/runtime-only configuration."""
+
+    excluded = {
+        "active_learning",
+        "checkpoint",
+        "cluster",
+        "machine",
+        "machine_learning",
+        "nn",
+        "optimization",
+        "parallel",
+        "workflow",
+    }
+    result = {
+        key: value
+        for key, value in config.items()
+        if not str(key).startswith("_") and key not in excluded
+    }
+    lammps = dict(result.get("lammps", {}))
+    for key in ("executable", "mpiexec", "mpi_flavor", "timeout"):
+        lammps.pop(key, None)
+    result["lammps"] = lammps
+    return result
 
 # GP kernel matrix conditioning limit.
 # Beyond ~512 points the Cholesky factorisation degrades; keep only the best N.
@@ -269,6 +315,19 @@ class ForceFieldOptimizer:
         self.coverage_enabled = str(self.objective_type).lower() == "feasible_coverage"
         self.coverage_cfg = dict(opt_cfg.get("coverage", {}))
         self._pending_selection_roles: dict[tuple[float, ...], str] = {}
+        self._pending_selection_guidance: dict[tuple[float, ...], str] = {}
+        self.coverage_surrogate_fallbacks: list[dict[str, Any]] = []
+        warm_start_gate = opt_cfg.get("warm_start_gate", {})
+        self.warm_start_gate_enabled = bool(
+            warm_start_gate.get("enabled", False)
+            if isinstance(warm_start_gate, dict)
+            else warm_start_gate
+        )
+        self.warm_start_gate_mode = (
+            str(warm_start_gate.get("mode", "structural"))
+            if isinstance(warm_start_gate, dict)
+            else "structural"
+        )
 
         # TuRBO
         self.bo_method = self._select_bo_method(self.n_params, opt_cfg)
@@ -350,6 +409,7 @@ class ForceFieldOptimizer:
         self.bo_finished: bool          = False
 
         self._feasibility_model = None
+        self._feasibility_classifier_error: Exception | None = None
 
         # TuRBO
         self._turbo_state: Optional[TurboState] = None
@@ -643,6 +703,84 @@ class ForceFieldOptimizer:
             return self._parse_seed_params(seed_path), seed_path
         return None, None
 
+    def _run_warm_start_gate(
+        self,
+        seed: Dict[str, float],
+        source: str,
+    ) -> None:
+        """Evaluate one declared baseline before spending the full BO budget.
+
+        The result is deliberately retained as the first exact BO observation.
+        A failed gate writes a compact diagnostic artifact and stops before any
+        LHS candidates are launched, which makes protocol drift cheap and
+        obvious instead of discovering it after a multi-hour optimization.
+        """
+
+        if self.warm_start_gate_mode != "structural":
+            raise RuntimeError(
+                f"Unsupported warm-start gate mode {self.warm_start_gate_mode!r}"
+            )
+        print("\nWarm-start structural feasibility gate")
+        print(f"  Source         : {source}")
+        print(f"  LJ cutoff      : {float(self.config['lammps']['cutoff']):g} A")
+        before = len(self.all_results)
+        key = tuple(round(float(seed[name]), 12) for name in self.param_names)
+        self._pending_selection_roles[key] = "warm_start_gate"
+        self._evaluate_and_record([seed], "warm_start_gate")
+        if len(self.all_results) != before + 1:
+            raise RuntimeError("Warm-start gate did not produce exactly one result")
+        entry = self.all_results[-1]
+        passed = bool(entry.get("success")) and bool(
+            entry.get("structural_feasible", False)
+        )
+
+        def finite_or_none(value: Any) -> float | None:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return None
+            return number if math.isfinite(number) else None
+
+        report = {
+            "status": "passed" if passed else "failed",
+            "mode": self.warm_start_gate_mode,
+            "source": source,
+            "cutoff_angstrom": float(self.config["lammps"]["cutoff"]),
+            "parameters": {name: float(seed[name]) for name in self.param_names},
+            "success": bool(entry.get("success")),
+            "structural_feasible": bool(entry.get("structural_feasible", False)),
+            "structural_constraint_violation": finite_or_none(
+                entry.get("structural_constraint_violation")
+            ),
+            "structural_limiting_constraint": str(
+                entry.get("structural_limiting_constraint", "")
+            ),
+            "structural_failed_constraints": str(
+                entry.get("structural_failed_constraints", "")
+            ),
+            "calculated": {
+                name: finite_or_none(entry.get(f"calc_{name}"))
+                for name in self.config["targets"]
+            },
+            "errors_percent": {
+                name: finite_or_none(entry.get(f"error_{name}"))
+                for name in self.config["targets"]
+            },
+        }
+        report_path = os.path.join(self.work_dir, "warm_start_gate.json")
+        os.makedirs(self.work_dir, exist_ok=True)
+        with open(report_path, "w", encoding="utf-8") as handle:
+            json.dump(report, handle, indent=2, sort_keys=True, allow_nan=False)
+            handle.write("\n")
+        if not passed:
+            failed = report["structural_failed_constraints"] or "evaluation_failed"
+            raise RuntimeError(
+                "Warm-start structural feasibility gate failed before BO sampling: "
+                f"{failed}. Inspect {report_path}; verify cutoff, data, replication, "
+                "mixing, and trajectory protocol before starting a new run."
+            )
+        print(f"  Status         : PASS ({report_path})")
+
     def run(self) -> dict:
         start_time = time.time()
         self._print_header()
@@ -670,13 +808,23 @@ class ForceFieldOptimizer:
                     if hard_differences else None
                 )
                 if seed_error:
-                    print(
-                        "  Warm-start: skipped infeasible seed from "
-                        f"{src}: {seed_error}"
-                    )
+                    if self.warm_start_gate_enabled:
+                        raise RuntimeError(
+                            "Warm-start structural feasibility gate cannot evaluate an "
+                            f"infeasible seed from {src}: {seed_error}"
+                        )
+                    print(f"  Warm-start: skipped infeasible seed from {src}: {seed_error}")
                 else:
-                    initial_points = [seed] + initial_points
+                    if self.warm_start_gate_enabled:
+                        self._run_warm_start_gate(seed, str(src))
+                    else:
+                        initial_points = [seed] + initial_points
                     print(f"  Warm-start: seeded initial batch from {src}")
+            elif self.warm_start_gate_enabled:
+                raise RuntimeError(
+                    "BO warm_start_gate is enabled, but no complete initial "
+                    "parameter centre is available"
+                )
             self._evaluate_and_record(initial_points, "initial")
 
             if self._best_valid_obj < float("inf"):
@@ -859,12 +1007,24 @@ class ForceFieldOptimizer:
         )
 
         probability = np.zeros(len(pool), dtype=float)
-        if self._feasibility_model is not None:
+        probability_available = False
+        classifier_error: Exception | None = None
+        classifier_enabled = bool(
+            getattr(self, "use_feasibility_classifier", True)
+        )
+        if classifier_enabled and self._feasibility_model is not None:
             try:
                 probability = self._feasibility_model.predict_proba(pool)[:, 1]
-            except Exception:
-                probability.fill(0.0)
+                probability_available = True
+            except Exception as exc:
+                classifier_error = exc
+        else:
+            classifier_error = getattr(
+                self, "_feasibility_classifier_error", None
+            )
         uncertainty = np.ones(len(pool), dtype=float)
+        gp_available = False
+        gp_error: Exception | None = None
         if len(self.train_X) >= 3:
             try:
                 gp_x, gp_y = self._get_gp_training_data()
@@ -878,12 +1038,31 @@ class ForceFieldOptimizer:
                     posterior = model.posterior(torch.tensor(pool, dtype=torch.double))
                     mean = posterior.mean.squeeze(-1).numpy()
                     uncertainty = posterior.variance.sqrt().squeeze(-1).numpy()
-                if self._feasibility_model is None:
+                gp_available = True
+                if not probability_available:
                     scale = max(float(np.nanmedian(np.abs(mean))), 1.0e-6)
                     probability = np.exp(-np.maximum(mean, 0.0) / scale)
+                    probability_available = True
             except Exception as exc:
-                print(f"  Coverage surrogate warning ({exc}); using novelty")
-                probability = np.exp(-4.0 * np.ones(len(pool)))
+                gp_error = exc
+        if not probability_available:
+            probability = np.exp(-4.0 * np.ones(len(pool)))
+        if classifier_error is not None:
+            self._record_coverage_surrogate_fallback(
+                "feasibility_classifier",
+                classifier_error,
+                fallback=("objective_gp_mean" if gp_available else "novelty"),
+            )
+        if gp_error is not None:
+            self._record_coverage_surrogate_fallback(
+                "objective_gp",
+                gp_error,
+                fallback=(
+                    "classifier_probability_with_novelty_uncertainty"
+                    if probability_available and self._feasibility_model is not None
+                    else "novelty"
+                ),
+            )
 
         selected, roles = select_coverage_batch(
             pool,
@@ -917,6 +1096,23 @@ class ForceFieldOptimizer:
             tuple(round(float(item[name]), 12) for name in self.param_names): role
             for item, role in zip(output, roles)
         }
+        degraded_components = [
+            component
+            for component, error in (
+                ("feasibility_classifier", classifier_error),
+                ("objective_gp", gp_error),
+            )
+            if error is not None
+        ]
+        guidance = (
+            "model_guided"
+            if not degraded_components
+            else "degraded:" + "+".join(degraded_components)
+        )
+        self._pending_selection_guidance = {
+            tuple(round(float(item[name]), 12) for name in self.param_names): guidance
+            for item in output
+        }
         print(
             "  Coverage acquisition: "
             + ", ".join(
@@ -924,6 +1120,27 @@ class ForceFieldOptimizer:
             )
         )
         return output
+
+    def _record_coverage_surrogate_fallback(
+        self,
+        component: str,
+        error: Exception,
+        *,
+        fallback: str = "novelty",
+    ) -> None:
+        """Persist degraded model-guidance events instead of leaving log-only clues."""
+        event = {
+            "round": int(self.current_round),
+            "component": str(component),
+            "error_type": type(error).__name__,
+            "message": str(error),
+            "fallback": str(fallback),
+        }
+        self.coverage_surrogate_fallbacks.append(event)
+        print(
+            f"  Coverage surrogate warning [{component}] ({error}); "
+            f"using {fallback}"
+        )
 
     # Active Pareto BO (GP + compute_surface)
 
@@ -1249,6 +1466,10 @@ class ForceFieldOptimizer:
 
     def _update_feasibility_classifier(self):
         """Train GP classifier (feasible vs infeasible) on all data so far."""
+        if not bool(getattr(self, "use_feasibility_classifier", True)):
+            self._feasibility_model = None
+            self._feasibility_classifier_error = None
+            return
         if len(self.all_X) < 10:
             return
         n_f   = sum(self.all_feasible)
@@ -1269,9 +1490,11 @@ class ForceFieldOptimizer:
                                warm_start=True)),
             ])
             self._feasibility_model.fit(X_np, y_np)
+            self._feasibility_classifier_error = None
         except Exception as e:
             print(f"  Feasibility classifier warning: {e}")
             self._feasibility_model = None
+            self._feasibility_classifier_error = e
 
     # ====================================================================== #
     # Exploration                                                             #
@@ -1413,6 +1636,9 @@ class ForceFieldOptimizer:
                 )
                 entry["selection_role"] = self._pending_selection_roles.get(
                     key, "initial_design"
+                )
+                entry["selection_guidance"] = (
+                    self._pending_selection_guidance.get(key, "initial_design")
                 )
             entry.update(objective_provenance(active_targets(self.config)))
             # All free BO params
@@ -1774,7 +2000,7 @@ class ForceFieldOptimizer:
         fit_objectives = pd.to_numeric(pd.Series([
             row.get("fit_objective", row.get("objective", math.inf))
             for row in self.all_results
-        ]), errors="coerce").to_numpy(float)
+        ]), errors="coerce").to_numpy(dtype=float, copy=True)
         fit_objectives[~np.isfinite(fit_objectives)] = math.inf
         selected: list[int] = []
 
@@ -1916,8 +2142,102 @@ class ForceFieldOptimizer:
     # Checkpoint                                                              #
     # ====================================================================== #
 
+    def _checkpoint_identity_payload(self) -> dict[str, Any]:
+        """Build the immutable scientific/optimization identity of BO state."""
+
+        return {
+            "schema_version": BO_CHECKPOINT_IDENTITY_SCHEMA,
+            "pipeline_stage_signature": self.config.get("workflow", {}).get(
+                "bo_stage_signature"
+            ),
+            "scientific_config": _bo_checkpoint_scientific_config(self.config),
+            "optimization": self.config.get("optimization", {}),
+            "resolved_bo_method": self.bo_method,
+            "parameter_space": [
+                {
+                    "name": str(name),
+                    "lower": float(lower),
+                    "upper": float(upper),
+                }
+                for name, lower, upper in self.param_space
+            ],
+        }
+
+    def _checkpoint_identity(self) -> dict[str, Any]:
+        payload = self._checkpoint_identity_payload()
+        return {
+            "schema_version": BO_CHECKPOINT_IDENTITY_SCHEMA,
+            "sha256": _canonical_hash(payload),
+            "payload": payload,
+        }
+
+    def _validate_checkpoint_identity(
+        self,
+        checkpoint: Mapping[str, Any],
+        path: str,
+    ) -> None:
+        """Reject legacy, corrupt, or differently configured BO state."""
+
+        stored = checkpoint.get("checkpoint_identity")
+        if not isinstance(stored, Mapping):
+            raise CheckpointIdentityError(
+                f"Checkpoint {path} has no BO scientific/optimization identity; "
+                "legacy checkpoints cannot be resumed safely. Start an independent "
+                "run instead."
+            )
+        if stored.get("schema_version") != BO_CHECKPOINT_IDENTITY_SCHEMA:
+            raise CheckpointIdentityError(
+                f"Checkpoint {path} uses unsupported identity schema "
+                f"{stored.get('schema_version')!r}; expected "
+                f"{BO_CHECKPOINT_IDENTITY_SCHEMA}. Start an independent run."
+            )
+        stored_payload = stored.get("payload")
+        stored_digest = stored.get("sha256")
+        if not isinstance(stored_payload, Mapping) or not isinstance(
+            stored_digest, str
+        ):
+            raise CheckpointIdentityError(
+                f"Checkpoint {path} has an incomplete BO identity and is unsafe "
+                "to resume."
+            )
+        actual_stored_digest = _canonical_hash(stored_payload)
+        if stored_digest != actual_stored_digest:
+            raise CheckpointIdentityError(
+                f"Checkpoint {path} BO identity is corrupt or was edited "
+                "after it was written."
+            )
+
+        expected = self._checkpoint_identity()
+        if stored_digest != expected["sha256"]:
+            expected_payload = expected["payload"]
+            changed = sorted(
+                key
+                for key in expected_payload
+                if _canonical_hash(stored_payload.get(key))
+                != _canonical_hash(expected_payload.get(key))
+            )
+            detail = ", ".join(changed) or "unknown identity fields"
+            raise CheckpointIdentityError(
+                f"Checkpoint {path} belongs to a different BO scientific/"
+                f"optimization identity (changed: {detail}; checkpoint "
+                f"{stored_digest[:12]}, current {expected['sha256'][:12]}). "
+                "Refusing to mix its observations/objectives with this run."
+            )
+
+        if checkpoint.get("param_names") != self.param_names:
+            raise CheckpointIdentityError(
+                f"Checkpoint {path} parameter ordering differs from the current "
+                "BO parameter space."
+            )
+        if checkpoint.get("bo_method") != self.bo_method:
+            raise CheckpointIdentityError(
+                f"Checkpoint {path} BO method differs from the current resolved "
+                f"method {self.bo_method!r}."
+            )
+
     def _save_checkpoint(self):
         ckpt = {
+            "checkpoint_identity": self._checkpoint_identity(),
             "round":          self.current_round,
             "bo_method":      self.bo_method,
             "train_X":        self.train_X.numpy().tolist(),
@@ -1925,6 +2245,9 @@ class ForceFieldOptimizer:
             "all_X":          self.all_X.numpy().tolist(),
             "all_feasible":   self.all_feasible,
             "all_results":    self.all_results,
+            "coverage_surrogate_fallbacks": list(
+                getattr(self, "coverage_surrogate_fallbacks", [])
+            ),
             "best_history":   self.best_history,
             "best_valid_obj": self._best_valid_obj,
             "round_times":    self.round_times,
@@ -1950,6 +2273,7 @@ class ForceFieldOptimizer:
                 json.dump(ckpt, f, indent=2, default=str)
 
     def load_checkpoint(self, path: str = None) -> bool:
+        checkpoint = None
         if path is None:
             # Each run creates a fresh timestamped work_dir, so this run's own
             # ckpt_dir is empty. For --resume to actually continue, auto-discover
@@ -1979,25 +2303,60 @@ class ForceFieldOptimizer:
                 if not cands:
                     print(f"No checkpoint found (searched {patterns})")
                     return False
-                # Pick the MOST PROGRESSED checkpoint (highest round), not just
-            # the newest file; a fresh run round-0 checkpoint can have a
-                # newer mtime than an earlier run that reached round 60.
-                def _ckpt_round(p):
+                # Only consider checkpoints with the exact current identity.
+                # A progressed checkpoint from a different target/cutoff/objective
+                # must never win merely because it has a higher round number.
+                compatible = []
+                for candidate in cands:
                     try:
-                        with open(p) as fh:
-                            return json.load(fh).get("round", -1)
-                    except Exception:
-                        return -1
-                path = max(cands, key=lambda p: (_ckpt_round(p),
-                                                 os.path.getmtime(p)))
+                        with open(candidate) as fh:
+                            candidate_checkpoint = json.load(fh)
+                        self._validate_checkpoint_identity(
+                            candidate_checkpoint, candidate
+                        )
+                    except (OSError, ValueError, CheckpointIdentityError):
+                        continue
+                    compatible.append((
+                        int(candidate_checkpoint.get("round", -1)),
+                        os.path.getmtime(candidate),
+                        candidate,
+                        candidate_checkpoint,
+                    ))
+                if not compatible:
+                    print(
+                        "No compatible checkpoint found "
+                        f"({len(cands)} checkpoint(s) had another or legacy "
+                        "BO identity)"
+                    )
+                    return False
+                round_number, _mtime, path, checkpoint = max(
+                    compatible, key=lambda item: (item[0], item[1])
+                )
                 print(f"Auto-resuming from checkpoint: {path} "
-                      f"(round {_ckpt_round(path)})")
+                      f"(round {round_number})")
         if not os.path.exists(path):
             print(f"No checkpoint at {path}")
             return False
 
-        with open(path) as f:
-            ckpt = json.load(f)
+        if checkpoint is None:
+            with open(path) as f:
+                checkpoint = json.load(f)
+        self._validate_checkpoint_identity(checkpoint, path)
+        ckpt = checkpoint
+
+        if "coverage_surrogate_fallbacks" not in ckpt:
+            raise CheckpointIdentityError(
+                f"Checkpoint {path} has no coverage-surrogate provenance required "
+                f"by identity schema {BO_CHECKPOINT_IDENTITY_SCHEMA}. Start an "
+                "independent run instead."
+            )
+        raw_fallbacks = ckpt["coverage_surrogate_fallbacks"]
+        if not isinstance(raw_fallbacks, list) or not all(
+            isinstance(item, dict) for item in raw_fallbacks
+        ):
+            raise ValueError(
+                "Checkpoint coverage_surrogate_fallbacks must be a list of objects"
+            )
 
         self.current_round    = ckpt["round"]
         self.train_X          = torch.tensor(ckpt["train_X"],  dtype=torch.double)
@@ -2005,6 +2364,7 @@ class ForceFieldOptimizer:
         self.all_X            = torch.tensor(ckpt["all_X"],    dtype=torch.double)
         self.all_feasible     = ckpt["all_feasible"]
         self.all_results      = ckpt["all_results"]
+        self.coverage_surrogate_fallbacks = raw_fallbacks
         self.best_history     = ckpt["best_history"]
         self._best_valid_obj  = ckpt.get("best_valid_obj", float("inf"))
         self.round_times      = ckpt.get("round_times", [])
@@ -2018,13 +2378,6 @@ class ForceFieldOptimizer:
             self._turbo_state.failure_counter = ts_ckpt["failure_counter"]
             self._turbo_state.success_counter = ts_ckpt["success_counter"]
             self._turbo_state.best_value      = ts_ckpt["best_value"]
-
-        # Verify param_names match (catches config changes between runs)
-        ckpt_names = ckpt.get("param_names", [])
-        if ckpt_names and ckpt_names != self.param_names:
-            print("  WARNING: checkpoint param_names differ from current config!")
-            print(f"    checkpoint : {ckpt_names}")
-            print(f"    current    : {self.param_names}")
 
         self._update_feasibility_classifier()
         print(f"Resumed from round {self.current_round}, "
@@ -2159,6 +2512,14 @@ class ForceFieldOptimizer:
         feasible_archive.to_csv(feasible_path, index=False)
         coverage_anchors.to_csv(anchors_path, index=False)
 
+        def output_identity(path: str) -> dict[str, Any]:
+            digest = sha256_file(path)
+            return {
+                "name": os.path.basename(path),
+                "size_bytes": int(digest.size_bytes),
+                "sha256": digest.sha256,
+            }
+
         successful = (
             frame["success"].astype(str).str.strip().str.lower().isin(
                 ("true", "1", "yes", "on")
@@ -2173,6 +2534,14 @@ class ForceFieldOptimizer:
         )
         role_counts = (
             frame.get("selection_role", pd.Series(dtype=str))
+            .fillna("unlabelled")
+            .astype(str)
+            .value_counts()
+            .sort_index()
+            .to_dict()
+        )
+        guidance_counts = (
+            frame.get("selection_guidance", pd.Series(dtype=str))
             .fillna("unlabelled")
             .astype(str)
             .value_counts()
@@ -2208,8 +2577,108 @@ class ForceFieldOptimizer:
                     name: finite_or_none(best.get(name)) for name in self.param_names
                 },
             }
+        fallback_events = list(
+            getattr(self, "coverage_surrogate_fallbacks", [])
+        )
+        try:
+            fallback_rounds = sorted({
+                int(event["round"]) for event in fallback_events
+            })
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "Coverage fallback events require an integer round"
+            ) from exc
+        fallback_components = sorted({
+            str(event.get("component", "unknown")) for event in fallback_events
+        })
+        minimum_archive = int(
+            self.coverage_cfg.get(
+                "minimum_archive",
+                min(archive_target, max(8, 2 * (self.n_params + 1))),
+            )
+        )
+        minimum_boundary_anchors = int(
+            self.coverage_cfg.get(
+                "minimum_boundary_anchors",
+                min(archive_target, max(4, self.n_params + 1)),
+            )
+        )
+        maximum_fallback_rounds = int(
+            self.coverage_cfg.get("maximum_fallback_rounds", 0)
+        )
+        minimum_archive_separation = float(
+            self.coverage_cfg.get(
+                "minimum_archive_separation_normalized", 1.0e-3
+            )
+        )
+        minimum_weak_span = float(
+            self.coverage_cfg.get("minimum_weak_span_normalized", 1.0e-3)
+        )
+        boundary_anchor_count = int(
+            coverage_anchors.get(
+                "anchor_class", pd.Series(dtype=str)
+            ).astype(str).eq("near_boundary").sum()
+        )
+        qualifying_archive = feasible_archive.head(minimum_archive)
+        if qualifying_archive.empty:
+            affine_rank = 0
+            weak_span = 0.0
+        else:
+            spans = bounds[:, 1] - bounds[:, 0]
+            coordinates = (
+                qualifying_archive[self.param_names].to_numpy(dtype=float)
+                - bounds[:, 0]
+            ) / spans
+            centered = coordinates - coordinates.mean(axis=0, keepdims=True)
+            singular_values = np.linalg.svd(centered, compute_uv=False)
+            affine_rank = int(np.linalg.matrix_rank(centered, tol=1.0e-10))
+            weak_span = (
+                float(singular_values[-1])
+                / math.sqrt(max(len(qualifying_archive) - 1, 1))
+                if len(singular_values) >= self.n_params
+                else 0.0
+            )
+        qualifying_separation = self._minimum_archive_distance(
+            qualifying_archive, self.param_names, bounds
+        )
+        separation_value = (
+            float(qualifying_separation)
+            if qualifying_separation is not None else 0.0
+        )
+        evidence_violations = []
+        if len(feasible_archive) < minimum_archive:
+            evidence_violations.append("feasible_archive_below_minimum")
+        if affine_rank < self.n_params:
+            evidence_violations.append("feasible_archive_affine_rank_deficient")
+        if boundary_anchor_count < minimum_boundary_anchors:
+            evidence_violations.append("boundary_anchors_below_minimum")
+        if separation_value < minimum_archive_separation:
+            evidence_violations.append("feasible_archive_separation_below_minimum")
+        if weak_span < minimum_weak_span:
+            evidence_violations.append("feasible_archive_weak_span_below_minimum")
+        evidence_status = (
+            "complete"
+            if not evidence_violations
+            else "recovery_eligible"
+            if len(feasible_archive) > 0
+            else "insufficient"
+        )
+        guidance_status = (
+            "healthy"
+            if not fallback_rounds
+            else "degraded"
+            if len(fallback_rounds) <= maximum_fallback_rounds
+            else "failed"
+        )
+        overall_status = (
+            "canonical_usable"
+            if evidence_status == "complete" and guidance_status != "failed"
+            else "insufficient"
+            if evidence_status == "insufficient"
+            else "recovery_required"
+        )
         summary = {
-            "schema": "ffopt-structural-coverage-summary-v1",
+            "schema": "ffopt-structural-coverage-summary-v2",
             "objective": "feasible_coverage",
             "parameter_names": list(self.param_names),
             "coverage_settings": {
@@ -2235,6 +2704,13 @@ class ForceFieldOptimizer:
                 "anchor_max_band_ratio": float(
                     self.coverage_cfg.get("anchor_max_band_ratio", 3.0)
                 ),
+                "minimum_archive": minimum_archive,
+                "minimum_boundary_anchors": minimum_boundary_anchors,
+                "maximum_fallback_rounds": maximum_fallback_rounds,
+                "minimum_archive_separation_normalized": (
+                    minimum_archive_separation
+                ),
+                "minimum_weak_span_normalized": minimum_weak_span,
                 "random_seed": int(
                     self.config.get("optimization", {}).get("random_seed", 42)
                 ),
@@ -2246,6 +2722,54 @@ class ForceFieldOptimizer:
                     "exact structural feasibility, then fit objective"
                 ),
                 "archive": "representative seed plus normalized maximin diversity",
+            },
+            "surrogate_guidance": {
+                "status": guidance_status,
+                "fallback_event_count": len(fallback_events),
+                "fallback_round_count": len(fallback_rounds),
+                "fallback_rounds": fallback_rounds,
+                "fallback_components": fallback_components,
+                "fallback_events": fallback_events,
+            },
+            "coverage_evidence": {
+                "status": evidence_status,
+                "violations": evidence_violations,
+                "observed": {
+                    "feasible_archive": int(len(feasible_archive)),
+                    "coverage_anchors": int(len(coverage_anchors)),
+                    "outside_near_boundary_anchors": boundary_anchor_count,
+                    "affine_rank": affine_rank,
+                    "qualification_subset_size": int(len(qualifying_archive)),
+                    "minimum_pair_distance_normalized": separation_value,
+                    "weak_direction_rms_span_normalized": weak_span,
+                    "parameter_dimensions": self.n_params,
+                    "archive_target_fraction": (
+                        float(len(feasible_archive)) / float(archive_target)
+                    ),
+                },
+                "required": {
+                    "minimum_archive": minimum_archive,
+                    "full_affine_rank": self.n_params,
+                    "minimum_boundary_anchors": minimum_boundary_anchors,
+                    "minimum_pair_distance_normalized": (
+                        minimum_archive_separation
+                    ),
+                    "minimum_weak_direction_rms_span_normalized": (
+                        minimum_weak_span
+                    ),
+                },
+            },
+            "coverage_quality": {
+                "status": overall_status,
+                "model_guidance": guidance_status,
+                "coverage_evidence": evidence_status,
+                "downstream_policy": (
+                    "canonical continuation"
+                    if overall_status == "canonical_usable"
+                    else "sample/audit recovery only; final promotion gates remain hard"
+                    if overall_status == "recovery_required"
+                    else "stop before downstream sampling"
+                ),
             },
             "counts": {
                 "evaluations": int(len(frame)),
@@ -2261,6 +2785,9 @@ class ForceFieldOptimizer:
             },
             "proposal_role_counts": {
                 str(key): int(value) for key, value in role_counts.items()
+            },
+            "proposal_guidance_counts": {
+                str(key): int(value) for key, value in guidance_counts.items()
             },
             "archive_diversity": {
                 "minimum_pair_distance_normalized": self._minimum_archive_distance(
@@ -2281,9 +2808,11 @@ class ForceFieldOptimizer:
             },
             "representative": representative,
             "files": {
-                "all_results": "all_results.csv",
-                "feasible_archive": "feasible_archive.csv",
-                "coverage_anchors": "coverage_anchors.csv",
+                "all_results": output_identity(
+                    os.path.join(self.work_dir, "all_results.csv")
+                ),
+                "feasible_archive": output_identity(feasible_path),
+                "coverage_anchors": output_identity(anchors_path),
             },
         }
         with open(summary_path, "w", encoding="utf-8") as handle:

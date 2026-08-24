@@ -18,6 +18,29 @@ ffopt run ffopt.in --machine cluster --dry-run
 ffopt run ffopt.in --machine cluster --watch
 ```
 
+The `parameters` block must contain one explicit global cutoff, for example:
+
+```text
+parameters
+    range sigma absolute 0.001 5.0
+    cutoff 12.5 A
+    # remaining constraints and type rows ...
+end
+```
+
+No property supplies a fallback or override. Bulk, surface, static elasticity,
+finite-temperature promotion, and final validation all use this same value.
+For elemental BCC, FFOpt checks `cutoff >= 2.5 * sigma_max` against the largest
+sigma bound in the complete optimization domain; the example above therefore
+requires at least `12.5 A`. Changing it creates a different scientific protocol
+and requires a new campaign.
+
+FFOpt additionally requires `cutoff <= 0.45 * h_min` for each periodic bulk,
+surface, and elasticity cell after replication. Here `h_min` is computed from
+the full (including triclinic) box vectors. This leaves contraction/strain
+headroom below the half-box limit; increase `replicate` when needed. Energy
+shift and analytical tail correction are explicitly locked off.
+
 The same example directory contains `ffopt.canary.in`. It is prominently
 marked `NON_SCIENTIFIC_CANARY`: its small replicas, short trajectories,
 relaxed gates and narrow ranges test SLURM execution and restart wiring only.
@@ -27,8 +50,8 @@ same saved pipeline:
 
 ```bash
 ffopt check ffopt.canary.in
-ffopt run ffopt.canary.in --machine cluster --run-id fe_bcc_canary_a4 --dry-run
-ffopt run ffopt.canary.in --machine cluster --run-id fe_bcc_canary_a4 --watch
+ffopt run ffopt.canary.in --machine cluster --run-id fe_bcc_canary_a6 --dry-run
+ffopt run ffopt.canary.in --machine cluster --run-id fe_bcc_canary_a6 --watch
 ```
 
 Interrupting the local `--watch` process does not require another scientific
@@ -73,28 +96,41 @@ oversubscribe it. These resource fields therefore do not belong in
 structural BO coverage
   -> multi-centre local/global sampling
   -> independent-seed structural audit
-  -> exact 0 K cubic screen
+  -> 0 K cubic stress-slope screen extrapolated to zero strain
   -> constrained-minimax surrogate and AL
-  -> diverse 300 K finalist screen
-  -> independent final validation
+  -> exactly 20 diverse candidates in a quick multi-seed 300 K promotion
+  -> one promoted winner in an independent long-trajectory validation
   -> static rank + dynamic rank + final result bundle
 ```
 
 Structure, density, angles, and surface energy are constraints. Their
-continuous violation is zero inside the declared tolerance. The exact static
+continuous violation is zero inside the declared tolerance. The static
 objective is the maximum relative error among independent `B`, `Cprime`, and
-`C44` targets. RMSE and parameter contrast break ties. The requested 20%
-mechanical tier labels result quality but never removes the best structurally
-valid candidate.
+`C44` targets. It uses symmetric stress slopes; energy curvature is
+diagnostic-only because an unshifted LJ cutoff makes energy discontinuous at
+neighbour-shell crossings. `r2 0.98` and `static_drift 5 percent` are separate
+hard quality gates: the first checks the stress fit, while the second rejects a
+zero-strain intercept that changes by more than 5% when the outer strain shell
+audits the inner two-shell extrapolation. Use at least three `static_strain`
+magnitudes so this audit has independent evidence. RMSE and parameter contrast
+break ties. The requested 20% mechanical tier labels result quality but never
+removes the best structurally valid candidate.
 
 Static and finite-temperature elastic calculations use independent target
 triplets and independent protocols. `G`, `E`, and Poisson's ratio are derived
 diagnostics, not additional fit dimensions. A finite-temperature ranking can
 reverse the static ranking, so every result row keeps both ranks and its
-evidence level. In the packaged example, dynamic promotion uses seeds
-`101 202 303`, while final validation uses the disjoint holdout set
-`404 505 606` declared by `validation_seeds`; deterministic replay of the same
-trajectories is not counted as independent validation.
+evidence level. In the packaged example, all 20 finalists use the quick
+promotion protocol with seeds `101 202 303`. Only its winner enters the longer
+validation protocol, whose disjoint holdout seeds are `404 505 606`;
+deterministic replay of a promotion trajectory is not independent validation. The final protocol
+has its own strain magnitudes, NPT/NVT equilibration lengths, and production
+length, and both protocol fingerprints retain the shared global cutoff.
+
+The example sets `minimum 20`, `maximum 20`, and `require_minimum yes` in its
+`finalists` block. This is a hard floor, not a request to return “up to 20”: if
+fewer than 20 unique candidates pass the structural, Born-stability, and fit
+quality gates, promotion fails before any 300 K LAMMPS work is launched.
 
 After final validation, the principal user-facing products are under
 `runs/<project>/pipelines/<run-id>/validate/`: `validation_summary.json`,

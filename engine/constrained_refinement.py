@@ -183,6 +183,8 @@ class RefinementSpec:
     stability_column: str = "mechanically_stable"
     minimum_fit_quality: float | None = None
     fit_quality_column: str = "minimum_fit_r2"
+    fit_quality_pass_column: str | None = None
+    minimum_eligible_finalists: int = 1
     derivation: Mapping[str, Any] | None = None
 
     @classmethod
@@ -231,6 +233,11 @@ class RefinementSpec:
         derivation = raw.get("derivation")
         if derivation is not None and not isinstance(derivation, Mapping):
             raise RefinementError("derivation must be a mapping")
+        fit_quality_pass_column = raw.get("fit_quality_pass_column")
+        if fit_quality_pass_column is not None:
+            fit_quality_pass_column = str(fit_quality_pass_column).strip()
+            if not fit_quality_pass_column:
+                raise RefinementError("fit_quality_pass_column must not be empty")
         return cls(
             parameter_names=parameter_names,
             structural_constraints=constraints,
@@ -255,6 +262,11 @@ class RefinementSpec:
             stability_column=str(raw.get("stability_column", "mechanically_stable")),
             minimum_fit_quality=fit_quality,
             fit_quality_column=str(raw.get("fit_quality_column", "minimum_fit_r2")),
+            fit_quality_pass_column=fit_quality_pass_column,
+            minimum_eligible_finalists=_positive_int(
+                raw.get("minimum_eligible_finalists", 1),
+                field="minimum_eligible_finalists",
+            ),
             derivation=dict(derivation) if derivation is not None else None,
         )
 
@@ -576,6 +588,16 @@ def assess_and_rank_candidates(
                 fit_ok = False
             else:
                 fit_ok = fit_value + _EPS >= spec.minimum_fit_quality
+        recorded_fit_ok = True
+        if spec.fit_quality_pass_column is not None:
+            # This upstream boolean includes protocol-specific quality checks
+            # that cannot be reconstructed from the scalar R2 column alone
+            # (for example the static zero-strain extrapolation-drift gate).
+            # Missing or false evidence therefore fails closed.
+            recorded_fit_ok = _truthy(
+                mechanical_row.get(spec.fit_quality_pass_column, False)
+            )
+            fit_ok = bool(fit_ok and recorded_fit_ok)
         finite_score = math.isfinite(float(objective_summary["maximum_error_percent"]))
         eligible = bool(
             constraint_summary["feasible"] and stability_ok and fit_ok and finite_score
@@ -589,6 +611,7 @@ def assess_and_rank_candidates(
             "mechanical_stability_gate_pass": stability_ok,
             "mechanical_fit_gate_pass": fit_ok,
             "mechanical_fit_quality": fit_value,
+            "mechanical_recorded_fit_quality_pass": recorded_fit_ok,
             "mechanical_eligible": eligible,
             "within_mechanical_report_threshold": within,
             "mechanical_quality_tier": (
@@ -905,6 +928,7 @@ def _progress_state(
     round_best_key: str | None,
     spec: RefinementSpec,
     convergence_capable: bool,
+    eligible_candidates: int,
 ) -> dict[str, Any]:
     previous_best_raw = previous.get("best_mechanical_max_error_percent")
     previous_best = (
@@ -930,21 +954,27 @@ def _progress_state(
 
     incumbent_available = math.isfinite(best)
     patience_reached = incumbent_available and stale >= spec.patience
-    if patience_reached and convergence_capable:
+    finalist_floor_reached = eligible_candidates >= spec.minimum_eligible_finalists
+    if patience_reached and convergence_capable and finalist_floor_reached:
         status = "converged"
         convergence_status = "static_search_converged"
         stop_reason = "static_mechanical_minimax_patience"
     elif round_number >= spec.maximum_rounds:
         status = "budget_exhausted"
-        convergence_status = "budget_exhausted"
-        stop_reason = "maximum_rounds"
+        if finalist_floor_reached:
+            convergence_status = "budget_exhausted"
+            stop_reason = "maximum_rounds"
+        else:
+            convergence_status = "insufficient_eligible_finalists"
+            stop_reason = "maximum_rounds_insufficient_eligible_finalists"
     else:
         status = "active"
-        convergence_status = (
-            "incomplete_capability"
-            if not convergence_capable
-            else "searching"
-        )
+        if not convergence_capable:
+            convergence_status = "incomplete_capability"
+        elif not finalist_floor_reached:
+            convergence_status = "insufficient_eligible_finalists"
+        else:
+            convergence_status = "searching"
         stop_reason = ""
     return {
         "status": status,
@@ -952,6 +982,8 @@ def _progress_state(
         "stop_reason": stop_reason,
         "convergence_scope": "static_structure_constrained_mechanical_search",
         "requires_finalist_validation": True,
+        "minimum_eligible_finalists": spec.minimum_eligible_finalists,
+        "finalist_floor_reached": finalist_floor_reached,
         "best_mechanical_max_error_percent": best if incumbent_available else None,
         "best_candidate_parameter_key": best_key if incumbent_available else None,
         "round_improvement_percent_points": improvement,
@@ -1148,6 +1180,7 @@ def run_refinement_round(
         round_best_key=round_best_key,
         spec=validated,
         convergence_capable=convergence_capable,
+        eligible_candidates=len(ranking),
     )
     within_threshold = int(
         ranking.get(

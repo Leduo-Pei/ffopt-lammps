@@ -102,6 +102,10 @@ class LAMMPSRunner:
 
         # -- pair parameter config --
         self.mixing_rule        = pair_cfg["mixing_rule"]
+        self.energy_shift       = bool(lmp_cfg.get("shift", False))
+        self.tail_correction    = bool(lmp_cfg.get("tail_correction", False))
+        if self.energy_shift and self.tail_correction:
+            raise ValueError("LAMMPS shift and tail correction cannot both be enabled")
         self.derived_params_cfg = pair_cfg.get("derived_params", [])  # list of constraint dicts
         self.explicit_pairs_cfg = pair_cfg.get("explicit_pairs", [])  # list of cross-pair dicts
 
@@ -981,10 +985,11 @@ class LAMMPSRunner:
             include pair_coeffs.lmp
 
         File contents (in order):
-          1. pair_modify mix {rule}        (only for an explicit rule)
-          2. pair_coeff i i epsilon sigma  (same-type, for every atom type)
-          3. pair_coeff i j epsilon sigma  (explicit cross pairs, mixing_rule: none only)
-          4. set type N charge Q           (if charge.enabled: true, for every type)
+          1. pair_modify shift/tail        (explicit force-field convention)
+          2. pair_modify mix {rule}        (only for an explicit rule)
+          3. pair_coeff i i epsilon sigma  (same-type, for every atom type)
+          4. pair_coeff i j epsilon sigma  (explicit cross pairs, mixing_rule: none only)
+          5. set type N charge Q           (if charge.enabled: true, for every type)
 
         Parameters
         ----------
@@ -1010,6 +1015,13 @@ class LAMMPSRunner:
             "# DO NOT EDIT: overwritten before each LAMMPS call",
             "",
         ]
+
+        lines.append(
+            "pair_modify shift "
+            f"{'yes' if getattr(self, 'energy_shift', False) else 'no'} tail "
+            f"{'yes' if getattr(self, 'tail_correction', False) else 'no'}"
+        )
+        lines.append("")
 
         # 1. Mixing rule (must precede pair_coeff for LAMMPS to apply it).
         # ``default`` delegates to the pair style's built-in rule.  LAMMPS has
@@ -1121,6 +1133,12 @@ class LAMMPSRunner:
         its data-file LJ (no pair_coeff) and is set to charge 0.
         """
         lines = ["# pair_coeffs.lmp (adsorption system) -- auto-generated", ""]
+        lines.append(
+            "pair_modify shift "
+            f"{'yes' if getattr(self, 'energy_shift', False) else 'no'} tail "
+            f"{'yes' if getattr(self, 'tail_correction', False) else 'no'}"
+        )
+        lines.append("")
         # Keep the adsorption writer identical to the bulk writer: a declared
         # default is represented by the absence of a pair_modify override.
         if self.mixing_rule not in {"default", "none"}:

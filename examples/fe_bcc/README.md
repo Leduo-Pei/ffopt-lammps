@@ -9,6 +9,28 @@ do not narrow the declared parameter ranges and do not import any old trajectory
 or property result; BO, Sample, Audit, elasticity, AL and validation are all run
 again under the current campaign provenance.
 
+The `parameters` block explicitly declares `cutoff 12.5 A`. This is the one
+cutoff inherited by bulk, surface, both elasticity fidelities, and final
+validation; there is no property-local or hidden default. The value is exactly
+`2.5 * 5.0 A`, where `5.0 A` is the largest allowed sigma in this example.
+Every elemental-BCC input must satisfy `cutoff >= 2.5 * sigma_max` over its full
+declared sigma domain.
+Each periodic property must simultaneously satisfy `cutoff <= 0.45 * h_min`
+after replication, using triclinic-safe face heights. The production replicas
+meet both bounds; FFOpt rejects an undersized cell before submitting LAMMPS.
+
+The static and dynamic elasticity strain windows are intentionally separate.
+The deterministic 0 K screen uses `static_strain 0.0005 0.001 0.002` and
+extrapolates symmetric pressure slopes to zero strain. The 300 K calculation
+uses `dynamic_strain 0.002 0.004 0.006` for a larger signal-to-noise ratio.
+Potential-energy curvature is recorded only as a diagnostic: with the global
+`shift no` hard cutoff, neighbour shells can cross the cutoff and create
+discrete energy jumps that are not elastic curvature. `static_drift 5 percent`
+is a hard eligibility gate, independent of `r2 0.98`: it rejects any candidate
+whose `B`, `Cprime`, or `C44` zero-strain intercept changes by more than 5% in
+the outer-shell/full-window audit. The third static magnitude supplies that
+independent window check.
+
 Check the input and print the complete expanded job graph without running:
 
 ```bash
@@ -27,6 +49,13 @@ rounds into separately restartable jobs and advances until scientific
 patience, the target budget, or a real failure is recorded.  If the controller
 is interrupted, issue the same `ffopt run ... --watch` command; verified
 candidate and stage manifests are reused.
+
+Finite-temperature screening is deliberately asymmetric in cost. Exactly 20
+hard-gate candidates enter the quick three-seed 300 K promotion protocol; only
+the promoted winner enters three independent long validation trajectories. The
+`finalists` block uses `minimum 20`, `maximum 20`, and `require_minimum yes`, so
+an undersized eligible pool stops before any promotion LAMMPS work instead of
+silently continuing with fewer candidates.
 
 This two-type model is an ordered-sublattice LJ surrogate.  Passing the fit
 does not by itself establish transferable elemental Fe physics.  The final

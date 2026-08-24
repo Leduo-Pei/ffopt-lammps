@@ -7,6 +7,7 @@ parameters
     range epsilon factor 0.50 2.00
     range sigma   factor 0.85 1.15
     range charge  delta  0.30
+    cutoff 8.0 A
     charge_limit 1.0
     neutrality derive bhN1
     mixing epsilon geometric

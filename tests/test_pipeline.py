@@ -76,6 +76,16 @@ def test_real_run_writes_immutable_provenance(tmp_path, monkeypatch):
     assert environment["machine_profile"] == "local"
 
 
+def test_pipeline_refuses_nonfinite_runtime_snapshot(tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    config = _config()
+    config["targets"] = {"a": {"value": float("nan")}}
+    monkeypatch.setattr("workflow.pipeline.compose_config", lambda *_: config)
+
+    with pytest.raises(ValueError, match="Out of range float values"):
+        PipelineRunner(project=project, machine="local", run_id="nonfinite")
+
+
 def test_validate_only_uses_initial_input_parameters(tmp_path, monkeypatch):
     project = _project(tmp_path)
     project.data["pipeline"]["stages"] = ["validate"]

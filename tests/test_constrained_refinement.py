@@ -81,6 +81,70 @@ def test_exact_structure_gate_precedes_minimax_and_rmse_breaks_ties():
     assert set(ranking["mechanical_quality_tier"]) == {"best_effort_mechanical"}
 
 
+@pytest.mark.parametrize("recorded_gate", [False, None])
+def test_recorded_static_fit_gate_is_required_and_fail_closed(recorded_gate):
+    spec = _spec(
+        minimum_fit_quality=0.98,
+        fit_quality_column="minimum_fit_r2",
+        fit_quality_pass_column="fit_quality_pass",
+    )
+    structural = _keyed(pd.DataFrame([
+        {"epsilon": 1.0, "sigma": 1.0, "calc_density": 10.0},
+    ]), spec)
+    row = {
+        "epsilon": 1.0,
+        "sigma": 1.0,
+        "B": 100.0,
+        "Cprime": 100.0,
+        "minimum_fit_r2": 0.999,
+    }
+    if recorded_gate is not None:
+        row["fit_quality_pass"] = recorded_gate
+    mechanical = _keyed(pd.DataFrame([row]), spec)
+
+    assessed, ranking = assess_and_rank_candidates(structural, mechanical, spec)
+
+    assert ranking.empty
+    assert not bool(assessed.iloc[0]["mechanical_fit_gate_pass"])
+    assert not bool(assessed.iloc[0]["mechanical_eligible"])
+
+
+def test_recorded_static_fit_gate_and_r2_must_both_pass():
+    spec = _spec(
+        minimum_fit_quality=0.98,
+        fit_quality_column="minimum_fit_r2",
+        fit_quality_pass_column="fit_quality_pass",
+    )
+    structural = _keyed(pd.DataFrame([
+        {"epsilon": 1.0, "sigma": 1.0, "calc_density": 10.0},
+        {"epsilon": 2.0, "sigma": 2.0, "calc_density": 10.0},
+    ]), spec)
+    mechanical = _keyed(pd.DataFrame([
+        {
+            "epsilon": 1.0,
+            "sigma": 1.0,
+            "B": 100.0,
+            "Cprime": 100.0,
+            "minimum_fit_r2": 0.999,
+            "fit_quality_pass": True,
+        },
+        {
+            "epsilon": 2.0,
+            "sigma": 2.0,
+            "B": 100.0,
+            "Cprime": 100.0,
+            "minimum_fit_r2": 0.90,
+            "fit_quality_pass": True,
+        },
+    ]), spec)
+
+    assessed, ranking = assess_and_rank_candidates(structural, mechanical, spec)
+
+    assert list(ranking["epsilon"]) == [1.0]
+    failed = assessed.loc[assessed["epsilon"] == 2.0].iloc[0]
+    assert not bool(failed["mechanical_fit_gate_pass"])
+
+
 def _write_round_inputs(tmp_path: Path, *, all_structural_fail: bool = False):
     structural = tmp_path / "structural.csv"
     mechanical = tmp_path / "mechanical.csv"
@@ -174,7 +238,10 @@ def test_zero_eligible_round_is_valid_and_budget_state_is_machine_readable(tmp_p
 
     assert result.state["eligible_mechanical_candidates"] == 0
     assert result.state["status"] == "budget_exhausted"
-    assert result.state["convergence_status"] == "budget_exhausted"
+    assert result.state["convergence_status"] == "insufficient_eligible_finalists"
+    assert result.state["stop_reason"] == (
+        "maximum_rounds_insufficient_eligible_finalists"
+    )
     assert result.state["best_effort_retained"] is False
     assert pd.read_csv(output / "exact_structural_mechanical_ranking.csv").empty
     assert len(pd.read_csv(output / "mechanical_proposals.csv")) == 1
@@ -287,6 +354,35 @@ def test_capable_backend_may_report_patience_convergence(tmp_path: Path):
     assert second.state["status"] == "converged"
     assert second.state["convergence_status"] == "static_search_converged"
     assert second.state["requires_finalist_validation"] is True
+
+
+def test_patience_cannot_converge_before_required_finalist_floor(tmp_path: Path):
+    structural, mechanical = _write_round_inputs(tmp_path)
+    backend = _ConvergenceCapableBackend()
+    spec = _spec(minimum_eligible_finalists=2)
+    first_dir = tmp_path / "round_01"
+    run_refinement_round(
+        spec=spec,
+        structural_paths=[structural],
+        mechanical_paths=[mechanical],
+        output_dir=first_dir,
+        acquisition=backend,
+    )
+    second = run_refinement_round(
+        spec=spec,
+        structural_paths=[structural],
+        mechanical_paths=[mechanical],
+        previous_state_path=first_dir / "refinement_state.json",
+        output_dir=tmp_path / "round_02",
+        acquisition=backend,
+    )
+
+    assert second.state["no_improvement_rounds"] == 1
+    assert second.state["eligible_mechanical_candidates"] == 1
+    assert second.state["minimum_eligible_finalists"] == 2
+    assert second.state["finalist_floor_reached"] is False
+    assert second.state["status"] == "active"
+    assert second.state["convergence_status"] == "insufficient_eligible_finalists"
 
 
 def test_cubic_derivation_reuses_shared_elasticity_core():

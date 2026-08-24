@@ -12,6 +12,7 @@ from engine.property_evaluators import (
     PropertyEvaluationContext,
     SurfaceEvaluator,
 )
+from workflow.artifact_manifest import sha256_file
 from workflow.input_compiler import compile_input
 from workflow.input_file import InputFileError, parse_input_file
 
@@ -38,9 +39,9 @@ def _data_text(
 {atom_count} atoms
 2 atom types
 
-0.0 10.0 xlo xhi
-0.0 10.0 ylo yhi
-0.0 20.0 zlo zhi
+0.0 30.0 xlo xhi
+0.0 30.0 ylo yhi
+0.0 30.0 zlo zhi
 
 Masses
 
@@ -93,7 +94,8 @@ crystal bcc
 workflow {workflow}
 
 parameters
-{ranges}    mixing default
+{ranges}    cutoff 12.5 A
+    mixing default
     type 1 Fe_corner 6.5 2.3
     type 2 Fe_body 6.5 2.3
 end
@@ -119,6 +121,24 @@ def test_public_bcc110_surface_compiles_as_fitted_constraint(tmp_path: Path) -> 
     assert config["manifest"]["surface_facet"] == "110"
     assert Path(config["manifest"]["data_files"]["surf_complete"]).is_file()
     assert Path(config["manifest"]["data_files"]["surf_split"]).is_file()
+    artifacts = config["manifest"]["data_artifacts"]
+    expected_artifacts = {
+        "manifest.data_files.bulk": Path(config["manifest"]["data_files"]["bulk"]),
+        "manifest.data_files.surf_complete": Path(
+            config["manifest"]["data_files"]["surf_complete"]
+        ),
+        "manifest.data_files.surf_split": Path(
+            config["manifest"]["data_files"]["surf_split"]
+        ),
+    }
+    assert set(artifacts) == set(expected_artifacts)
+    for role, source in expected_artifacts.items():
+        digest = sha256_file(source)
+        assert artifacts[role] == {
+            "path": str(source.resolve()),
+            "sha256": digest.sha256,
+            "size_bytes": digest.size_bytes,
+        }
     assert config["lammps"]["compute_surface"] is True
     assert config["lammps"]["surf"]["replicate"] == [2, 2, 1]
     assert config["lammps"]["surf"]["protocol"] == "minimize_0k"

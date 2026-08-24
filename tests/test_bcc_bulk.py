@@ -8,11 +8,12 @@ import pytest
 from engine.config_loader import deep_merge
 from engine.lammps_interface import LAMMPSRunner
 from engine.model_adequacy import assess_model_adequacy
-from workflow.artifact_manifest import scientific_config_hash
+from workflow.artifact_manifest import scientific_config_hash, sha256_file
 from workflow.defaults import machine_defaults
 from workflow.input_compiler import compile_input
 from workflow.input_file import InputFileError, parse_input_file
-from workflow.pipeline import _scientific_config
+from workflow.pipeline import PipelineRunner, _scientific_config
+from workflow.project import load_project
 
 
 def _data_text(type_count: int = 2) -> str:
@@ -62,6 +63,7 @@ workflow bo validate
 parameters
     range epsilon absolute 0.001 10
     range sigma absolute 0.001 5
+    cutoff 12.5 A
     mixing default
     tie epsilon all
     type 1 Fe_corner 6.0 2.3
@@ -166,6 +168,27 @@ def test_bcc_bulk_compiles_distinct_input_and_runtime_geometry(
     assert compiled.material["force_field"] == "lj/cut"
     assert compiled.material["pair_style"] == "lj/cut"
     assert config["lammps"]["pair_style"] == "lj/cut"
+    assert config["lammps"]["cutoff"] == pytest.approx(12.5)
+    assert config["lammps"]["shift"] is False
+    assert config["lammps"]["tail_correction"] is False
+    cutoff_policy = config["lammps"]["cutoff_policy"]
+    assert cutoff_policy["source"] == "parameters.cutoff"
+    assert cutoff_policy["maximum_sigma_bound"] == pytest.approx(5.0)
+    assert cutoff_policy["cutoff_to_maximum_sigma_ratio"] == pytest.approx(2.5)
+    assert cutoff_policy["minimum_ratio"] == pytest.approx(2.5)
+    assert cutoff_policy["periodic_box_checks"][0]["role"] == "bulk"
+    assert cutoff_policy["periodic_box_checks"][0][
+        "maximum_safe_cutoff_angstrom"
+    ] == pytest.approx(12.89925)
+    bulk_data = Path(config["manifest"]["data_files"]["bulk"])
+    bulk_digest = sha256_file(bulk_data)
+    assert config["manifest"]["data_artifacts"] == {
+        "manifest.data_files.bulk": {
+            "path": str(bulk_data.resolve()),
+            "sha256": bulk_digest.sha256,
+            "size_bytes": bulk_digest.size_bytes,
+        }
+    }
     assert config["pair_params"]["pair_style"] == "lj/cut"
     adequacy = assess_model_adequacy(config)
     assert adequacy["model_form"]["pair_style"] == "lj/cut"
@@ -207,13 +230,24 @@ def test_bcc_runner_passes_one_replicate_and_effective_divisors(
 def test_bcc_runtime_replicate_is_optional_and_defaults_to_identity(
     tmp_path: Path,
 ) -> None:
-    compiled = _compiled(tmp_path, _source(replicate=None))
+    source = _source(replicate=None).replace(
+        "range sigma absolute 0.001 5", "range sigma absolute 0.001 2.5"
+    ).replace("cutoff 12.5 A", "cutoff 6.25 A")
+    compiled = _compiled(tmp_path, source)
     bulk = compiled.config["lammps"]["bulk"]
 
     assert bulk["cells_in_data"] == [5, 5, 5]
     assert bulk["replicate"] == [1, 1, 1]
     assert bulk["effective_cells"] == [5, 5, 5]
     assert (bulk["nx"], bulk["ny"], bulk["nz"]) == (5, 5, 5)
+
+
+def test_bcc_cutoff_requires_periodic_box_headroom(tmp_path: Path) -> None:
+    source = _source(replicate="1 1 1")
+    path = _write(tmp_path, source)
+
+    with pytest.raises(InputFileError, match=r"0\.45\*h_min"):
+        compile_input(parse_input_file(path))
 
 
 def test_bcc_geometry_and_damping_are_part_of_the_scientific_hash(
@@ -223,11 +257,80 @@ def test_bcc_geometry_and_damping_are_part_of_the_scientific_hash(
     baseline = compile_input(parse_input_file(path))
     baseline_hash = scientific_config_hash(_scientific_config(baseline.config))
 
-    path.write_text(_source(replicate="1 2 2", tdamp=80.0), encoding="utf-8")
+    path.write_text(_source(replicate="2 2 3", tdamp=80.0), encoding="utf-8")
     changed = compile_input(parse_input_file(path))
     changed_hash = scientific_config_hash(_scientific_config(changed.config))
 
     assert changed_hash != baseline_hash
+
+
+def test_bcc_cutoff_is_part_of_scientific_hash(tmp_path: Path) -> None:
+    path = _write(tmp_path, _source())
+    baseline = compile_input(parse_input_file(path))
+    baseline_hash = scientific_config_hash(_scientific_config(baseline.config))
+
+    path.write_text(_source().replace("cutoff 12.5 A", "cutoff 12.8 A"))
+    changed = compile_input(parse_input_file(path))
+
+    assert changed.config["lammps"]["cutoff"] == pytest.approx(12.8)
+    assert scientific_config_hash(_scientific_config(changed.config)) != baseline_hash
+
+
+def test_same_path_coordinate_change_invalidates_pipeline_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = _write(tmp_path, _source())
+    first_project = load_project(input_path)
+
+    def fake_run_local(self, state, spec):
+        state.transition(spec.name, "running", increment_attempt=True)
+        for artifact in spec.artifacts:
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text("test\n", encoding="utf-8")
+        state.transition(spec.name, "completed")
+
+    monkeypatch.setattr(PipelineRunner, "_run_local", fake_run_local)
+    first = PipelineRunner(
+        project=first_project,
+        machine="local",
+        run_id="data-content-identity",
+    )
+    assert first.run() == "completed"
+
+    data_path = tmp_path / "data" / "fe.data"
+    original = data_path.read_text(encoding="utf-8")
+    changed = original.replace(
+        "1 1 1 0.0 0.0 0.0 0.0",
+        "1 1 1 0.0 0.125 0.0 0.0",
+        1,
+    )
+    assert changed != original
+    data_path.write_text(changed, encoding="utf-8")
+
+    resumed = PipelineRunner(
+        project=load_project(input_path),
+        machine="local",
+        run_id="data-content-identity",
+        resume=True,
+    )
+    assert resumed.scientific_hash != first.scientific_hash
+    with pytest.raises(RuntimeError, match="scientific input changed"):
+        resumed.run()
+
+
+def test_bcc_cutoff_must_cover_full_sigma_search_domain(tmp_path: Path) -> None:
+    source = _source().replace("cutoff 12.5 A", "cutoff 12.49 A")
+    path = _write(tmp_path, source)
+    expected_line = next(
+        index
+        for index, line in enumerate(source.splitlines(), 1)
+        if line.strip().startswith("cutoff")
+    )
+
+    with pytest.raises(InputFileError, match=r"2\.5\*sigma_max") as exc:
+        compile_input(parse_input_file(path))
+    assert exc.value.line == expected_line
 
 
 def test_bcc_bulk_requires_explicit_cells_in_data(tmp_path: Path) -> None:

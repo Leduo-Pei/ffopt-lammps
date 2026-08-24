@@ -64,10 +64,19 @@ between cheap and expensive information sources
 BOCA further makes the value of a lower fidelity depend on its information and
 cost relative to the target fidelity
 ([Kandasamy *et al.*, 2017](https://proceedings.mlr.press/v70/kandasamy17a.html)).
-The workflow therefore uses exact 0 K elasticity for broad screening and active
-learning, while a diverse subset receives replicated 300 K calculations. The
+The workflow therefore uses symmetric 0 K stress--strain tangents for broad
+screening and active learning, while a diverse subset receives replicated 300 K calculations. The
 paired observations must be used to measure rank retention, bias, noise, and
 the false-negative rate of the static screen.
+
+For an unshifted hard-cutoff pair potential, potential energy is discontinuous
+when a neighbour shell crosses the cutoff. A finite energy-curvature fit can
+therefore produce a smooth-looking high-R2 result that is not an elastic
+constant. FFOpt treats that curvature as a consistency diagnostic only; its
+canonical 0 K `B/Cprime/C44` values come from three pressure responses and a
+small-strain extrapolation. Static and finite-temperature strain magnitudes are
+separate because the former should approach the tangent limit while the latter
+must remain large enough to rise above trajectory noise.
 
 For alpha-Fe, the low-temperature elastic constants reported by Rayne and
 Chandrasekhar imply approximately `B = 173.1 GPa`, `Cprime = 52.5 GPa`, and
