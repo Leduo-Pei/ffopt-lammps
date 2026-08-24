@@ -6,7 +6,7 @@
 [![License](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
 
 [中文完整手册](docs/zh_CN/USER_GUIDE.md) |
-[English documentation](docs/README.md) |
+[Complete English user manual](docs/en/USER_GUIDE.md) |
 [First-run guide](docs/tutorials/quickstart.md) |
 [`ffopt.in` reference](docs/reference/input-file.md) |
 [Releases](https://github.com/Leduo-Pei/ffopt-lammps/releases)
@@ -221,6 +221,7 @@ property-specific default. Elemental BCC inputs must use at least
 
 ## Documentation
 
+- [Complete English user manual](docs/en/USER_GUIDE.md)
 - [Complete Chinese user manual](docs/zh_CN/USER_GUIDE.md)
 - [First-run setup and acceptance](docs/tutorials/quickstart.md)
 - [FFOpt input reference](docs/reference/input-file.md)

@@ -21,6 +21,14 @@ process return code is zero. BO searches broad configured bounds and finds
 lower-objective, feasible regions. Its stability audit identifies candidates
 whose properties repeat under independent velocity seeds.
 
+BO is an online physical-evaluation loop. The optimizer proposes a batch of
+parameter vectors, LAMMPS calculates their properties, FFOpt computes the
+objectives, and BO updates its search model before proposing the next batch.
+Focused sampling likewise obtains every label from LAMMPS. ANN training is the
+offline stage: it learns from the stored LAMMPS-labelled table without calling
+LAMMPS once per epoch. Active learning then sends only selected surrogate
+candidates back to LAMMPS, appends the new labels, and retrains.
+
 BO is not merely an initializer for an unconstrained ANN. It establishes the
 domain in which the parameter-to-property response is learnable.
 

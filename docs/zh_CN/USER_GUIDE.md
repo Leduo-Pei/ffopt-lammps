@@ -698,6 +698,11 @@ bo
 end
 ```
 
+BO 是一个在线 LAMMPS 闭环，而不是离线训练阶段：BO 提出一批参数，LAMMPS
+计算体相、升华焓等启用性质，FFOpt 计算 objective，BO 再用这些真实结果更新搜索
+模型并提出下一批。因此流程图中 BO 必须与 LAMMPS 相连。ANN 不同，它只在已有的
+LAMMPS 标签表上离线训练，训练 epoch 本身不会调用 LAMMPS。
+
 - `method auto` 根据独立维度选 GP、TuRBO 或 SAASBO。`ffopt explain` 和
   `ffopt doctor` 会在运行前显示最终方法；若高维任务本应使用 SAASBO 但没有安装
   Pyro，会明确警告并显示回退到 TuRBO，而不是只写一个含糊的 `auto`。
