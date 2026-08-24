@@ -22,6 +22,7 @@ required = {
     "SECURITY.md",
     "docs/assets/ffopt-workflow.svg",
     "docs/assets/ffopt-workflow.vsdx",
+    "docs/en/USER_GUIDE.md",
     "docs/zh_CN/USER_GUIDE.md",
     "docs/reference/input-file.md",
     "examples/btah/README.md",

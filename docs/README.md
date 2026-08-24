@@ -3,6 +3,11 @@
 The documentation is organized by task so a first-time user does not need to
 read developer internals before running a calculation.
 
+## Complete manuals
+
+- [Complete English user manual](en/USER_GUIDE.md)
+- [Complete Chinese user manual](zh_CN/USER_GUIDE.md)
+
 ## Tutorials
 
 - [First-run setup and acceptance](tutorials/quickstart.md)
@@ -27,10 +32,6 @@ read developer internals before running a calculation.
 
 - [Workflow and accuracy model](explanation/workflow-and-accuracy.md)
 - [Architecture](explanation/architecture.md)
-
-## Chinese
-
-- [Complete Chinese user manual](zh_CN/USER_GUIDE.md)
 
 Historical development audits are kept under `development/` and are not part
 of the current user interface.
