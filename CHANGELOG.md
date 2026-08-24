@@ -6,6 +6,16 @@ expectations while the public API remains in alpha.
 
 ## Unreleased
 
+## 0.3.0a9 - 2026-08-24
+
+### Fixed
+
+- Validate static and dynamic cubic-elastic stage manifests against the same
+  canonical protocol identifiers published by `cubic_elastic_batch`. This
+  prevents completed, hash-valid `cubic_static_0k` and
+  `cubic_dynamic_finite_temperature` batches from being rejected by the
+  pipeline under legacy `static`/`dynamic` aliases.
+
 ## 0.3.0a8 - 2026-08-24
 
 ### Changed

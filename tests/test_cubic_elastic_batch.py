@@ -25,6 +25,7 @@ from engine.cubic_elastic_batch import (
 )
 from engine.cubic_elastic_runner import (
     ATM_TO_GPA,
+    DYNAMIC_PROTOCOL,
     KCAL_PER_MOL_ANGSTROM3_TO_GPA,
     STATIC_PROTOCOL,
     StateExecutionResult,
@@ -32,6 +33,7 @@ from engine.cubic_elastic_runner import (
 from engine.parameter_space import build_parameter_space
 from workflow.input_compiler import compile_input
 from workflow.input_file import parse_input_file
+from workflow.material_pipeline import validate_material_stage_outputs
 
 
 def _rank_row(key, maximum, rmse, *, structure=True, born=True, fit=True, contrast=0.1):
@@ -669,6 +671,21 @@ def test_static_then_dynamic_expands_real_seeds_and_allows_rank_reversal(tmp_pat
     assert list(static["Fe_corner_epsilon"]) == [5.0, 7.0]
     assert (static_output / "static_results.csv").is_file()
     assert (static_output / "stage_manifest.json").is_file()
+    assert json.loads((static_output / "stage_manifest.json").read_text())[
+        "identifier"
+    ] == f"cubic_elastic_batch:{STATIC_PROTOCOL}"
+    valid, reason = validate_material_stage_outputs(
+        static_output,
+        command_token="static",
+        expected_artifacts=[
+            static_output / "static_results.csv",
+            static_output / "finalists_selected.csv",
+            static_output / "best_candidate.json",
+            static_output / "batch_summary.json",
+            static_output / "stage_manifest.json",
+        ],
+    )
+    assert valid, reason
     assert not any("rank_" in str(path) for path in (static_output / "candidate_runs").rglob("*"))
 
     dynamic_output = tmp_path / "dynamic"
@@ -692,6 +709,22 @@ def test_static_then_dynamic_expands_real_seeds_and_allows_rank_reversal(tmp_pat
     assert (dynamic["B_gpa_std"] > 0.0).all()
     assert (dynamic_output / "dynamic_seed_results.csv").is_file()
     assert (dynamic_output / "stage_manifest.json").is_file()
+    assert json.loads((dynamic_output / "stage_manifest.json").read_text())[
+        "identifier"
+    ] == f"cubic_elastic_batch:{DYNAMIC_PROTOCOL}"
+    valid, reason = validate_material_stage_outputs(
+        dynamic_output,
+        command_token="finalists",
+        expected_artifacts=[
+            dynamic_output / "dynamic_results.csv",
+            dynamic_output / "dynamic_seed_results.csv",
+            dynamic_output / "finalists_selected.csv",
+            dynamic_output / "best_candidate.json",
+            dynamic_output / "batch_summary.json",
+            dynamic_output / "stage_manifest.json",
+        ],
+    )
+    assert valid, reason
     before = sum(dynamic_factory.calls.values())
     run_elasticity_batch(
         config_path=config_path,

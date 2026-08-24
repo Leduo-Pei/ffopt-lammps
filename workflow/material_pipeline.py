@@ -19,6 +19,7 @@ from typing import Any, Iterable, Mapping
 import pandas as pd
 
 from engine.parameter_space import build_parameter_space
+from engine.cubic_elastic_runner import DYNAMIC_PROTOCOL, STATIC_PROTOCOL
 from workflow.artifact_manifest import (
     ArtifactManifestError,
     build_artifact_manifest,
@@ -107,9 +108,9 @@ _MATERIAL_STAGE_OUTPUT_FILES: dict[str, dict[str, str]] = {
 
 _MATERIAL_STAGE_IDENTIFIERS = {
     "candidates": ("stage", "material_candidates", False),
-    "static": ("stage", "cubic_elastic_batch:static", False),
+    "static": ("stage", f"cubic_elastic_batch:{STATIC_PROTOCOL}", False),
     "material-nn": ("stage", "material_surrogate_preflight", False),
-    "finalists": ("stage", "cubic_elastic_batch:dynamic", False),
+    "finalists": ("stage", f"cubic_elastic_batch:{DYNAMIC_PROTOCOL}", False),
     # A normal validation manifest is candidate-scoped.  A scientifically
     # terminal zero-eligible result is stage-scoped, and is checked separately
     # below while retaining the same identifier prefix.
