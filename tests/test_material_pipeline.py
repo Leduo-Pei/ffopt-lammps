@@ -11,6 +11,7 @@ from workflow.material_pipeline import (
     build_refinement_spec,
     validate_material_stage_outputs,
 )
+from workflow.material_screen import select_static_screen_candidates
 from workflow.pipeline import PipelineRunner
 from workflow.project import Project
 from workflow.state import WorkflowState
@@ -163,6 +164,48 @@ def test_compiled_elasticity_maps_to_generic_refinement_contract():
     )["mode"] == "absolute"
 
 
+def test_static_screen_uses_strict_core_before_buffer_quota():
+    config = _material_config()
+    rows = []
+    for index in range(8):
+        strict = index < 6
+        rows.append({
+            "parameter_key": f"candidate-{index}",
+            "FeA_epsilon": 1.0 + 0.1 * index,
+            "FeA_sigma": 2.0 + 0.01 * index,
+            "FeB_sigma": 2.4 + 0.01 * index,
+            "success": True,
+            "objective": 10.0 + index if strict else 0.0,
+            "calc_a": 2.86 if strict else 3.10,
+            "calc_b": 2.86 if strict else 3.10,
+            "calc_c": 2.86 if strict else 3.10,
+            "calc_alpha": 90.0,
+            "calc_beta": 90.0,
+            "calc_gamma_ang": 90.0,
+            "calc_density": 7.87 if strict else 8.50,
+            "calc_surf_energy": 2.34,
+        })
+
+    selected = select_static_screen_candidates(
+        pd.DataFrame(rows),
+        config=config,
+        settings={
+            "minimum": 4,
+            "per_dimension": 1,
+            "maximum": 4,
+            "core_fraction": 0.5,
+            "buffer_multiplier": 1.5,
+            "objective_elite_fraction": 0.25,
+        },
+    )
+
+    assert len(selected) == 4
+    assert selected["structural_gate_pass"].all()
+    assert set(selected["screen_region"]) == {"core"}
+    assert set(selected["screen_core_quota"]) == {4}
+    assert set(selected["screen_configured_core_fraction"]) == {0.5}
+
+
 def test_material_pipeline_installs_commands_and_explicit_coverage_sources(
     tmp_path, monkeypatch
 ):
@@ -226,6 +269,7 @@ def test_material_pipeline_installs_commands_and_explicit_coverage_sources(
     assert specs["static"].command[
         specs["static"].command.index("--parameters") + 1
     ] == str(runner.root / "candidates" / "static_screen_candidates.csv")
+    assert "--evaluate-structural-failures" not in specs["static"].command
     for option, expected in (
         ("--available-cores", "8"),
         ("--cores-per-state", "1"),

@@ -6,6 +6,28 @@ expectations while the public API remains in alpha.
 
 ## Unreleased
 
+## 0.3.0a8 - 2026-08-24
+
+### Changed
+
+- Apply the declared structure/surface hard gate before the initial static
+  elastic screen. Candidates outside that gate remain explicit skipped
+  evidence and no longer launch unnecessary 0 K strain calculations; exact
+  constrained-AL promotions retain their existing retryable-failure contract.
+- Fill the bounded initial static design from every available strict-core
+  candidate before retaining relaxed/global shortfall rows. A historical
+  `core_fraction` below one can no longer displace hard-gate-eligible
+  mechanical labels with rows that the elastic batch must skip.
+
+### Fixed
+
+- Preserve freshly recomputed structural, Born, fit-quality, and eligibility
+  decisions when mixed BO/Sample/Audit tables contain a refinement alias
+  column that is null for the current row. Previously, a null
+  `structural_feasible` value could overwrite a valid hard-gate pass after an
+  otherwise successful static calculation and collapse a multi-point eligible
+  set to the warm-start row alone.
+
 ## 0.3.0a7 - 2026-08-24
 
 ### Changed

@@ -140,6 +140,42 @@ def test_refinement_aliases_are_directly_accepted_by_finalist_selection():
     assert selected.iloc[0]["finalist_selection_role"] == "near_optimal_quality"
 
 
+def test_missing_refinement_aliases_do_not_erase_recomputed_gates():
+    row = _rank_row("candidate1", 22.0, 15.0)
+    row.update({
+        "structural_feasible": None,
+        "structural_minimum_margin": None,
+        "mechanical_stability_gate_pass": None,
+        "mechanical_fit_gate_pass": None,
+        "mechanical_eligible": None,
+    })
+
+    ranked = rank_elastic_results(pd.DataFrame([row]))
+
+    assert bool(ranked.iloc[0]["structural_gate_pass"])
+    assert ranked.iloc[0]["structural_margin"] == pytest.approx(0.5)
+    assert bool(ranked.iloc[0]["born_stability_pass"])
+    assert bool(ranked.iloc[0]["fit_quality_pass"])
+    assert bool(ranked.iloc[0]["finalist_eligible"])
+
+
+def test_explicit_refinement_alias_still_supersedes_stale_gate():
+    row = _rank_row("candidate1", 22.0, 15.0)
+    row.update({
+        "structural_feasible": False,
+        "structural_minimum_margin": -0.25,
+        "mechanical_stability_gate_pass": True,
+        "mechanical_fit_gate_pass": True,
+        "mechanical_eligible": False,
+    })
+
+    ranked = rank_elastic_results(pd.DataFrame([row]))
+
+    assert not bool(ranked.iloc[0]["structural_gate_pass"])
+    assert ranked.iloc[0]["structural_margin"] == pytest.approx(-0.25)
+    assert not bool(ranked.iloc[0]["finalist_eligible"])
+
+
 def test_near_optimal_selection_keeps_quality_primary_and_adds_diversity():
     frame = pd.DataFrame([
         {**_rank_row(f"candidate{index}", 10.0 + index, 8.0 + index), "epsilon": value}
@@ -761,6 +797,33 @@ def test_zero_structural_eligible_is_successful_manifested_outcome(tmp_path):
     assert set(ranked["calculation_status"]) == {"skipped_structural_gate"}
     assert not factory.calls
     assert json.loads((output / "best_candidate.json").read_text())["status"] == "zero_hard_gate_eligible"
+    assert (output / "stage_manifest.json").is_file()
+
+
+def test_static_batch_runs_only_hard_gate_pass_rows(tmp_path):
+    config_path, config = _compiled_config(tmp_path)
+    candidates = tmp_path / "mixed-structure.csv"
+    frame = _candidate_frame(config)
+    frame.loc[frame.index[0], "calc_a"] = 3.2
+    frame.to_csv(candidates, index=False)
+    output = tmp_path / "mixed-static"
+    factory = FakeBackendFactory(tmp_path)
+
+    ranked = run_elasticity_batch(
+        config_path=config_path,
+        parameters_path=candidates,
+        output_dir=output,
+        protocol="static",
+        resources=_resources(),
+        top_n=2,
+        diversity_slots=0,
+        backend_factory=factory,
+    )
+
+    status_by_epsilon = dict(zip(ranked["Fe_corner_epsilon"], ranked["calculation_status"]))
+    assert status_by_epsilon == {5.0: "skipped_structural_gate", 7.0: "completed"}
+    assert not any(key[0] == 5.0 for key in factory.calls)
+    assert any(key[0] == 7.0 for key in factory.calls)
     assert (output / "stage_manifest.json").is_file()
 
 

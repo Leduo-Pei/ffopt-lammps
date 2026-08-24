@@ -666,7 +666,6 @@ class PipelineRunner:
                 self.root / "candidates" / "static_screen_candidates.csv",
                 "--output-dir", output,
                 "--protocol", "static",
-                "--evaluate-structural-failures",
                 *self._elastic_batch_resource_args(name),
                 *self._finalist_selection_args(name),
             )

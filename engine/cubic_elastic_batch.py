@@ -689,9 +689,18 @@ def normalize_ranking_contract(frame: pd.DataFrame) -> pd.DataFrame:
     for target, source in aliases.items():
         # Constrained-refinement gate columns are newer, explicit decisions;
         # when both are present they supersede any stale evidence copied from
-        # the structural/static input table.
+        # the structural/static input table.  Concatenated BO/Sample/Audit
+        # frames can contain these alias columns only because another source
+        # declared them, leaving NaN in the current row.  A missing alias is
+        # not a decision and must never erase a freshly recomputed gate.
         if source in normalized:
-            normalized[target] = normalized[source]
+            present = normalized[source].notna()
+            if target not in normalized:
+                normalized[target] = normalized[source]
+            elif bool(present.any()):
+                normalized[target] = normalized[target].where(
+                    ~present, normalized[source]
+                )
     if "finite_mechanical_score" not in normalized:
         maximum = pd.to_numeric(
             normalized.get(
