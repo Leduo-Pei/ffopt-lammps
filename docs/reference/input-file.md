@@ -422,8 +422,9 @@ calculation and is distinct from bulk `cells_in_data`.
 Dynamic promotion and final validation are two separately fingerprinted
 protocols. `npt_equilibration`, `nvt_equilibration`, and `production` control the
 promotion NPT equilibration, NVT equilibration, and NVT production lengths;
-`seeds` are its trajectories. The packaged Fe workflow uses this quick
-multi-seed protocol for all 20 finalists. `validation_strain`,
+`seeds` are its trajectories. The packaged Fe workflow adaptively splits this
+protocol into a 38-candidate one-seed triage and a 10-candidate remaining-seed
+confirmation. `validation_strain`,
 `validation_npt_equilibration`, `validation_nvt_equilibration`, and
 `validation_production` define the longer protocol used only for the promoted
 winner. `validation_seeds` must be present when a validation-specific override
@@ -654,20 +655,30 @@ screen
 end
 
 finalists
-    minimum 20
+    minimum 10
     maximum 20
+    mode adaptive
+    triage 38
+    confirm 10
+    triage_seed 101
+    clusters auto
+    max_clusters 8
+    cluster_minimum 1
+    incumbent initial
     window 1.0
     diverse 4
     require_minimum yes
 end
 ```
 
-Finalists are selected by exact 0 K minimax rank plus a reserved diverse
-branch. Their finite-temperature order is recomputed and may differ from the
-static order; both ranks and evidence levels remain in the result bundle. With
-`require_minimum yes`, `minimum` is a hard preflight floor: if fewer than 20
-unique hard-gate candidates are eligible, the stage stops before launching any
-finite-temperature LAMMPS work. It never silently substitutes a smaller set.
+Adaptive finalists are selected by exact 0 K minimax rank, deterministic basin
+quotas, and maximin distance. `triage` candidates receive `triage_seed`; their
+exact finite-temperature order selects `confirm` candidates for every remaining
+promotion seed. Only the complete seed set enters the final rank. With
+`require_minimum yes`, `minimum` is the hard confirmation floor. `incumbent
+initial` explicitly protects the current input initial coordinate for
+same-material iteration but re-evaluates it under the current protocol;
+`incumbent off` is the cold-start default and no old folders are discovered.
 
 ## Robust audit and finalization
 

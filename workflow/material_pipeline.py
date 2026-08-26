@@ -91,6 +91,11 @@ _MATERIAL_STAGE_OUTPUT_FILES: dict[str, dict[str, str]] = {
         "finalists": "finalists_selected.csv",
         "best_candidate": "best_candidate.json",
         "batch_summary": "batch_summary.json",
+        "triage_selected": "dynamic_triage_selected.csv",
+        "triage_seed_results": "dynamic_triage_seed_results.csv",
+        "triage_results": "dynamic_triage_results.csv",
+        "confirmation_selected": "dynamic_confirmation_selected.csv",
+        "racing_state": "dynamic_racing_state.json",
     },
     "material-validate": {
         "validation_summary": "validation_summary.json",
@@ -202,6 +207,11 @@ def validate_material_stage_outputs(
         if prefix
         else manifest.identifier == identifier
     )
+    if command_token == "finalists":
+        identifier_valid = manifest.identifier in {
+            f"cubic_elastic_batch:{DYNAMIC_PROTOCOL}",
+            "adaptive_dynamic_promotion:v1",
+        }
     if command_token == "material-validate" and manifest.kind == "candidate":
         identifier_valid = manifest.identifier == f"material_validation:{manifest.parameter_key}"
     if not kind_valid or not identifier_valid:

@@ -71,7 +71,7 @@ conda install -c conda-forge "lammps=*=*openmpi*" openmpi -y
 python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 python -m pip install \
-  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a9/ffopt_lammps-0.3.0a9-py3-none-any.whl"
+  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a10/ffopt_lammps-0.3.0a10-py3-none-any.whl"
 ```
 
 The example intentionally installs CPU PyTorch. On a GPU workstation, first
@@ -118,7 +118,7 @@ conda activate ffopt
 conda env config vars set PYTHONNOUSERSITE=1
 conda deactivate
 conda activate ffopt
-python -m pip install "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a9/ffopt_lammps-0.3.0a9-py3-none-any.whl"
+python -m pip install "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a10/ffopt_lammps-0.3.0a10-py3-none-any.whl"
 ```
 
 LAMMPS and MPI may be installed separately. Their absolute paths are then
@@ -634,13 +634,19 @@ static_strain  0.0005 0.001 0.002
 dynamic_strain 0.002  0.004 0.006
 ```
 
-Finite-temperature elemental BCC elasticity uses two separate protocols. A
-hard-gated set of 20 candidates is reranked by a shorter multiseed promotion;
-only the winner receives an independent seed and a long final validation
-trajectory. Production Fe inputs require `finalists minimum 20`, `maximum 20`,
-and `require_minimum yes`. If fewer than 20 unique candidates pass structural,
-Born-stability, and fit-quality gates, the program stops before launching any
-300 K LAMMPS work.
+Finite-temperature elemental BCC elasticity uses an adaptive promotion and an
+independent validation protocol. The production Fe input first evaluates 38
+cluster-balanced hard-gate candidates with seed 101. Exact one-seed 300 K
+evidence reranks them; only 10 candidates receive seeds 202 and 303, and only a
+complete three-seed candidate may win. This is 58 trajectories (`38 x 1 + 10 x
+2`) inside one single-node finalist job. The winner alone receives the long
+holdout validation seeds. `require_minimum yes` applies to the declared
+`minimum 10` complete confirmation candidates.
+
+`incumbent initial` is an explicit same-material version-iteration safeguard:
+it protects the current `type`-line coordinate but re-evaluates every property.
+Use `incumbent off` (the default) for a new material. FFOpt never searches old
+`runs/` or `archive/` directories for an incumbent.
 
 Official 0 K `B`, `Cprime`, and `C44` values come from hydrostatic,
 orthorhombic, and shear stress responses. Two inner strain amplitudes are

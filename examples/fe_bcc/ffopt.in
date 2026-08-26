@@ -20,11 +20,12 @@ parameters
 
     # id  label       epsilon(kcal/mol)  sigma(A)
     # Charge is implicitly disabled for an elemental material.  The initial
-    # values are one previously measured structural-feasible point, used only
-    # as the single BO warm start.  The broad ranges and all BO/Sample/AL
-    # evaluations remain new calculations.
-    type 1 Fe_corner 5.9464626141 2.0046831130
-    type 2 Fe_body   5.9464626141 2.6112575897
+    # values are one previously measured same-material point.  ``incumbent
+    # initial`` below protects only this coordinate: every structural, static,
+    # and dynamic property is recalculated under the current protocol.  New
+    # materials should use a physical initial guess and ``incumbent off``.
+    type 1 Fe_corner 6.0091765721 2.5804861035
+    type 2 Fe_body   6.0091765721 2.0426427897
 end
 
 property bulk
@@ -90,7 +91,8 @@ property elasticity
     replicate 2 2 2
     temperature 300 K
     timestep 1 fs
-    # Quick multi-seed promotion for the 20 finalist candidates.
+    # Adaptive promotion first evaluates 38 dispersed candidates with seed 101,
+    # then gives only the exact one-seed Top-10 the remaining seeds 202/303.
     npt_equilibration 20000
     nvt_equilibration 20000
     production 40000
@@ -167,11 +169,19 @@ al
 end
 
 finalists
-    minimum 20
+    minimum 10
     maximum 20
+    mode adaptive
+    triage 38
+    confirm 10
+    triage_seed 101
+    clusters auto
+    max_clusters 8
+    cluster_minimum 1
+    incumbent initial
     window 1.0
     diverse 4
-    # Never hide a thin candidate pool by silently promoting fewer points.
+    # Never hide a thin confirmation pool by silently promoting fewer points.
     require_minimum yes
 end
 

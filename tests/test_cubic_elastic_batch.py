@@ -8,6 +8,7 @@ import threading
 import pandas as pd
 import pytest
 
+from engine.adaptive_dynamic_promotion import run_adaptive_dynamic_promotion
 from engine.cubic_elastic_batch import (
     BatchArtifactError,
     Candidate,
@@ -738,6 +739,92 @@ def test_static_then_dynamic_expands_real_seeds_and_allows_rank_reversal(tmp_pat
         backend_factory=dynamic_factory,
     )
     assert sum(dynamic_factory.calls.values()) == before
+
+
+def test_adaptive_dynamic_runs_broad_seed_then_confirms_only_reranked_winner(tmp_path):
+    config_path, config = _compiled_config(tmp_path)
+    candidates = tmp_path / "adaptive-candidates.csv"
+    _candidate_frame(config).to_csv(candidates, index=False)
+    static_output = tmp_path / "adaptive-static"
+    run_elasticity_batch(
+        config_path=config_path,
+        parameters_path=candidates,
+        output_dir=static_output,
+        protocol="static",
+        resources=_resources(),
+        top_n=2,
+        minimum=2,
+        diversity_slots=0,
+        backend_factory=FakeBackendFactory(tmp_path),
+    )
+
+    output = tmp_path / "adaptive-dynamic"
+    factory = FakeBackendFactory(tmp_path)
+    ranked = run_adaptive_dynamic_promotion(
+        config_path=config_path,
+        parameters_path=static_output / "static_results.csv",
+        output_dir=output,
+        resources=_resources(),
+        screen_candidates=2,
+        confirm_candidates=1,
+        triage_seed=101,
+        maximum_clusters=2,
+        minimum_per_cluster=1,
+        top_n=1,
+        minimum=1,
+        require_minimum=True,
+        diversity_slots=0,
+        backend_factory=factory,
+    )
+
+    candidate_seed_pairs = {
+        (epsilon, seed) for epsilon, protocol, seed, _state in factory.calls
+        if protocol == DYNAMIC_PROTOCOL
+    }
+    assert candidate_seed_pairs == {(5.0, 101), (7.0, 101), (7.0, 202)}
+    seed_rows = pd.read_csv(output / "dynamic_seed_results.csv")
+    assert len(seed_rows) == 3
+    assert int(ranked["all_seeds_complete"].sum()) == 1
+    assert float(ranked.iloc[0]["Fe_corner_epsilon"]) == pytest.approx(7.0)
+    assert json.loads((output / "best_candidate.json").read_text())[
+        "raw_free_parameters"
+    ]["Fe_corner_epsilon"] == pytest.approx(7.0)
+    state = json.loads((output / "dynamic_racing_state.json").read_text())
+    assert state["triage"]["work_units"] == 2
+    assert state["confirmation"]["work_units"] == 1
+    assert state["total_dynamic_work_units"] == 3
+    valid, reason = validate_material_stage_outputs(
+        output,
+        command_token="finalists",
+        expected_artifacts=[
+            output / "dynamic_results.csv",
+            output / "dynamic_seed_results.csv",
+            output / "finalists_selected.csv",
+            output / "best_candidate.json",
+            output / "batch_summary.json",
+            output / "stage_manifest.json",
+        ],
+    )
+    assert valid, reason
+
+    before = sum(factory.calls.values())
+    run_adaptive_dynamic_promotion(
+        config_path=config_path,
+        parameters_path=static_output / "static_results.csv",
+        output_dir=output,
+        resources=_resources(),
+        screen_candidates=2,
+        confirm_candidates=1,
+        triage_seed=101,
+        maximum_clusters=2,
+        minimum_per_cluster=1,
+        top_n=1,
+        minimum=1,
+        require_minimum=True,
+        diversity_slots=0,
+        backend_factory=factory,
+    )
+    assert sum(factory.calls.values()) == before
 
 
 def test_partial_resume_retries_only_failed_parameter_key_state(tmp_path):

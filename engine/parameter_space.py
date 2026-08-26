@@ -156,3 +156,50 @@ def build_parameter_space(
             "pair_params in the generated engine configuration."
         )
     return space
+
+
+def initial_parameter_values(config: dict[str, Any]) -> dict[str, float]:
+    """Return ordered initial values for every independent force-field parameter."""
+
+    parameter_space = build_parameter_space(config)
+    required = {name for name, _lower, _upper in parameter_space}
+    values: dict[str, float] = {}
+    for atom_type in config.get("atom_types", []):
+        label = str(atom_type["label"])
+        for parameter, specification in atom_type.get("params", {}).items():
+            name = f"{label}_{parameter}"
+            if name not in required or not isinstance(specification, Mapping):
+                continue
+            initial = specification.get("init")
+            if initial is None:
+                initial = (
+                    float(specification["min"]) + float(specification["max"])
+                ) / 2.0
+            values[name] = float(initial)
+    for pair in config.get("pair_params", {}).get("explicit_pairs", []):
+        first, second = pair["types"]
+        for parameter in ("epsilon", "sigma"):
+            name = f"cross_{first}_{second}_{parameter}"
+            if name not in required:
+                continue
+            specification = pair[parameter]
+            initial = specification.get("init")
+            if initial is None:
+                initial = (
+                    float(specification["min"]) + float(specification["max"])
+                ) / 2.0
+            values[name] = float(initial)
+    missing = sorted(required - set(values))
+    if missing:
+        raise ValueError(f"Initial force-field parameters are missing: {missing}")
+    return {
+        name: values[name]
+        for name, _lower, _upper in parameter_space
+    }
+
+
+__all__ = [
+    "build_parameter_space",
+    "initial_parameter_values",
+    "parameter_difference_error",
+]

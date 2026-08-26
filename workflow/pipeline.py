@@ -656,6 +656,11 @@ class PipelineRunner:
             ):
                 if screen.get(key) is not None:
                     command.extend([option, str(screen[key])])
+            if self._has_kind("finalists"):
+                finalist_settings = self._stage_settings("finalists")
+                incumbent = str(finalist_settings.get("incumbent", "off")).lower()
+                if incumbent != "off":
+                    command.extend(["--incumbent", incumbent])
             command.extend(["--output-dir", str(output)])
             return command
         if command_token == "static":
@@ -715,6 +720,24 @@ class PipelineRunner:
                 / constrained[-1].name
                 / "exact_structural_mechanical_ranking.csv"
             )
+            settings = self._stage_settings(name)
+            if str(settings.get("mode", "full")).lower() == "adaptive":
+                command = self._python_module(
+                    "engine.adaptive_dynamic_promotion",
+                    "--config", self.config_path,
+                    "--parameters", parameters,
+                    "--output-dir", output,
+                    "--screen-candidates", settings["screen_candidates"],
+                    "--confirm-candidates", settings["confirm_candidates"],
+                    "--triage-seed", settings["triage_seed"],
+                    "--cluster-mode", settings.get("cluster_mode", "auto"),
+                    "--maximum-clusters", settings.get("maximum_clusters", 8),
+                    "--minimum-per-cluster", settings.get("minimum_per_cluster", 1),
+                    "--incumbent", settings.get("incumbent", "off"),
+                    *self._elastic_batch_resource_args(name),
+                    *self._finalist_selection_args(name),
+                )
+                return command
             return self._python_module(
                 "engine.cubic_elastic_batch",
                 "--config", self.config_path,
@@ -741,7 +764,12 @@ class PipelineRunner:
             constrained = self._constrained_nodes()
             if self._has_kind("finalists") and constrained:
                 finalists = self._stage_settings("finalists")
-                top_n = int(finalists.get("maximum", finalists.get("top_n", 20)))
+                top_n = int(
+                    finalists.get(
+                        "confirm_candidates",
+                        finalists.get("maximum", finalists.get("top_n", 20)),
+                    )
+                )
                 command.extend([
                     "--parameters", str(self.root / "finalists" / "best_candidate.json"),
                     "--static-ranking",

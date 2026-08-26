@@ -1186,14 +1186,27 @@ def cmd_explain(args: argparse.Namespace) -> None:
         )
     if "finalists" in stages:
         finalists = project.data.get("pipeline", {}).get("finalists", {})
-        print(
-            "Dynamic finalists      : "
-            f"minimum={finalists.get('minimum')} "
-            f"maximum={finalists.get('maximum')} "
-            f"hard_floor={'yes' if finalists.get('require_minimum') else 'no'} "
-            f"window={finalists.get('near_optimal_window_percent')}% "
-            f"diverse={finalists.get('diverse_reserve')}"
-        )
+        if str(finalists.get("mode", "full")).lower() == "adaptive":
+            dynamic_seeds = config["elasticity"]["modules"]["dynamic"]["protocol"]["seeds"]
+            print(
+                "Dynamic finalists      : adaptive "
+                f"triage={finalists.get('screen_candidates')}x1 "
+                f"confirm={finalists.get('confirm_candidates')}x"
+                f"{max(0, len(dynamic_seeds) - 1)} "
+                f"triage_seed={finalists.get('triage_seed')} "
+                f"clusters={finalists.get('cluster_mode')} "
+                f"incumbent={finalists.get('incumbent')} "
+                f"hard_floor={'yes' if finalists.get('require_minimum') else 'no'}"
+            )
+        else:
+            print(
+                "Dynamic finalists      : "
+                f"minimum={finalists.get('minimum')} "
+                f"maximum={finalists.get('maximum')} "
+                f"hard_floor={'yes' if finalists.get('require_minimum') else 'no'} "
+                f"window={finalists.get('near_optimal_window_percent')}% "
+                f"diverse={finalists.get('diverse_reserve')}"
+            )
     if "audit" in stages:
         final_audit = project.data.get("pipeline", {}).get("audit", {})
         final_seeds = final_audit.get("seeds", [])

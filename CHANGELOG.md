@@ -6,6 +6,30 @@ expectations while the public API remains in alpha.
 
 ## Unreleased
 
+## 0.3.0a10 - 2026-08-26
+
+### Added
+
+- Add deterministic, material-agnostic feasible-region clustering in normalized
+  free-parameter space. Candidate selection now deduplicates exact parameter
+  coordinates, preserves small separated basins with declared minimum quotas,
+  and fills the remaining budget by quality-aware maximin distance.
+- Add an adaptive single-node 300 K finalist cascade: a broad one-seed triage is
+  reranked using exact finite-temperature evidence before only a smaller set is
+  promoted to the remaining seeds. The Fe production contract is `38 x 1 ->
+  10 x 2`, or 58 trajectories instead of evaluating every candidate with every
+  seed.
+- Add explicit `finalists incumbent initial|off`. The default is cold start and
+  never scans old run or archive directories. In same-material version
+  iteration, `initial` protects the input type-line coordinate while forcing all
+  current structure, 0 K, and 300 K evidence to be recomputed.
+
+### Changed
+
+- Publish triage selections, seed evidence, confirmation decisions, and racing
+  state as hash-verified finalist-stage artifacts. Only candidates completing
+  the full declared dynamic seed set can become the final result.
+
 ## 0.3.0a9 - 2026-08-24
 
 ### Fixed
