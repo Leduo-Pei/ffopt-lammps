@@ -98,7 +98,8 @@ structural BO coverage
   -> independent-seed structural audit
   -> 0 K cubic stress-slope screen extrapolated to zero strain
   -> constrained-minimax surrogate and AL
-  -> exactly 20 diverse candidates in a quick multi-seed 300 K promotion
+  -> 38 cluster-balanced candidates with one quick 300 K seed
+  -> exact reranking, then 10 candidates with the two remaining seeds
   -> one promoted winner in an independent long-trajectory validation
   -> static rank + dynamic rank + final result bundle
 ```
@@ -120,17 +121,19 @@ Static and finite-temperature elastic calculations use independent target
 triplets and independent protocols. `G`, `E`, and Poisson's ratio are derived
 diagnostics, not additional fit dimensions. A finite-temperature ranking can
 reverse the static ranking, so every result row keeps both ranks and its
-evidence level. In the packaged example, all 20 finalists use the quick
-promotion protocol with seeds `101 202 303`. Only its winner enters the longer
+evidence level. In the packaged example, 38 finalists use seed `101`; exact
+300 K evidence then selects 10 candidates for seeds `202 303`. Only its winner
+enters the longer
 validation protocol, whose disjoint holdout seeds are `404 505 606`;
 deterministic replay of a promotion trajectory is not independent validation. The final protocol
 has its own strain magnitudes, NPT/NVT equilibration lengths, and production
 length, and both protocol fingerprints retain the shared global cutoff.
 
-The example sets `minimum 20`, `maximum 20`, and `require_minimum yes` in its
-`finalists` block. This is a hard floor, not a request to return “up to 20”: if
-fewer than 20 unique candidates pass the structural, Born-stability, and fit
-quality gates, promotion fails before any 300 K LAMMPS work is launched.
+The example sets adaptive `triage 38`, `confirm 10`, `minimum 10`, and
+`require_minimum yes` in its `finalists` block. This is a hard confirmation
+floor, not a request to return “up to 10”. `incumbent initial` protects only an
+explicit same-material coordinate and never imports its old evidence; new
+materials use `incumbent off`.
 
 After final validation, the principal user-facing products are under
 `runs/<project>/pipelines/<run-id>/validate/`: `validation_summary.json`,

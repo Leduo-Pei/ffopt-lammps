@@ -1238,6 +1238,14 @@ def _apply_stage_settings(
         "window": "near_optimal_window_percent",
         "diverse": "diverse_reserve",
         "require_minimum": "require_minimum",
+        "mode": "mode",
+        "triage": "screen_candidates",
+        "confirm": "confirm_candidates",
+        "triage_seed": "triage_seed",
+        "clusters": "cluster_mode",
+        "max_clusters": "maximum_clusters",
+        "cluster_minimum": "minimum_per_cluster",
+        "incumbent": "incumbent",
     }
     maps = {
         "bo": bo_map,
@@ -2020,6 +2028,90 @@ def _apply_stage_settings(
                 _stage_line(document, "finalists", "window"),
                 "finalists window must be finite and non-negative",
             )
+        mode = str(finalists.get("mode", "full")).lower()
+        if mode not in {"full", "adaptive"}:
+            raise InputFileError(
+                document.path,
+                _stage_line(document, "finalists", "mode"),
+                "finalists mode must be full or adaptive",
+            )
+        if mode == "adaptive":
+            adaptive_defaults = {
+                "screen_candidates": max(38, int(finalists["maximum"])),
+                "confirm_candidates": int(finalists["minimum"]),
+                "cluster_mode": "auto",
+                "maximum_clusters": 8,
+                "minimum_per_cluster": 1,
+                "incumbent": "off",
+            }
+            for key, value in adaptive_defaults.items():
+                finalists.setdefault(key, value)
+            for key in (
+                "screen_candidates", "confirm_candidates", "maximum_clusters",
+                "minimum_per_cluster",
+            ):
+                value = finalists[key]
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise InputFileError(
+                        document.path,
+                        _stage_line(document, "finalists", key),
+                        f"finalists {key} must be a non-negative integer",
+                    )
+            if int(finalists["confirm_candidates"]) < 1:
+                raise InputFileError(
+                    document.path,
+                    _stage_line(document, "finalists", "confirm"),
+                    "finalists confirm must be positive",
+                )
+            if int(finalists["screen_candidates"]) < int(finalists["confirm_candidates"]):
+                raise InputFileError(
+                    document.path,
+                    _stage_line(document, "finalists", "triage", "confirm"),
+                    "finalists triage cannot be smaller than confirm",
+                )
+            if int(finalists["confirm_candidates"]) < int(finalists["minimum"]):
+                raise InputFileError(
+                    document.path,
+                    _stage_line(document, "finalists", "confirm", "minimum"),
+                    "finalists confirm cannot be smaller than minimum",
+                )
+            if int(finalists["maximum_clusters"]) < 1:
+                raise InputFileError(
+                    document.path,
+                    _stage_line(document, "finalists", "max_clusters"),
+                    "finalists max_clusters must be positive",
+                )
+            if str(finalists["cluster_mode"]).lower() not in {"auto", "off"}:
+                raise InputFileError(
+                    document.path,
+                    _stage_line(document, "finalists", "clusters"),
+                    "finalists clusters must be auto or off",
+                )
+            if str(finalists["incumbent"]).lower() not in {"off", "initial"}:
+                raise InputFileError(
+                    document.path,
+                    _stage_line(document, "finalists", "incumbent"),
+                    "finalists incumbent must be off or initial",
+                )
+            seeds = [
+                int(seed)
+                for seed in config["elasticity"]["modules"]["dynamic"]["protocol"]["seeds"]
+            ]
+            if len(seeds) < 2:
+                raise InputFileError(
+                    document.path,
+                    _stage_line(document, "finalists", "mode"),
+                    "adaptive finalists require at least two dynamic elasticity seeds",
+                )
+            finalists.setdefault("triage_seed", seeds[0])
+            if isinstance(finalists["triage_seed"], bool) or not isinstance(
+                finalists["triage_seed"], int
+            ) or int(finalists["triage_seed"]) not in seeds:
+                raise InputFileError(
+                    document.path,
+                    _stage_line(document, "finalists", "triage_seed"),
+                    "finalists triage_seed must be one declared dynamic elasticity seed",
+                )
 
 
 def compile_input(document: FFOptInput) -> CompiledInput:
@@ -2337,9 +2429,14 @@ def compile_input(document: FFOptInput) -> CompiledInput:
         pipeline["graph_mode"] = "linear"
     if material_pipeline and "finalists" in pipeline_stages:
         finalist_settings = dict(stages["finalists"])
+        finalist_top_n = (
+            int(finalist_settings["confirm_candidates"])
+            if str(finalist_settings.get("mode", "full")).lower() == "adaptive"
+            else int(finalist_settings["maximum"])
+        )
         pipeline["finalists"] = {
             **finalist_settings,
-            "top_n": int(finalist_settings["maximum"]),
+            "top_n": finalist_top_n,
             "diversity_slots": int(finalist_settings["diverse_reserve"]),
         }
         if bool(finalist_settings.get("require_minimum", False)):

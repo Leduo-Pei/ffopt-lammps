@@ -138,6 +138,25 @@ def select_static_screen_candidates(
     selected: list[int] = []
     roles: dict[int, str] = {}
     core_indices = np.flatnonzero(strict).tolist()
+    protected_key = settings.get("protected_parameter_key")
+    if protected_key is not None:
+        matching = [
+            index for index, key in enumerate(keys)
+            if key == str(protected_key)
+        ]
+        if len(matching) != 1:
+            raise ValueError(
+                "Explicit initial incumbent is absent from the measured candidate "
+                "evidence; refusing to silently drop a requested hot start"
+            )
+        protected_index = matching[0]
+        if not strict[protected_index]:
+            raise ValueError(
+                "Explicit initial incumbent does not pass the current structural "
+                "hard gates; it may not enter static-mechanics training"
+            )
+        selected.append(protected_index)
+        roles[protected_index] = "protected_initial_incumbent"
     # The historical core_fraction setting is a lower-bound design hint, not
     # permission to spend static-mechanics capacity outside the declared hard
     # gate.  Use every available strict row up to the bounded target.  Only
@@ -149,9 +168,9 @@ def select_static_screen_candidates(
     # structural objective outside the hard gate cannot displace an eligible
     # static-mechanics candidate.
     elite_order = sorted(
-        core_indices,
+        [index for index in core_indices if index not in selected],
         key=lambda index: (float(objective[index]), keys[index]),
-    )[:min(elite_count, core_quota)]
+    )[:min(elite_count, max(0, core_quota - len(selected)))]
     selected.extend(elite_order)
     roles.update({index: "objective_elite" for index in elite_order})
 

@@ -19,6 +19,7 @@ from typing import Any, Iterable, Mapping
 import pandas as pd
 
 from engine.parameter_space import build_parameter_space
+from engine.cubic_elastic_runner import DYNAMIC_PROTOCOL, STATIC_PROTOCOL
 from workflow.artifact_manifest import (
     ArtifactManifestError,
     build_artifact_manifest,
@@ -90,6 +91,11 @@ _MATERIAL_STAGE_OUTPUT_FILES: dict[str, dict[str, str]] = {
         "finalists": "finalists_selected.csv",
         "best_candidate": "best_candidate.json",
         "batch_summary": "batch_summary.json",
+        "triage_selected": "dynamic_triage_selected.csv",
+        "triage_seed_results": "dynamic_triage_seed_results.csv",
+        "triage_results": "dynamic_triage_results.csv",
+        "confirmation_selected": "dynamic_confirmation_selected.csv",
+        "racing_state": "dynamic_racing_state.json",
     },
     "material-validate": {
         "validation_summary": "validation_summary.json",
@@ -107,9 +113,9 @@ _MATERIAL_STAGE_OUTPUT_FILES: dict[str, dict[str, str]] = {
 
 _MATERIAL_STAGE_IDENTIFIERS = {
     "candidates": ("stage", "material_candidates", False),
-    "static": ("stage", "cubic_elastic_batch:static", False),
+    "static": ("stage", f"cubic_elastic_batch:{STATIC_PROTOCOL}", False),
     "material-nn": ("stage", "material_surrogate_preflight", False),
-    "finalists": ("stage", "cubic_elastic_batch:dynamic", False),
+    "finalists": ("stage", f"cubic_elastic_batch:{DYNAMIC_PROTOCOL}", False),
     # A normal validation manifest is candidate-scoped.  A scientifically
     # terminal zero-eligible result is stage-scoped, and is checked separately
     # below while retaining the same identifier prefix.
@@ -201,6 +207,11 @@ def validate_material_stage_outputs(
         if prefix
         else manifest.identifier == identifier
     )
+    if command_token == "finalists":
+        identifier_valid = manifest.identifier in {
+            f"cubic_elastic_batch:{DYNAMIC_PROTOCOL}",
+            "adaptive_dynamic_promotion:v1",
+        }
     if command_token == "material-validate" and manifest.kind == "candidate":
         identifier_valid = manifest.identifier == f"material_validation:{manifest.parameter_key}"
     if not kind_valid or not identifier_valid:

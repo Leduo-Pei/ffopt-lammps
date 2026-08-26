@@ -60,7 +60,7 @@ conda install -c conda-forge "lammps=*=*openmpi*" openmpi -y
 python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 python -m pip install \
-  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a8/ffopt_lammps-0.3.0a8-py3-none-any.whl"
+  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a10/ffopt_lammps-0.3.0a10-py3-none-any.whl"
 ```
 
 上面的命令有意安装 CPU 版 PyTorch。GPU 工作站应先按 PyTorch 官方安装选择器
@@ -101,7 +101,7 @@ conda activate ffopt
 conda env config vars set PYTHONNOUSERSITE=1
 conda deactivate
 conda activate ffopt
-python -m pip install "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a8/ffopt_lammps-0.3.0a8-py3-none-any.whl"
+python -m pip install "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a10/ffopt_lammps-0.3.0a10-py3-none-any.whl"
 ```
 
 LAMMPS 和 MPI 可以由用户单独安装，随后在机器配置中填写绝对路径。路径含空格
@@ -587,14 +587,20 @@ static_strain  0.0005 0.001 0.002
 dynamic_strain 0.002  0.004 0.006
 ```
 
-元素 BCC 的有限温度弹性采用两套明确分离的协议：20 个 hard-gate 候选先用较短的
-多种子 promotion 重排，只对晋级后的一个 winner 使用独立 seed 和长轨迹进行最终
-validation。`validation_strain`、`validation_npt_equilibration`、
+元素 BCC 的有限温度弹性采用自适应 promotion 与独立 validation。生产 Fe 输入先让
+38 个经过参数空间自动分簇、满足 hard gate 的候选运行 seed 101，再依据精确的一种子
+300 K 结果重排；只有 10 个候选继续运行 seeds 202/303，且只有完成全部三种子的候选
+才有资格成为最终结果。因此一个单节点 finalists 作业共执行
+`38 x 1 + 10 x 2 = 58` 条轨迹，而不是给全部候选运行全部种子。
+`validation_strain`、`validation_npt_equilibration`、
 `validation_nvt_equilibration`、`validation_production` 和 `validation_seeds` 共同锁定
 长协议；validation seed 必须与 promotion seeds 不重叠。生产 Fe 输入同时要求
-`finalists minimum 20`、`maximum 20` 和 `require_minimum yes`；若不足 20 个唯一候选
-通过结构、Born 稳定性和拟合质量硬门，程序会在任何 300 K LAMMPS 工作启动前停止，
-不会悄悄用更少候选继续。
+`finalists minimum 10` 和 `require_minimum yes`，不允许以不足 10 个完整确认候选
+悄悄发布结果。
+
+`incumbent initial` 仅用于同一材料的版本迭代：它保护当前 `type` 行给出的参数坐标，
+但结构、0 K 与 300 K 性质全部按本轮协议重算。新材料使用默认的 `incumbent off`。
+FFOpt 不会扫描旧 `runs/` 或 `archive/` 自动寻找历史冠军。
 
 0 K 静态弹性不再使用势能曲率作为排序结果。对于 `lj/cut` 且全局
 `shift no` 的势，邻居壳跨越硬截断时势能会发生离散跳变；即使二次拟合的 R2 很高，

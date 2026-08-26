@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 
 from engine.config_loader import load_config
-from engine.parameter_space import build_parameter_space
+from engine.parameter_space import build_parameter_space, initial_parameter_values
 from workflow.artifact_manifest import (
     build_artifact_manifest,
     canonical_parameter_key,
@@ -151,19 +151,34 @@ def collect_material_candidates(
     nn_result_path: str | os.PathLike[str] | None,
     output_dir: str | os.PathLike[str],
     screen_settings: dict[str, Any] | None = None,
+    incumbent: str = "off",
 ) -> dict[str, Any]:
     """Publish one immutable, explicitly sourced candidate collection."""
     config_source = Path(config_path).resolve()
     sources = tuple(Path(item).resolve() for item in source_paths)
     nn_source = Path(nn_result_path).resolve() if nn_result_path is not None else None
     config = load_config(config_source)
-    names = [item[0] for item in build_parameter_space(config)]
+    parameter_space = build_parameter_space(config)
+    names = [item[0] for item in parameter_space]
+    incumbent_mode = str(incumbent).strip().lower()
+    if incumbent_mode not in {"off", "initial"}:
+        raise ValueError("incumbent must be 'off' or 'initial'")
+    incumbent_key = (
+        canonical_parameter_key(initial_parameter_values(config))
+        if incumbent_mode == "initial"
+        else None
+    )
+    effective_screen_settings = dict(screen_settings or {})
+    if incumbent_key is not None:
+        effective_screen_settings["protected_parameter_key"] = incumbent_key
     scientific_config = {
-        "schema": "ffopt-material-candidates-v1",
+        "schema": "ffopt-material-candidates-v2",
         "parameter_names": names,
         "source_order": [str(path) for path in sources],
         "nn_result": str(nn_source) if nn_source is not None else None,
-        "screen_settings": dict(screen_settings or {}),
+        "screen_settings": effective_screen_settings,
+        "incumbent_mode": incumbent_mode,
+        "incumbent_parameter_key": incumbent_key,
     }
     inputs = {
         "config": config_source,
@@ -222,13 +237,13 @@ def collect_material_candidates(
         select_static_screen_candidates(
             observed,
             config=config,
-            settings=screen_settings,
+            settings=effective_screen_settings,
         )
         if screen_settings is not None
         else observed.copy()
     )
     summary = {
-        "schema": "ffopt-material-candidates-v1",
+        "schema": "ffopt-material-candidates-v2",
         "parameter_names": names,
         "explicit_sources": [str(path) for path in sources],
         "measured_candidates": int(len(observed)),
@@ -239,6 +254,12 @@ def collect_material_candidates(
         ),
         "static_screen_buffer": int(
             static_screen.get("screen_region", pd.Series(dtype=str)).eq("buffer").sum()
+        ),
+        "incumbent_mode": incumbent_mode,
+        "incumbent_parameter_key": incumbent_key,
+        "incumbent_selected": bool(
+            incumbent_key is not None
+            and incumbent_key in set(static_screen.get("parameter_key", pd.Series(dtype=str)).astype(str))
         ),
     }
 
@@ -285,6 +306,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--screen-core-fraction", type=float)
     parser.add_argument("--screen-buffer-multiplier", type=float)
     parser.add_argument("--screen-elite-fraction", type=float)
+    parser.add_argument(
+        "--incumbent",
+        choices=("off", "initial"),
+        default="off",
+        help=(
+            "Protect the current input type-line initial point as a version-iteration "
+            "incumbent. No historical folders are ever discovered automatically."
+        ),
+    )
     args = parser.parse_args(argv)
     screen_values = {
         "minimum": args.screen_minimum,
@@ -305,6 +335,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         nn_result_path=args.nn_result,
         output_dir=args.output_dir,
         screen_settings=screen_settings,
+        incumbent=args.incumbent,
     )
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0

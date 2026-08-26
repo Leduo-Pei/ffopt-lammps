@@ -8,6 +8,7 @@ import threading
 import pandas as pd
 import pytest
 
+from engine.adaptive_dynamic_promotion import run_adaptive_dynamic_promotion
 from engine.cubic_elastic_batch import (
     BatchArtifactError,
     Candidate,
@@ -25,6 +26,7 @@ from engine.cubic_elastic_batch import (
 )
 from engine.cubic_elastic_runner import (
     ATM_TO_GPA,
+    DYNAMIC_PROTOCOL,
     KCAL_PER_MOL_ANGSTROM3_TO_GPA,
     STATIC_PROTOCOL,
     StateExecutionResult,
@@ -32,6 +34,7 @@ from engine.cubic_elastic_runner import (
 from engine.parameter_space import build_parameter_space
 from workflow.input_compiler import compile_input
 from workflow.input_file import parse_input_file
+from workflow.material_pipeline import validate_material_stage_outputs
 
 
 def _rank_row(key, maximum, rmse, *, structure=True, born=True, fit=True, contrast=0.1):
@@ -669,6 +672,21 @@ def test_static_then_dynamic_expands_real_seeds_and_allows_rank_reversal(tmp_pat
     assert list(static["Fe_corner_epsilon"]) == [5.0, 7.0]
     assert (static_output / "static_results.csv").is_file()
     assert (static_output / "stage_manifest.json").is_file()
+    assert json.loads((static_output / "stage_manifest.json").read_text())[
+        "identifier"
+    ] == f"cubic_elastic_batch:{STATIC_PROTOCOL}"
+    valid, reason = validate_material_stage_outputs(
+        static_output,
+        command_token="static",
+        expected_artifacts=[
+            static_output / "static_results.csv",
+            static_output / "finalists_selected.csv",
+            static_output / "best_candidate.json",
+            static_output / "batch_summary.json",
+            static_output / "stage_manifest.json",
+        ],
+    )
+    assert valid, reason
     assert not any("rank_" in str(path) for path in (static_output / "candidate_runs").rglob("*"))
 
     dynamic_output = tmp_path / "dynamic"
@@ -692,6 +710,22 @@ def test_static_then_dynamic_expands_real_seeds_and_allows_rank_reversal(tmp_pat
     assert (dynamic["B_gpa_std"] > 0.0).all()
     assert (dynamic_output / "dynamic_seed_results.csv").is_file()
     assert (dynamic_output / "stage_manifest.json").is_file()
+    assert json.loads((dynamic_output / "stage_manifest.json").read_text())[
+        "identifier"
+    ] == f"cubic_elastic_batch:{DYNAMIC_PROTOCOL}"
+    valid, reason = validate_material_stage_outputs(
+        dynamic_output,
+        command_token="finalists",
+        expected_artifacts=[
+            dynamic_output / "dynamic_results.csv",
+            dynamic_output / "dynamic_seed_results.csv",
+            dynamic_output / "finalists_selected.csv",
+            dynamic_output / "best_candidate.json",
+            dynamic_output / "batch_summary.json",
+            dynamic_output / "stage_manifest.json",
+        ],
+    )
+    assert valid, reason
     before = sum(dynamic_factory.calls.values())
     run_elasticity_batch(
         config_path=config_path,
@@ -705,6 +739,92 @@ def test_static_then_dynamic_expands_real_seeds_and_allows_rank_reversal(tmp_pat
         backend_factory=dynamic_factory,
     )
     assert sum(dynamic_factory.calls.values()) == before
+
+
+def test_adaptive_dynamic_runs_broad_seed_then_confirms_only_reranked_winner(tmp_path):
+    config_path, config = _compiled_config(tmp_path)
+    candidates = tmp_path / "adaptive-candidates.csv"
+    _candidate_frame(config).to_csv(candidates, index=False)
+    static_output = tmp_path / "adaptive-static"
+    run_elasticity_batch(
+        config_path=config_path,
+        parameters_path=candidates,
+        output_dir=static_output,
+        protocol="static",
+        resources=_resources(),
+        top_n=2,
+        minimum=2,
+        diversity_slots=0,
+        backend_factory=FakeBackendFactory(tmp_path),
+    )
+
+    output = tmp_path / "adaptive-dynamic"
+    factory = FakeBackendFactory(tmp_path)
+    ranked = run_adaptive_dynamic_promotion(
+        config_path=config_path,
+        parameters_path=static_output / "static_results.csv",
+        output_dir=output,
+        resources=_resources(),
+        screen_candidates=2,
+        confirm_candidates=1,
+        triage_seed=101,
+        maximum_clusters=2,
+        minimum_per_cluster=1,
+        top_n=1,
+        minimum=1,
+        require_minimum=True,
+        diversity_slots=0,
+        backend_factory=factory,
+    )
+
+    candidate_seed_pairs = {
+        (epsilon, seed) for epsilon, protocol, seed, _state in factory.calls
+        if protocol == DYNAMIC_PROTOCOL
+    }
+    assert candidate_seed_pairs == {(5.0, 101), (7.0, 101), (7.0, 202)}
+    seed_rows = pd.read_csv(output / "dynamic_seed_results.csv")
+    assert len(seed_rows) == 3
+    assert int(ranked["all_seeds_complete"].sum()) == 1
+    assert float(ranked.iloc[0]["Fe_corner_epsilon"]) == pytest.approx(7.0)
+    assert json.loads((output / "best_candidate.json").read_text())[
+        "raw_free_parameters"
+    ]["Fe_corner_epsilon"] == pytest.approx(7.0)
+    state = json.loads((output / "dynamic_racing_state.json").read_text())
+    assert state["triage"]["work_units"] == 2
+    assert state["confirmation"]["work_units"] == 1
+    assert state["total_dynamic_work_units"] == 3
+    valid, reason = validate_material_stage_outputs(
+        output,
+        command_token="finalists",
+        expected_artifacts=[
+            output / "dynamic_results.csv",
+            output / "dynamic_seed_results.csv",
+            output / "finalists_selected.csv",
+            output / "best_candidate.json",
+            output / "batch_summary.json",
+            output / "stage_manifest.json",
+        ],
+    )
+    assert valid, reason
+
+    before = sum(factory.calls.values())
+    run_adaptive_dynamic_promotion(
+        config_path=config_path,
+        parameters_path=static_output / "static_results.csv",
+        output_dir=output,
+        resources=_resources(),
+        screen_candidates=2,
+        confirm_candidates=1,
+        triage_seed=101,
+        maximum_clusters=2,
+        minimum_per_cluster=1,
+        top_n=1,
+        minimum=1,
+        require_minimum=True,
+        diversity_slots=0,
+        backend_factory=factory,
+    )
+    assert sum(factory.calls.values()) == before
 
 
 def test_partial_resume_retries_only_failed_parameter_key_state(tmp_path):

@@ -715,6 +715,67 @@ def test_candidate_collector_uses_only_explicit_sources_and_manifest(tmp_path: P
     ).all()
 
 
+def test_explicit_initial_incumbent_is_recomputed_and_protected_in_static_screen(
+    tmp_path: Path,
+):
+    config_document = _material_config()
+    config_document["atom_types"][0]["params"]["epsilon"]["init"] = 1.0
+    config_document["atom_types"][0]["params"]["sigma"]["init"] = 2.0
+    config_document["atom_types"][1]["params"]["sigma"]["init"] = 3.0
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps(config_document), encoding="utf-8")
+    common = {
+        "calc_a": 2.86,
+        "calc_b": 2.86,
+        "calc_c": 2.86,
+        "calc_alpha": 90.0,
+        "calc_beta": 90.0,
+        "calc_gamma_ang": 90.0,
+        "calc_density": 7.87,
+        "calc_surf_energy": 2.34,
+        "success": True,
+    }
+    source = tmp_path / "measured.csv"
+    pd.DataFrame([
+        {
+            "FeA_epsilon": 1.0,
+            "FeA_sigma": 2.0,
+            "FeB_sigma": 3.0,
+            "objective": 100.0,
+            **common,
+        },
+        {
+            "FeA_epsilon": 2.0,
+            "FeA_sigma": 2.5,
+            "FeB_sigma": 3.5,
+            "objective": 0.0,
+            **common,
+        },
+    ]).to_csv(source, index=False)
+
+    output = tmp_path / "hot-start"
+    summary = collect_material_candidates(
+        config_path=config,
+        source_paths=[source],
+        nn_result_path=None,
+        output_dir=output,
+        screen_settings={
+            "minimum": 1,
+            "per_dimension": 1,
+            "maximum": 1,
+            "objective_elite_fraction": 1.0,
+        },
+        incumbent="initial",
+    )
+
+    selected = pd.read_csv(output / "static_screen_candidates.csv")
+    assert len(selected) == 1
+    assert selected.iloc[0]["FeA_epsilon"] == pytest.approx(1.0)
+    assert selected.iloc[0]["screen_selection_role"] == "protected_initial_incumbent"
+    assert summary["incumbent_mode"] == "initial"
+    assert summary["incumbent_selected"] is True
+
+
 def test_candidate_collector_does_not_replace_audited_evidence_with_nn_row(
     tmp_path: Path,
 ):

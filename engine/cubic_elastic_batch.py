@@ -1410,6 +1410,7 @@ def run_elasticity_batch(
     minimum: int = 1,
     require_minimum: bool = False,
     evaluate_structural_failures: bool = False,
+    dynamic_seeds: Sequence[int] | None = None,
     backend_factory: BackendFactory = default_backend_factory,
 ) -> pd.DataFrame:
     """Run or resume one static or dynamic candidate batch."""
@@ -1436,6 +1437,13 @@ def run_elasticity_batch(
         diversity_slots=diversity_slots,
         evaluate_structural_failures=evaluate_structural_failures,
     )
+    if dynamic_seeds is not None:
+        if canonical_protocol != DYNAMIC_PROTOCOL:
+            raise ValueError("dynamic_seeds may only be used with the dynamic protocol")
+        normalized_seeds = [int(value) for value in dynamic_seeds]
+        if not normalized_seeds or len(set(normalized_seeds)) != len(normalized_seeds):
+            raise ValueError("dynamic_seeds must contain unique integer seeds")
+        scientific["dynamic_seed_override"] = normalized_seeds
     _write_immutable_json(
         destination / "batch_identity.json",
         _batch_identity(
@@ -1518,7 +1526,11 @@ def run_elasticity_batch(
             initial_rows.append(_failed_row(candidate, structural, str(exc)))
 
     seed_values = (
-        [int(value) for value in module["protocol"]["seeds"]]
+        (
+            [int(value) for value in dynamic_seeds]
+            if dynamic_seeds is not None
+            else [int(value) for value in module["protocol"]["seeds"]]
+        )
         if canonical_protocol == DYNAMIC_PROTOCOL
         else [None]
     )
@@ -1746,6 +1758,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--near-optimal-window-percent", type=float, default=5.0)
     parser.add_argument("--diversity-slots", type=int, default=2)
     parser.add_argument(
+        "--seeds",
+        nargs="+",
+        type=int,
+        help=(
+            "Explicit dynamic-trajectory seed subset. This is used by the "
+            "adaptive finalist cascade; static batches reject it."
+        ),
+    )
+    parser.add_argument(
         "--evaluate-structural-failures",
         action="store_true",
         help=(
@@ -1777,6 +1798,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         near_optimal_window_percent=arguments.near_optimal_window_percent,
         diversity_slots=arguments.diversity_slots,
         evaluate_structural_failures=arguments.evaluate_structural_failures,
+        dynamic_seeds=arguments.seeds,
     )
     eligible = int(ranked["finalist_eligible"].sum()) if "finalist_eligible" in ranked else 0
     print(

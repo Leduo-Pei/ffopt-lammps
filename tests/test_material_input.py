@@ -198,7 +198,11 @@ def test_explain_reports_material_parameter_graph_and_elasticity_contract(
         in output
     )
     assert "BO protocol gate       : required" in output
-    assert "Dynamic finalists      : minimum=20 maximum=20 hard_floor=yes" in output
+    assert (
+        "Dynamic finalists      : adaptive triage=38x1 confirm=10x2 "
+        "triage_seed=101 clusters=auto incumbent=initial hard_floor=yes"
+        in output
+    )
     assert (
         "Constrained AL        : rounds<=8 auto_advance=yes "
         "structural/static candidates=76/38 pool=65536"
@@ -537,6 +541,93 @@ end
     assert "--require-minimum" in finalists
 
 
+def test_adaptive_finalists_compile_two_batch_seeds_and_explicit_incumbent(
+    tmp_path, monkeypatch
+):
+    source = _input_text(data=_elemental_data(tmp_path)).replace(
+        "workflow bo",
+        "workflow bo sample audit screen nn al finalists validate",
+    )
+    source += _dynamic_elasticity_text().replace("seeds 101", "seeds 101 202 303")
+    source += """
+screen
+    minimum 6
+    per_dimension 2
+    maximum 12
+end
+
+al
+    acquisition constrained_minimax
+    rounds 2
+    candidates 6
+    static_candidates 3
+    candidate_pool 64
+end
+
+finalists
+    minimum 3
+    maximum 7
+    mode adaptive
+    triage 5
+    confirm 3
+    triage_seed 101
+    clusters auto
+    max_clusters 4
+    cluster_minimum 1
+    incumbent initial
+    window 2.0
+    diverse 1
+    require_minimum yes
+end
+"""
+    path = _write(tmp_path, source)
+    compiled = compile_input(parse_input_file(path))
+    finalists = compiled.project_data["pipeline"]["finalists"]
+    assert finalists == {
+        "minimum": 3,
+        "maximum": 7,
+        "near_optimal_window_percent": 2.0,
+        "diverse_reserve": 1,
+        "require_minimum": True,
+        "mode": "adaptive",
+        "screen_candidates": 5,
+        "confirm_candidates": 3,
+        "triage_seed": 101,
+        "cluster_mode": "auto",
+        "maximum_clusters": 4,
+        "minimum_per_cluster": 1,
+        "incumbent": "initial",
+        "top_n": 3,
+        "diversity_slots": 1,
+    }
+    project = Project(
+        path,
+        compiled.project_data,
+        runtime_config=compiled.config,
+        compilation=compiled,
+    )
+    monkeypatch.setattr(
+        "workflow.pipeline.build_refinement_spec",
+        lambda *_args, **_kwargs: {"schema": "adaptive-test"},
+    )
+    runner = PipelineRunner(
+        project=project,
+        machine="local",
+        run_id="adaptive-finalist-contract",
+        dry_run=True,
+    )
+    specs = {item.name: item for item in runner.build_specs()}
+    candidate_command = specs["candidates"].command
+    assert candidate_command[candidate_command.index("--incumbent") + 1] == "initial"
+    command = specs["finalists"].command
+    assert "engine.adaptive_dynamic_promotion" in command
+    assert command[command.index("--screen-candidates") + 1] == "5"
+    assert command[command.index("--confirm-candidates") + 1] == "3"
+    assert command[command.index("--triage-seed") + 1] == "101"
+    assert command[command.index("--maximum-clusters") + 1] == "4"
+    assert command[command.index("--incumbent") + 1] == "initial"
+
+
 def test_feasible_coverage_without_detail_line_persists_defaults(tmp_path):
     source = _input_text(data=_elemental_data(tmp_path)) + """
 bo
@@ -675,7 +766,7 @@ def test_packaged_fe_bcc_example_compiles_as_one_managed_pipeline(tmp_path):
     assert compiled.project_data["pipeline"]["finalists"]["require_minimum"] is True
     assert compiled.project_data["pipeline"]["constrained_al"][
         "minimum_eligible_finalists"
-    ] == 20
+    ] == 10
 
 
 @pytest.mark.parametrize("kind", ["molecular", "multicomponent"])
