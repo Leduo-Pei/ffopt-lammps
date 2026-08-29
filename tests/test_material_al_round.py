@@ -370,6 +370,38 @@ def test_round_reuse_fails_closed_when_structural_input_content_changes(tmp_path
         run_material_al_round(**kwargs)
 
 
+def test_round_reuse_fails_closed_when_acquisition_identity_changes(tmp_path):
+    config, spec, structural, static = _write_inputs(tmp_path)
+    kwargs = {
+        "runtime_config_path": config,
+        "refinement_config_path": spec,
+        "structural_paths": [structural],
+        "mechanical_paths": [static],
+        "candidate_pool_paths": [],
+        "output_dir": tmp_path / "round_acquisition_identity",
+        "round_number": 1,
+        "maximum_rounds": 3,
+        "available_cores": 2,
+        "cores_per_state": 1,
+        "structural_runner_factory": lambda _cfg: _FakeStructuralRunner(),
+        "elasticity_batch_runner": _fake_static_batch,
+    }
+    run_material_al_round(
+        **kwargs,
+        acquisition_backend=GaussianProcessStructuralAcquisition(
+            minimum_improvement_feasibility_probability=0.50
+        ),
+    )
+
+    with pytest.raises(MaterialALRoundError, match="not reusable"):
+        run_material_al_round(
+            **kwargs,
+            acquisition_backend=GaussianProcessStructuralAcquisition(
+                minimum_improvement_feasibility_probability=0.90
+            ),
+        )
+
+
 class _ReplicateAuditRunner(_FakeStructuralRunner):
     def evaluate_replicates(self, params, _work_dir, seeds, **_kwargs):
         rows = []

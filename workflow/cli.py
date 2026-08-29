@@ -978,6 +978,17 @@ def cmd_explain(args: argparse.Namespace) -> None:
                     for name, target in targets.items()
                 )
                 print(f"      targets: {target_text or '-'}")
+                consistency = elasticity.get(
+                    "target_consistency_by_fidelity", {}
+                ).get(fidelity)
+                if consistency:
+                    closure = consistency[
+                        "maximum_relative_closure_error_percent"
+                    ]
+                    print(
+                        "      B/G closure diagnostic: "
+                        f"{consistency['status']}, max deviation={float(closure):.3f}%"
+                    )
 
             selection = elasticity.get("selection", {})
             gates = selection.get("structural_gates", {})

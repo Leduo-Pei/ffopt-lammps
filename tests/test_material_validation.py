@@ -776,6 +776,51 @@ def test_top_parameters_reports_rank_reversal_and_explicit_provenance(tmp_path):
     assert (output / "stage_manifest.json").is_file()
 
 
+def test_top_parameters_markdown_uses_dynamic_target_basis(tmp_path):
+    config_path, config = _config(tmp_path)
+    config["elasticity"]["modules"]["static"]["targets"] = {
+        "B": {"value": 173.1},
+        "G": {"value": 86.94},
+        "E": {"value": 223.4},
+        "nu": {"value": 0.2848},
+    }
+    config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    parameters = _parameters(config)
+    row = {
+        **_ranking_row(parameters, maximum=10.0, rmse=8.0),
+        "B_gpa": 170.0,
+        "Cprime_gpa": 50.0,
+        "C44_gpa": 120.0,
+        "G_hill_gpa": 82.0,
+        "E_hill_gpa": 211.0,
+        "nu_hill": 0.29,
+        "error_B_percent": 0.0,
+        "error_Cprime_percent": 0.0,
+        "error_C44_percent": 0.0,
+    }
+    static_path = tmp_path / "mixed_static.csv"
+    dynamic_path = tmp_path / "mixed_dynamic.csv"
+    pd.DataFrame([row]).to_csv(static_path, index=False)
+    pd.DataFrame([row]).to_csv(dynamic_path, index=False)
+    output = tmp_path / "mixed_report"
+
+    write_top_parameters_report(
+        config_path=config_path,
+        static_ranking_path=static_path,
+        dynamic_ranking_path=dynamic_path,
+        output_dir=output,
+        top_n=1,
+    )
+
+    document = json.loads((output / "TOP_PARAMETERS.json").read_text())
+    assert document["static_target_basis"] == ["B", "G", "E", "nu"]
+    assert document["dynamic_target_basis"] == ["B", "Cprime", "C44"]
+    markdown = (output / "TOP_PARAMETERS.md").read_text(encoding="utf-8")
+    assert "300 K Cprime (GPa)" in markdown
+    assert "Cprime error (%)" in markdown
+    assert "300 K G (GPa)" not in markdown
+
+
 def test_top_parameters_round_trip_exact_parameter_identity(tmp_path):
     config_path, _config_document = _config(tmp_path)
     parameters = {

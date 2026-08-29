@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 
@@ -162,6 +163,25 @@ def test_compiled_elasticity_maps_to_generic_refinement_contract():
     assert next(
         item for item in spec["structural_constraints"] if item["name"] == "alpha"
     )["mode"] == "absolute"
+
+
+def test_isotropic_elasticity_maps_to_BGEnu_refinement_columns():
+    config = copy.deepcopy(_material_config())
+    config["elasticity"]["modules"]["static"]["targets"] = {
+        "B": {"value": 173.1},
+        "G": {"value": 86.94},
+        "E": {"value": 223.4},
+        "nu": {"value": 0.2848},
+    }
+
+    spec = build_refinement_spec(config, maximum_rounds=4)
+
+    assert [item["name"] for item in spec["mechanical_objectives"]] == [
+        "B", "G", "E", "nu"
+    ]
+    assert [item["column"] for item in spec["mechanical_objectives"]] == [
+        "B_gpa", "G_hill_gpa", "E_hill_gpa", "nu_hill"
+    ]
 
 
 def test_static_screen_uses_strict_core_before_buffer_quota():

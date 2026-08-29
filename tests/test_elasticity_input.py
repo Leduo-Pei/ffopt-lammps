@@ -73,6 +73,29 @@ end
 """
 
 
+def _isotropic_elasticity_block(*, dynamic: bool = True) -> str:
+    block = _elasticity_block(dynamic=dynamic)
+    replacements = {
+        "    target static B 173.1 GPa\n"
+        "    target static Cprime 52.5 GPa\n"
+        "    target static C44 121.9 GPa\n":
+        "    target static B 173.1 GPa\n"
+        "    target static G 86.94 GPa\n"
+        "    target static E 223.4 GPa\n"
+        "    target static nu 0.2848 1\n",
+        "    target dynamic B 166.2 GPa\n"
+        "    target dynamic Cprime 48.15 GPa\n"
+        "    target dynamic C44 115.87 GPa\n":
+        "    target dynamic B 170.0 GPa\n"
+        "    target dynamic G 82.0 GPa\n"
+        "    target dynamic E 211.0 GPa\n"
+        "    target dynamic nu 0.29 1\n",
+    }
+    for old, new in replacements.items():
+        block = block.replace(old, new)
+    return block
+
+
 def _project_text(elasticity: str | None = None) -> str:
     return f"""ffopt 1
 project fe_elastic
@@ -136,6 +159,10 @@ def test_cubic_elasticity_contract_compiles_without_polluting_legacy_targets(
     assert elasticity["derived_diagnostics_only"] == [
         "G_hill", "E_hill", "nu_hill"
     ]
+    assert elasticity["derived_diagnostics_only_by_fidelity"] == {
+        "static": ["G_hill", "E_hill", "nu_hill"],
+        "dynamic": ["G_hill", "E_hill", "nu_hill"],
+    }
     assert elasticity["selection"] == {
         "method": "constrained_minimax_relative_error",
         "structural_gates": {
@@ -231,6 +258,86 @@ def test_static_only_contract_uses_deterministic_scientific_defaults(
     assert changed_hash != baseline_hash
 
 
+def test_isotropic_moduli_basis_compiles_with_dimensionless_poisson_target(
+    tmp_path: Path,
+) -> None:
+    source = _project_text(_isotropic_elasticity_block())
+    compiled = compile_input(parse_input_file(_write(tmp_path, source)))
+    elasticity = compiled.config["elasticity"]
+
+    assert elasticity["target_basis"] == ["B", "G", "E", "nu"]
+    assert elasticity["target_basis_by_fidelity"] == {
+        "static": ["B", "G", "E", "nu"],
+        "dynamic": ["B", "G", "E", "nu"],
+    }
+    assert elasticity["derived_diagnostics_only"] == [
+        "Cprime", "C44", "zener_anisotropy"
+    ]
+    assert elasticity["derived_diagnostics_only_by_fidelity"] == {
+        "static": ["Cprime", "C44", "zener_anisotropy"],
+        "dynamic": ["Cprime", "C44", "zener_anisotropy"],
+    }
+    assert elasticity["modules"]["static"]["targets"] == {
+        "B": {"value": 173.1, "unit": "GPa"},
+        "G": {"value": 86.94, "unit": "GPa"},
+        "E": {"value": 223.4, "unit": "GPa"},
+        "nu": {"value": 0.2848, "unit": "1"},
+    }
+    assert elasticity["modules"]["dynamic"]["targets"] == {
+        "B": {"value": 170.0, "unit": "GPa"},
+        "G": {"value": 82.0, "unit": "GPa"},
+        "E": {"value": 211.0, "unit": "GPa"},
+        "nu": {"value": 0.29, "unit": "1"},
+    }
+    consistency = elasticity["target_consistency_by_fidelity"]
+    assert set(consistency) == {"static", "dynamic"}
+    assert consistency["static"]["status"] == (
+        "consistent_within_reference_tolerance"
+    )
+    assert consistency["dynamic"]["maximum_relative_closure_error_percent"] < 1.0
+
+
+def test_auxetic_poisson_target_is_valid_but_zero_is_not(tmp_path: Path) -> None:
+    auxetic = _isotropic_elasticity_block(dynamic=False).replace(
+        "target static nu 0.2848 1", "target static nu -0.20 dimensionless"
+    )
+    compiled = compile_input(parse_input_file(_write(tmp_path, _project_text(auxetic))))
+    assert compiled.config["elasticity"]["modules"]["static"]["targets"]["nu"] == {
+        "value": -0.2,
+        "unit": "1",
+    }
+    assert compiled.config["elasticity"]["target_consistency_by_fidelity"]["static"][
+        "status"
+    ] == "inconsistent_experimental_targets"
+
+    zero = auxetic.replace("target static nu -0.20 dimensionless", "target static nu 0 1")
+    with pytest.raises(InputFileError, match="cannot be zero"):
+        parse_input_file(_write(tmp_path, _project_text(zero)))
+
+
+def test_target_basis_is_independent_per_fidelity(tmp_path: Path) -> None:
+    block = _isotropic_elasticity_block().replace(
+        "    target dynamic B 170.0 GPa\n"
+        "    target dynamic G 82.0 GPa\n"
+        "    target dynamic E 211.0 GPa\n"
+        "    target dynamic nu 0.29 1\n",
+        "    target dynamic B 166.2 GPa\n"
+        "    target dynamic Cprime 48.15 GPa\n"
+        "    target dynamic C44 115.87 GPa\n",
+    )
+    compiled = compile_input(parse_input_file(_write(tmp_path, _project_text(block))))
+    elasticity = compiled.config["elasticity"]
+
+    assert elasticity["target_basis_by_fidelity"] == {
+        "static": ["B", "G", "E", "nu"],
+        "dynamic": ["B", "Cprime", "C44"],
+    }
+    assert elasticity["derived_diagnostics_only_by_fidelity"] == {
+        "static": ["Cprime", "C44", "zener_anisotropy"],
+        "dynamic": ["G_hill", "E_hill", "nu_hill"],
+    }
+
+
 def test_legacy_dynamic_input_without_holdout_seeds_keeps_old_shape(
     tmp_path: Path,
 ) -> None:
@@ -250,24 +357,27 @@ def test_legacy_dynamic_input_without_holdout_seeds_keeps_old_shape(
     )
 
 
-@pytest.mark.parametrize("forbidden", ["K", "G", "E", "nu"])
-def test_elasticity_rejects_derived_or_aliased_fit_targets(
-    tmp_path: Path,
-    forbidden: str,
-) -> None:
+def test_elasticity_rejects_unknown_target_alias(tmp_path: Path) -> None:
     block = _elasticity_block(dynamic=False).replace(
         "target static B 173.1 GPa",
-        f"target static {forbidden} 173.1 GPa",
+        "target static K 173.1 GPa",
     )
     path = _write(tmp_path, _project_text(block))
 
-    with pytest.raises(InputFileError, match="exactly B, Cprime, and C44") as exc:
+    with pytest.raises(InputFileError, match="complete B/Cprime/C44 basis") as exc:
         parse_input_file(path)
-    assert exc.value.line == next(
-        index
-        for index, line in enumerate(path.read_text().splitlines(), 1)
-        if f"target static {forbidden}" in line
+    assert "target static K" in path.read_text().splitlines()[exc.value.line - 1]
+
+
+def test_elasticity_rejects_mixed_target_bases(tmp_path: Path) -> None:
+    block = _elasticity_block(dynamic=False).replace(
+        "target static Cprime 52.5 GPa",
+        "target static G 52.5 GPa",
     )
+    path = _write(tmp_path, _project_text(block))
+
+    with pytest.raises(InputFileError, match="one complete target basis"):
+        parse_input_file(path)
 
 
 def test_dynamic_module_requires_its_own_complete_target_triplet(
@@ -278,7 +388,7 @@ def test_dynamic_module_requires_its_own_complete_target_triplet(
     )
     path = _write(tmp_path, _project_text(block))
 
-    with pytest.raises(InputFileError, match=r"dynamic module requires exactly.*C44"):
+    with pytest.raises(InputFileError, match=r"dynamic module requires exactly one complete"):
         parse_input_file(path)
 
 

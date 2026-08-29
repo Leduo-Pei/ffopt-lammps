@@ -25,6 +25,32 @@ PROPERTY_NAMES = {"bulk", "sublimation", "adsorption", "surface", "elasticity"}
 MATERIAL_KINDS = {"elemental", "molecular", "multicomponent"}
 CRYSTAL_FAMILIES = {"bcc", "molecular"}
 
+# Cubic stress/strain calculations always recover C11/C12/C44.  Selection may
+# nevertheless target either the independent single-crystal basis or the
+# isotropic Hill properties that a user ultimately wants to reproduce.  Keep
+# both contracts explicit so a target set cannot be mixed accidentally.
+ELASTICITY_TARGET_BASES = (
+    ("B", "Cprime", "C44"),
+    ("B", "G", "E", "nu"),
+)
+ELASTICITY_TARGET_ALIASES = {
+    "b": "B",
+    "cprime": "Cprime",
+    "c'": "Cprime",
+    "c44": "C44",
+    "g": "G",
+    "e": "E",
+    "nu": "nu",
+}
+ELASTICITY_TARGET_UNITS = {
+    "B": "GPa",
+    "Cprime": "GPa",
+    "C44": "GPa",
+    "G": "GPa",
+    "E": "GPa",
+    "nu": "1",
+}
+
 
 class InputFileError(ValueError):
     """An input error carrying a precise source location."""
@@ -120,7 +146,7 @@ class ElasticityModuleSpec:
 
 @dataclass(frozen=True)
 class ElasticityTargetSpec:
-    """An independent cubic target at one explicitly named fidelity."""
+    """One cubic selection target at an explicitly named fidelity."""
 
     fidelity: str
     name: str
@@ -300,9 +326,9 @@ def _parse_elasticity_line(
     """Parse the strict cubic-elasticity sub-language.
 
     Elasticity deliberately does not reuse the legacy weighted-target grammar:
-    its three independent moduli are ranked by constrained minimax error, not
-    by a weighted RMSE. Keeping the syntax separate prevents a seemingly
-    harmless ``weight`` option from silently changing the scientific problem.
+    the complete selected basis is ranked by constrained minimax error, not by
+    a weighted RMSE. Keeping the syntax separate prevents a seemingly harmless
+    ``weight`` option from silently changing the scientific problem.
     """
 
     path = document.path
@@ -368,7 +394,8 @@ def _parse_elasticity_line(
                 path,
                 line,
                 "elasticity target syntax: "
-                "target static|dynamic B|Cprime|C44 VALUE GPa",
+                "target static|dynamic B|Cprime|C44|G|E VALUE GPa | "
+                "target static|dynamic nu VALUE 1",
             )
         fidelity, name, raw_value, unit = args
         fidelity = fidelity.lower()
@@ -378,21 +405,42 @@ def _parse_elasticity_line(
                 line,
                 "elasticity target fidelity must be static or dynamic",
             )
-        if name not in {"B", "Cprime", "C44"}:
+        canonical_name = ELASTICITY_TARGET_ALIASES.get(name.lower())
+        if canonical_name is None:
             raise InputFileError(
                 path,
                 line,
-                "cubic elasticity fit targets must be exactly B, Cprime, and C44; "
-                "K, G, E, and nu are not independent fit targets",
+                "cubic elasticity targets must use either the complete "
+                "B/Cprime/C44 basis or the complete B/G/E/nu basis",
             )
-        if unit.lower() != "gpa":
+        expected_unit = ELASTICITY_TARGET_UNITS[canonical_name]
+        unit_ok = (
+            unit.lower() == "gpa"
+            if expected_unit == "GPa"
+            else unit.lower() in {"1", "dimensionless"}
+        )
+        if not unit_ok:
             raise InputFileError(
                 path,
                 line,
-                f"elasticity target {name} unit must be GPa, got {unit!r}",
+                f"elasticity target {canonical_name} unit must be "
+                f"{expected_unit}, got {unit!r}",
             )
+        name = canonical_name
         value = _float(path, line, raw_value, f"elasticity target {name}")
-        if value <= 0.0:
+        if name == "nu" and not (-1.0 < value < 0.5):
+            raise InputFileError(
+                path,
+                line,
+                "elasticity target nu must lie strictly between -1 and 0.5",
+            )
+        if name == "nu" and abs(value) <= 1.0e-15:
+            raise InputFileError(
+                path,
+                line,
+                "elasticity target nu cannot be zero for relative-error ranking",
+            )
+        if name != "nu" and value <= 0.0:
             raise InputFileError(
                 path,
                 line,
@@ -414,7 +462,7 @@ def _parse_elasticity_line(
                 f"(first set on line {duplicate.line})",
             )
         prop.elasticity_targets.append(
-            ElasticityTargetSpec(fidelity, name, value, "GPa", line)
+            ElasticityTargetSpec(fidelity, name, value, expected_unit, line)
         )
         return
 
@@ -1086,26 +1134,20 @@ def _validate_elasticity_property(
             "the schema-1 cubic elasticity contract requires 'crystal bcc'",
         )
 
-    required_targets = {"B", "Cprime", "C44"}
+    allowed_target_sets = {frozenset(items): items for items in ELASTICITY_TARGET_BASES}
     for fidelity, module in prop.elasticity_modules.items():
         names = {
             target.name
             for target in prop.elasticity_targets
             if target.fidelity == fidelity
         }
-        if names != required_targets:
-            missing = sorted(required_targets - names)
-            extra = sorted(names - required_targets)
-            details = []
-            if missing:
-                details.append(f"missing={missing}")
-            if extra:
-                details.append(f"extra={extra}")
+        if frozenset(names) not in allowed_target_sets:
             raise InputFileError(
                 path,
                 module.line,
-                f"elasticity {fidelity} module requires exactly independent "
-                f"B/Cprime/C44 targets ({', '.join(details)})",
+                f"elasticity {fidelity} module requires exactly one complete "
+                "target basis: B/Cprime/C44 or B/G/E/nu; "
+                f"received={sorted(names)}",
             )
 
     for target in prop.elasticity_targets:

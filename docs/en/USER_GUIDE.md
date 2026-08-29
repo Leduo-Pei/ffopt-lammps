@@ -71,7 +71,7 @@ conda install -c conda-forge "lammps=*=*openmpi*" openmpi -y
 python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 python -m pip install \
-  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a10/ffopt_lammps-0.3.0a10-py3-none-any.whl"
+  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a11/ffopt_lammps-0.3.0a11-py3-none-any.whl"
 ```
 
 The example intentionally installs CPU PyTorch. On a GPU workstation, first
@@ -118,7 +118,7 @@ conda activate ffopt
 conda env config vars set PYTHONNOUSERSITE=1
 conda deactivate
 conda activate ffopt
-python -m pip install "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a10/ffopt_lammps-0.3.0a10-py3-none-any.whl"
+python -m pip install "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a11/ffopt_lammps-0.3.0a11-py3-none-any.whl"
 ```
 
 LAMMPS and MPI may be installed separately. Their absolute paths are then
@@ -648,12 +648,58 @@ it protects the current `type`-line coordinate but re-evaluates every property.
 Use `incumbent off` (the default) for a new material. FFOpt never searches old
 `runs/` or `archive/` directories for an incumbent.
 
-Official 0 K `B`, `Cprime`, and `C44` values come from hydrostatic,
-orthorhombic, and shear stress responses. Two inner strain amplitudes are
-extrapolated with `M(h) = M0 + q*h^2`; a third outer amplitude audits drift.
-Energy curvature is diagnostic only because neighbor shells crossing a hard
-`lj/cut` boundary can create discontinuous energy jumps even when a quadratic
-fit reports a high R2. `r2` and `static_drift` are independent hard gates.
+Each enabled elasticity fidelity must declare exactly one complete target
+basis:
+
+```text
+# Single-crystal cubic basis
+target static B       173.10 GPa
+target static Cprime   48.00 GPa
+target static C44     116.00 GPa
+
+# Or user-facing isotropic basis
+target static B       173.10 GPa
+target static G        86.94 GPa
+target static E       223.40 GPa
+target static nu        0.2848 1
+```
+
+The supported bases are therefore exactly `B/Cprime/C44` and `B/G/E/nu`.
+Do not mix the two bases or omit one member. Static and dynamic fidelities are
+validated separately. The current Fe production input uses the isotropic
+basis: its low-temperature static targets are `B=173.10 GPa`, `G=86.94 GPa`,
+`E=223.40 GPa`, and `nu=0.2848`; its 300 K promotion targets are `B=170 GPa`,
+`G=82 GPa`, `E=211 GPa`, and `nu=0.29`.
+Negative `nu` is accepted for auxetic materials within `(-1, 0.5)`; zero is
+excluded because ranking uses relative error. FFOpt reports the `E/nu` values
+implied by each declared `B/G` pair and their closure mismatch, without
+silently modifying or rejecting experimental values drawn from different
+sources.
+
+For either basis, exact LAMMPS structure and surface checks are hard gates, not
+terms that a good elastic score can compensate. The Fe input requires lattice
+errors within 1%, angle errors within 1 degree, density within 1%, and surface
+energy within 5%. Born stability, stress-fit R2, and static extrapolation drift
+are additional independent eligibility gates. Only eligible candidates are
+ranked. For the selected elasticity basis, FFOpt first minimizes the largest
+absolute relative target error (minimax), then the relative-error RMSE, then
+the largest relative standard error of the mean across finite-temperature
+seeds. Thus one excellent modulus cannot hide one poor modulus, and noisy
+one-seed candidates cannot win over complete, repeatable evidence.
+The broad first-seed triage cannot estimate SEM: it uses exact one-seed error
+and the declared cluster/diversity reserve to choose the confirmation set.
+SEM is applied only after all confirmation seeds finish, and only complete
+multi-seed rows are eligible for publication.
+
+The cubic evaluator always computes `C11`, `C12`, `Cprime`, and `C44` from the
+hydrostatic, orthorhombic, and shear stress responses. When `B/G/E/nu` is the
+declared target basis, `Cprime`, `C44`, and the Zener anisotropy remain reported
+stability and interpretation diagnostics; they are not hidden optimization
+targets. Two inner strain amplitudes are extrapolated with
+`M(h) = M0 + q*h^2`; a third outer amplitude audits drift. Energy curvature is
+diagnostic only because neighbor shells crossing a hard `lj/cut` boundary can
+create discontinuous energy jumps even when a quadratic fit reports a high R2.
+`r2` and `static_drift` are independent hard gates.
 
 ### 6.5 Sublimation enthalpy target
 
@@ -870,6 +916,16 @@ Each AL round uses the surrogate to screen a large candidate pool. Only the
 selected candidates are sent to LAMMPS. Their new physical labels are appended
 to the data set and the surrogate is retrained. Improvement is judged from
 LAMMPS objectives, never from ANN predictions alone.
+
+Elemental constrained AL evaluates every structure and surface gate
+independently. If one gate surrogate is unreliable, FFOpt records the affected
+constraint and enters `partial_constraint_fallback`: reliable gate
+probabilities are retained, unreliable gates receive a conservative empirical
+pass-rate estimate, and a reliable mechanical expected-improvement model still
+guides proposals. It falls back to pure coverage only when reliable mechanical
+guidance is also unavailable. This surrogate fallback never relaxes scientific
+acceptance: exact LAMMPS structure/surface gates are still applied before a
+candidate can receive a static or dynamic elasticity label.
 
 The complete relationship is therefore:
 

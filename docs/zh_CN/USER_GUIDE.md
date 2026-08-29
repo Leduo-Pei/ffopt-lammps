@@ -60,7 +60,7 @@ conda install -c conda-forge "lammps=*=*openmpi*" openmpi -y
 python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 python -m pip install \
-  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a10/ffopt_lammps-0.3.0a10-py3-none-any.whl"
+  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a11/ffopt_lammps-0.3.0a11-py3-none-any.whl"
 ```
 
 上面的命令有意安装 CPU 版 PyTorch。GPU 工作站应先按 PyTorch 官方安装选择器
@@ -101,7 +101,7 @@ conda activate ffopt
 conda env config vars set PYTHONNOUSERSITE=1
 conda deactivate
 conda activate ffopt
-python -m pip install "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a10/ffopt_lammps-0.3.0a10-py3-none-any.whl"
+python -m pip install "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a11/ffopt_lammps-0.3.0a11-py3-none-any.whl"
 ```
 
 LAMMPS 和 MPI 可以由用户单独安装，随后在机器配置中填写绝对路径。路径含空格
@@ -615,6 +615,19 @@ FFOpt 不会扫描旧 `runs/` 或 `archive/` 自动寻找历史冠军。
 5%，但生产输入应显式填写。静态输入强制至少三个应变幅值：内层两个定义截距，第三个
 提供独立的外层漂移审计；动态输入至少两个。旧关键词 `strain` 仍可同时设置两套窗口，
 但不能与两个新关键词混用，并且也必须满足静态的三个幅值要求。
+
+弹性排序可以选择完整的 `B/Cprime/C44` 基底，也可以选择完整的 `B/G/E/nu`
+基底，二者不能在同一 fidelity 中混写。当前 Fe 示例采用后者：结构、密度、角度、
+表面能、Born 稳定性和拟合质量先作为硬门；进入可行域后，先最小化四项相对误差中的
+最大值，再比较 RMSE 和多种子标准误。`Cprime/C44` 仍然计算并报告，但只用于稳定性、
+各向异性和模型能力诊断。若单个角度或表面代理质量不足，只降级该约束的概率模型，
+不能再把可靠的力学主动学习整体退化为覆盖采样；所有晋级仍以精确 LAMMPS 硬门为准。
+负泊松比材料可以使用 `-1 < nu < 0.5` 的目标；由于排序采用相对误差，`nu=0` 不允许。
+对于 `B/G/E/nu` 基底，脚本会同时报告由 `B/G` 闭式推得的 `E/nu` 以及与用户目标的
+差异，只作一致性诊断，不会偷偷修改实验值。
+宽范围的单种子初筛尚不能估计标准误，因此按该种子的精确误差并结合聚类/多样性保留
+候选；只有确认集完成全部随机种子后，标准误才参与最终排序。单种子结果不能成为正式
+发布参数。
 
 ### 6.5 升华焓目标
 

@@ -29,7 +29,7 @@ Potential-energy curvature is recorded only as a diagnostic: with the global
 `shift no` hard cutoff, neighbour shells can cross the cutoff and create
 discrete energy jumps that are not elastic curvature. `static_drift 5 percent`
 is a hard eligibility gate, independent of `r2 0.98`: it rejects any candidate
-whose `B`, `Cprime`, or `C44` zero-strain intercept changes by more than 5% in
+whose canonical `B/Cprime/C44` zero-strain intercept changes by more than 5% in
 the outer-shell/full-window audit. The third static magnitude supplies that
 independent window check.
 
@@ -58,6 +58,16 @@ single-node job evaluates 38 cluster-balanced hard-gate candidates with seed
 202/303. Only a candidate completing all three seeds may win; the winner enters
 three independent long validation trajectories. `minimum 10` and
 `require_minimum yes` prevent publication from an undersized confirmation set.
+
+The Fe selection basis is `B/G/E/nu`. Structure, density, angles, surface
+energy, Born stability, fit quality, and static drift remain hard gates. Inside
+that feasible set, maximum relative `B/G/E/nu` error is primary, RMSE is
+secondary, and replicate standard error breaks an otherwise equal dynamic
+score. `Cprime/C44` remain visible diagnostics and stability evidence.
+The broad seed-101 triage has no replicate SEM and therefore ranks by exact
+one-seed error plus the declared cluster/diversity policy. SEM enters only
+after the confirmation set has completed all declared seeds; a one-seed row
+cannot become the published winner.
 
 This two-type model is an ordered-sublattice LJ surrogate.  Passing the fit
 does not by itself establish transferable elemental Fe physics.  The final

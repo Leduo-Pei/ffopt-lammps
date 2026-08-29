@@ -57,22 +57,24 @@ property surface
 end
 
 property elasticity
-    # Static and finite-temperature evidence have independent experimental
-    # targets; no universal 0 K -> 300 K scale factor is assumed.
-    # Static: Rayne & Chandrasekhar, Phys. Rev. 122, 1714 (1961),
-    # DOI 10.1103/PhysRev.122.1714 (low-temperature extrapolation to 0 K).
+    # The cubic evaluator still computes C11/C12/Cprime/C44 for Born stability
+    # and diagnostics.  Selection follows the user-facing isotropic moduli.
+    # Static targets are the Hill properties derived from the internally
+    # consistent low-temperature Rayne--Chandrasekhar constants.
     module static objective
     target static B       173.10 GPa
-    target static Cprime   52.50 GPa
-    target static C44     121.90 GPa
+    target static G        86.94 GPa
+    target static E       223.40 GPa
+    target static nu        0.2848 1
 
-    # Dynamic: Adams et al., J. Appl. Phys. 100, 113530 (2006),
-    # DOI 10.1063/1.2365714 (one internally consistent 300 K data set and an
-    # independent experimental validation, not a fitted 0-to-300 K scale law).
+    # Final selection uses the explicitly requested room-temperature bulk,
+    # shear, Young, and Poisson targets.  No fixed 0 K -> 300 K scale factor is
+    # assumed; three independent trajectories determine the final ranking.
     module dynamic promotion
-    target dynamic B       166.20 GPa
-    target dynamic Cprime   48.15 GPa
-    target dynamic C44     115.87 GPa
+    target dynamic B       170.00 GPa
+    target dynamic G        82.00 GPa
+    target dynamic E       211.00 GPa
+    target dynamic nu        0.2900 1
 
     gate lattice 1 percent
     gate angles 1 degree
@@ -161,9 +163,9 @@ al
     candidates 76
     static_candidates 38
     candidate_pool 65536
-    improvement_fraction 0.50
+    improvement_fraction 0.55
     boundary_fraction 0.30
-    global_fraction 0.20
+    global_fraction 0.15
     early_stop patience 3
     early_stop improvement 0.5
 end

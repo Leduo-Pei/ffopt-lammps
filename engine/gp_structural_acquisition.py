@@ -6,11 +6,12 @@ observations provide a minimax objective only where an *exact* structural
 observation passed every gate.  Surrogate predictions are used exclusively
 for proposing new coordinates and are never promoted to measured evidence.
 
-The implementation is intentionally conservative.  It fits one low-
-dimensional Gaussian process per structural gate and one GP for the measured
-mechanical M-infinity score.  If sample support or held-out fit quality is
-insufficient, selection falls back to parameter-space coverage and the round
-cannot claim scientific convergence.
+The implementation fits one low-dimensional Gaussian process per structural
+gate and one GP for the measured mechanical M-infinity score.  Structural
+models degrade independently: an unreliable near-constant angle model is
+shrunk toward exact empirical gate prevalence instead of vetoing a reliable
+mechanical model.  Every proposed point still passes the exact LAMMPS gates
+before it can receive an expensive mechanical label.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ from .constrained_refinement import (
 
 
 _EPS = 1.0e-12
-_DIAGNOSTIC_SCHEMA = "ffopt-gp-structural-acquisition-v1"
+_DIAGNOSTIC_SCHEMA = "ffopt-gp-structural-acquisition-v2"
 
 
 @dataclass(frozen=True)
@@ -373,6 +374,75 @@ def _greedy_select(
     return chosen
 
 
+def _improvement_feasibility_tiers(
+    *,
+    local_indices: Sequence[int],
+    all_indices: Sequence[int],
+    probability: np.ndarray,
+    constrained_improvement: np.ndarray,
+    count: int,
+    nominal_floor: float,
+) -> tuple[list[int], list[int], list[int], dict[str, Any]]:
+    """Build deterministic feasibility tiers for the improvement channel.
+
+    A low feasibility probability must not be rescued merely by a very large
+    extrapolative EI.  Nominally feasible local candidates therefore come
+    first, followed by nominally feasible candidates outside the trust region.
+    Only when those two sets cannot fill the improvement quota is the floor
+    relaxed by exact probability order.  Boundary and global exploration are
+    deliberately handled by their own channels and are not filtered here.
+    """
+
+    requested = max(int(count), 0)
+    local = {int(item) for item in local_indices}
+    available = [
+        int(item)
+        for item in all_indices
+        if math.isfinite(float(probability[int(item)]))
+    ]
+    nominal_local = [
+        item
+        for item in available
+        if item in local and float(probability[item]) >= nominal_floor - _EPS
+    ]
+    nominal_global = [
+        item
+        for item in available
+        if item not in local and float(probability[item]) >= nominal_floor - _EPS
+    ]
+    nominal_total = len(nominal_local) + len(nominal_global)
+    relaxed_needed = max(requested - nominal_total, 0)
+    nominal_members = set(nominal_local) | set(nominal_global)
+    relaxed = sorted(
+        (item for item in available if item not in nominal_members),
+        key=lambda item: (
+            -float(probability[item]),
+            -float(constrained_improvement[item]),
+            item,
+        ),
+    )[:relaxed_needed]
+    finite_capacity = nominal_total + len(relaxed)
+    floor_relaxed = bool(relaxed_needed and relaxed)
+    effective_floor: float | None = float(nominal_floor)
+    if floor_relaxed:
+        effective_floor = min(float(probability[item]) for item in relaxed)
+    elif requested and finite_capacity < requested:
+        effective_floor = None
+    diagnostics = {
+        "policy": "local_nominal_then_global_nominal_then_top_probability",
+        "nominal_floor": float(nominal_floor),
+        "effective_floor": effective_floor,
+        "requested_count": requested,
+        "nominal_local_count": len(nominal_local),
+        "nominal_global_count": len(nominal_global),
+        "finite_probability_count": len(available),
+        "floor_relaxed": floor_relaxed,
+        "expansion_to_global_available": bool(nominal_global),
+        "finite_capacity_shortfall": max(requested - finite_capacity, 0),
+    }
+    return nominal_local, nominal_global, relaxed, diagnostics
+
+
 class GaussianProcessStructuralAcquisition:
     """Low-dimensional constrained GP acquisition over an explicit pool."""
 
@@ -394,6 +464,7 @@ class GaussianProcessStructuralAcquisition:
         diversity_weight: float = 0.20,
         expected_improvement_exploration: float = 0.01,
         maximum_local_anchors: int = 8,
+        minimum_improvement_feasibility_probability: float = 0.50,
     ) -> None:
         self.improvement_fraction = float(improvement_fraction)
         self.boundary_fraction = float(boundary_fraction)
@@ -436,6 +507,13 @@ class GaussianProcessStructuralAcquisition:
         self.maximum_local_anchors = int(maximum_local_anchors)
         if self.maximum_local_anchors < 1:
             raise RefinementError("maximum_local_anchors must be positive")
+        self.minimum_improvement_feasibility_probability = float(
+            minimum_improvement_feasibility_probability
+        )
+        if not 0.0 <= self.minimum_improvement_feasibility_probability <= 1.0:
+            raise RefinementError(
+                "minimum_improvement_feasibility_probability must lie in [0, 1]"
+            )
 
     def scientific_identity(self) -> Mapping[str, Any]:
         return {
@@ -455,7 +533,17 @@ class GaussianProcessStructuralAcquisition:
                 self.expected_improvement_exploration
             ),
             "maximum_local_anchors": self.maximum_local_anchors,
+            "minimum_improvement_feasibility_probability": (
+                self.minimum_improvement_feasibility_probability
+            ),
+            "improvement_feasibility_policy": (
+                "local_nominal_then_global_nominal_then_top_probability"
+            ),
             "joint_feasibility_aggregation": "minimum_marginal_probability",
+            "structural_response": "gate_ratio_clipped_at_3",
+            "partial_constraint_policy": (
+                "blend_unreliable_gp_probability_with_beta_binomial_prevalence"
+            ),
             "incumbent_semantics": "exact_structural_pass_and_exact_mechanical_label",
         }
 
@@ -593,14 +681,21 @@ class GaussianProcessStructuralAcquisition:
         structural_metrics: dict[str, Any] = {}
         if constraints and len(names) <= self.maximum_dimensions:
             for index, constraint in enumerate(constraints):
+                # Values far outside a hard gate are equivalent for acquisition:
+                # they are rejected by the exact evaluator.  Clipping prevents a
+                # few collapsed cells from dominating validation of the local
+                # pass/fail boundary, especially for nearly constant cubic angles.
+                gate_response = np.clip(ratios[:, index], 0.0, 3.0)
                 model, metrics = _fit_gp(
                     structural_coordinates,
-                    ratios[:, index],
+                    gate_response,
                     name=constraint.name,
                     seed=int(context.seed) + 101 * index,
                     minimum_observations=self.minimum_structural_observations,
                     minimum_holdout_r2=self.minimum_holdout_r2,
                 )
+                metrics["response"] = "gate_ratio_clipped"
+                metrics["response_clip"] = 3.0
                 structural_metrics[constraint.name] = metrics
                 if model is not None:
                     structural_models[constraint.name] = model
@@ -652,17 +747,44 @@ class GaussianProcessStructuralAcquisition:
         mechanical_std = np.full(len(pool), np.nan)
         mechanical_ei = np.full(len(pool), np.nan)
         constrained_ei = np.full(len(pool), np.nan)
-        model_based = bool(structural_reliable and mechanical_reliable)
+        structural_guidance_available = bool(constraints and len(structural))
+        model_based = bool(structural_guidance_available and mechanical_reliable)
+        partial_constraint_fallback = bool(model_based and not structural_reliable)
         if model_based:
             marginal_probabilities: list[np.ndarray] = []
             marginal_entropies: list[np.ndarray] = []
-            for constraint in constraints:
-                mean, standard_deviation = structural_models[constraint.name].predict(
-                    pool_coordinates
+            constraint_modes: dict[str, str] = {}
+            for index, constraint in enumerate(constraints):
+                exact_ratio = ratios[:, index]
+                finite_ratio = np.isfinite(exact_ratio)
+                finite_count = int(np.sum(finite_ratio))
+                pass_count = int(np.sum(finite_ratio & (exact_ratio <= 1.0 + _EPS)))
+                empirical_probability = (pass_count + 1.0) / (finite_count + 2.0)
+                model = structural_models.get(constraint.name)
+                reliable = bool(
+                    structural_metrics.get(constraint.name, {}).get("reliable", False)
                 )
-                marginal = np.clip(
-                    _normal_cdf((1.0 - mean) / standard_deviation), _EPS, 1.0
-                )
+                if model is not None:
+                    mean, standard_deviation = model.predict(pool_coordinates)
+                    gp_probability = np.clip(
+                        _normal_cdf((1.0 - mean) / standard_deviation), _EPS, 1.0
+                    )
+                    if reliable:
+                        marginal = gp_probability
+                        constraint_modes[constraint.name] = "reliable_gp"
+                    else:
+                        # A poor global R2 must not veto a reliable mechanical
+                        # model.  Shrink the uncertain gate GP toward its exact
+                        # empirical pass rate; exact LAMMPS gates are still
+                        # applied before any static or dynamic promotion.
+                        marginal = 0.5 * gp_probability + 0.5 * empirical_probability
+                        constraint_modes[constraint.name] = "shrunk_gp_fallback"
+                else:
+                    mean = np.full(len(pool), np.nan)
+                    standard_deviation = np.full(len(pool), np.nan)
+                    marginal = np.full(len(pool), empirical_probability)
+                    constraint_modes[constraint.name] = "empirical_prevalence_fallback"
+                marginal = np.clip(marginal, _EPS, 1.0 - _EPS)
                 pool[f"surrogate_gate_ratio_mean__{constraint.name}"] = mean
                 pool[f"surrogate_gate_ratio_std__{constraint.name}"] = (
                     standard_deviation
@@ -680,8 +802,14 @@ class GaussianProcessStructuralAcquisition:
                 incumbent=float(exact_incumbent),
                 exploration=self.expected_improvement_exploration,
             )
-            diagnostics["mode"] = "constrained_gp"
-            diagnostics["fallback_reasons"] = []
+            diagnostics["mode"] = (
+                "partial_constraint_fallback"
+                if partial_constraint_fallback
+                else "constrained_gp"
+            )
+            diagnostics["constraint_guidance_modes"] = constraint_modes
+            if structural_reliable:
+                diagnostics["fallback_reasons"] = []
 
         pool["surrogate_structural_feasibility_probability"] = probability
         pool["surrogate_structural_boundary_entropy"] = boundary_entropy
@@ -771,27 +899,88 @@ class GaussianProcessStructuralAcquisition:
         tie_breakers = rng.random(len(pool))
         selected: list[int] = []
         roles: dict[int, str] = {}
-        first_scores = constrained_ei if model_based else coverage_score
-        first_role = (
-            "constrained_mechanical_improvement_local"
-            if model_based
-            else "coverage_local"
-        )
-        chosen = _greedy_select(
-            eligible=local_indices,
-            count=improvement_count,
-            scores=first_scores,
-            coordinates=pool_coordinates,
-            selected=selected,
-            tie_breakers=tie_breakers,
-            diversity_weight=self.diversity_weight,
-        )
-        selected.extend(chosen)
-        roles.update({index: first_role for index in chosen})
+        if model_based:
+            nominal_local, nominal_global, relaxed, feasibility_diagnostics = (
+                _improvement_feasibility_tiers(
+                    local_indices=local_indices,
+                    all_indices=range(len(pool)),
+                    probability=probability,
+                    constrained_improvement=constrained_ei,
+                    count=improvement_count,
+                    nominal_floor=(
+                        self.minimum_improvement_feasibility_probability
+                    ),
+                )
+            )
+            role_prefix = (
+                "mechanical_improvement_partial_constraints"
+                if partial_constraint_fallback
+                else "constrained_mechanical_improvement"
+            )
+            chosen = _greedy_select(
+                eligible=nominal_local,
+                count=improvement_count,
+                scores=constrained_ei,
+                coordinates=pool_coordinates,
+                selected=selected,
+                tie_breakers=tie_breakers,
+                diversity_weight=self.diversity_weight,
+            )
+            selected.extend(chosen)
+            roles.update({index: f"{role_prefix}_local" for index in chosen})
+
+            remaining = improvement_count - len(chosen)
+            expanded = _greedy_select(
+                eligible=nominal_global,
+                count=remaining,
+                scores=constrained_ei,
+                coordinates=pool_coordinates,
+                selected=selected,
+                tie_breakers=tie_breakers,
+                diversity_weight=self.diversity_weight,
+            )
+            selected.extend(expanded)
+            roles.update({
+                index: f"{role_prefix}_expanded_global" for index in expanded
+            })
+
+            remaining = improvement_count - len(chosen) - len(expanded)
+            relaxed_chosen = [
+                index for index in relaxed if index not in selected
+            ][:remaining]
+            selected.extend(relaxed_chosen)
+            roles.update({
+                index: f"{role_prefix}_relaxed_feasibility"
+                for index in relaxed_chosen
+            })
+            feasibility_diagnostics.update({
+                "selected_local_nominal": len(chosen),
+                "selected_global_nominal": len(expanded),
+                "selected_relaxed": len(relaxed_chosen),
+                "expansion_to_global": bool(expanded),
+                "coverage_fill_count": 0,
+            })
+            diagnostics["improvement_feasibility_gate"] = feasibility_diagnostics
+        else:
+            chosen = _greedy_select(
+                eligible=local_indices,
+                count=improvement_count,
+                scores=coverage_score,
+                coordinates=pool_coordinates,
+                selected=selected,
+                tie_breakers=tie_breakers,
+                diversity_weight=self.diversity_weight,
+            )
+            selected.extend(chosen)
+            roles.update({index: "coverage_local" for index in chosen})
 
         second_scores = boundary_entropy if model_based else boundary_coverage_score
         second_role = (
-            "structural_boundary_entropy_local"
+            (
+                "structural_boundary_partial_constraints_local"
+                if partial_constraint_fallback
+                else "structural_boundary_entropy_local"
+            )
             if model_based
             else "coverage_boundary_local"
         )
@@ -819,9 +1008,10 @@ class GaussianProcessStructuralAcquisition:
         selected.extend(chosen)
         roles.update({index: "global_coverage" for index in chosen})
         if len(selected) < count:
+            fill_count = count - len(selected)
             chosen = _greedy_select(
                 eligible=range(len(pool)),
-                count=count - len(selected),
+                count=fill_count,
                 scores=coverage_score,
                 coordinates=pool_coordinates,
                 selected=selected,
@@ -830,6 +1020,10 @@ class GaussianProcessStructuralAcquisition:
             )
             selected.extend(chosen)
             roles.update({index: "diverse_batch_fill" for index in chosen})
+            if model_based:
+                diagnostics["improvement_feasibility_gate"][
+                    "coverage_fill_count"
+                ] = len(chosen)
 
         proposals = pool.loc[selected].copy().reset_index(drop=True)
         proposals.insert(0, "selection_role", [roles[index] for index in selected])
@@ -853,6 +1047,13 @@ class GaussianProcessStructuralAcquisition:
         }
         diagnostics["quality"] = {
             "structural_models_reliable": bool(structural_reliable),
+            "structural_guidance_available": bool(structural_guidance_available),
+            "partial_constraint_fallback": bool(partial_constraint_fallback),
+            "unreliable_structural_constraints": [
+                item.name
+                for item in constraints
+                if not structural_metrics.get(item.name, {}).get("reliable", False)
+            ],
             "mechanical_model_reliable": bool(mechanical_reliable),
             "observed_structural_boundary_bracketed": bool(
                 np.any(np.isfinite(ratios).all(axis=1) & exact_feasible)
@@ -864,6 +1065,7 @@ class GaussianProcessStructuralAcquisition:
         ]
         convergence_capable = bool(
             model_based
+            and structural_reliable
             and boundary_bracketed
             and exact_incumbent is not None
         )

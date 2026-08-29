@@ -668,7 +668,14 @@ def _mechanical_property_rows(
 ) -> list[dict[str, Any]]:
     if row is None:
         return []
-    target_names = {"B_gpa": "B", "Cprime_gpa": "Cprime", "C44_gpa": "C44"}
+    target_names = {
+        "B_gpa": "B",
+        "Cprime_gpa": "Cprime",
+        "C44_gpa": "C44",
+        "G_hill_gpa": "G",
+        "E_hill_gpa": "E",
+        "nu_hill": "nu",
+    }
     properties = (
         "B_gpa",
         "Cprime_gpa",
@@ -684,8 +691,13 @@ def _mechanical_property_rows(
     for name in properties:
         if not _finite(row.get(name)):
             continue
-        target_name = target_names.get(name)
-        target_spec = module.get("targets", {}).get(target_name, {}) if target_name else {}
+        candidate_target_name = target_names.get(name)
+        target_spec = (
+            module.get("targets", {}).get(candidate_target_name, {})
+            if candidate_target_name
+            else {}
+        )
+        target_name = candidate_target_name if target_spec else None
         reference = target_spec.get("value") if isinstance(target_spec, Mapping) else None
         value = float(row[name])
         result.append({

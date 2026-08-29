@@ -97,7 +97,7 @@ structural BO coverage
   -> multi-centre local/global sampling
   -> independent-seed structural audit
   -> 0 K cubic stress-slope screen extrapolated to zero strain
-  -> constrained-minimax surrogate and AL
+  -> constrained-minimax B/G/E/nu surrogate and AL
   -> 38 cluster-balanced candidates with one quick 300 K seed
   -> exact reranking, then 10 candidates with the two remaining seeds
   -> one promoted winner in an independent long-trajectory validation
@@ -106,8 +106,9 @@ structural BO coverage
 
 Structure, density, angles, and surface energy are constraints. Their
 continuous violation is zero inside the declared tolerance. The static
-objective is the maximum relative error among independent `B`, `Cprime`, and
-`C44` targets. It uses symmetric stress slopes; energy curvature is
+objective is the maximum relative error among the configured properties. The
+packaged Fe input uses `B/G/E/nu`; `Cprime/C44` remain exact Born-stability and
+anisotropy diagnostics. It uses symmetric stress slopes; energy curvature is
 diagnostic-only because an unshifted LJ cutoff makes energy discontinuous at
 neighbour-shell crossings. `r2 0.98` and `static_drift 5 percent` are separate
 hard quality gates: the first checks the stress fit, while the second rejects a
@@ -118,8 +119,9 @@ break ties. The requested 20% mechanical tier labels result quality but never
 removes the best structurally valid candidate.
 
 Static and finite-temperature elastic calculations use independent target
-triplets and independent protocols. `G`, `E`, and Poisson's ratio are derived
-diagnostics, not additional fit dimensions. A finite-temperature ranking can
+sets and independent protocols. `E` and Poisson's ratio are algebraically
+derived from each observed `B/G` pair but remain explicit user-facing ranking
+targets when the `B/G/E/nu` basis is selected. A finite-temperature ranking can
 reverse the static ranking, so every result row keeps both ranks and its
 evidence level. In the packaged example, 38 finalists use seed `101`; exact
 300 K evidence then selects 10 candidates for seeds `202 303`. Only its winner
@@ -134,6 +136,12 @@ The example sets adaptive `triage 38`, `confirm 10`, `minimum 10`, and
 floor, not a request to return “up to 10”. `incumbent initial` protects only an
 explicit same-material coordinate and never imports its old evidence; new
 materials use `incumbent off`.
+
+If one structural gate surrogate has poor held-out quality, it degrades
+independently. Its probability is conservatively shrunk toward exact observed
+gate prevalence; it no longer disables a reliable mechanical expected-
+improvement model. Exact bulk/surface evaluation still applies every hard gate
+before a candidate can enter either elastic batch.
 
 After final validation, the principal user-facing products are under
 `runs/<project>/pipelines/<run-id>/validate/`: `validation_summary.json`,

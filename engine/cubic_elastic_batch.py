@@ -9,7 +9,7 @@ selection policy is deliberately lexicographic:
 2. cubic Born stability;
 3. protocol-specific fit quality (minimum R2 and, for static data, maximum
    zero-strain extrapolation drift);
-4. finite minimax error over independent B/Cprime/C44 targets;
+4. finite minimax error over the configured B/Cprime/C44 or B/G/E/nu basis;
 5. relative RMSE;
 6. same-element artificial-type contrast; and
 7. structural gate margin.
@@ -66,7 +66,18 @@ PROTOCOL_ALIASES = {
     STATIC_PROTOCOL: STATIC_PROTOCOL,
     DYNAMIC_PROTOCOL: DYNAMIC_PROTOCOL,
 }
-INDEPENDENT_TARGETS = ("B", "Cprime", "C44")
+ELASTIC_TARGET_BASES = (
+    ("B", "Cprime", "C44"),
+    ("B", "G", "E", "nu"),
+)
+ELASTIC_TARGET_COLUMNS = {
+    "B": "B_gpa",
+    "Cprime": "Cprime_gpa",
+    "C44": "C44_gpa",
+    "G": "G_hill_gpa",
+    "E": "E_hill_gpa",
+    "nu": "nu_hill",
+}
 
 
 class CubicElasticBatchError(RuntimeError):
@@ -529,7 +540,7 @@ def _mechanical_metrics(
 ) -> dict[str, Any]:
     signed: dict[str, float] = {}
     absolute: dict[str, float] = {}
-    for name in INDEPENDENT_TARGETS:
+    for name in targets:
         target = float(targets[name]["value"])
         value = float(values[name])
         error = 100.0 * (value - target) / abs(target)
@@ -541,6 +552,17 @@ def _mechanical_metrics(
         "mechanical_errors_percent": absolute,
         "mechanical_max_error_percent": float(np.max(vector)),
         "mechanical_rmse_percent": float(math.sqrt(np.mean(vector**2))),
+    }
+
+
+def _mechanical_values(
+    row: Mapping[str, Any], targets: Mapping[str, Mapping[str, Any]]
+) -> dict[str, float]:
+    """Resolve exactly the configured score basis from a flattened result row."""
+
+    return {
+        name: float(row[ELASTIC_TARGET_COLUMNS[name]])
+        for name in targets
     }
 
 
@@ -623,16 +645,17 @@ def summarize_single_elastic_result(
         "born_stability_pass": born,
         "fit_quality_pass": bool(r2_pass and drift_pass),
     })
-    values = {
-        "B": row["B_gpa"],
-        "Cprime": row["Cprime_gpa"],
-        "C44": row["C44_gpa"],
-    }
+    values = _mechanical_values(row, module["targets"])
     metrics = _mechanical_metrics(values, module["targets"])
     row.update(metrics)
+    row["mechanical_relative_sem_percent"] = {
+        name: 0.0 for name in module["targets"]
+    }
+    row["mechanical_max_relative_sem_percent"] = 0.0
+    row["replicate_uncertainty_available"] = False
     for name, value in metrics["mechanical_signed_errors_percent"].items():
         row[f"error_{name}_percent"] = value
-    finite = all(math.isfinite(float(values[name])) for name in INDEPENDENT_TARGETS)
+    finite = all(math.isfinite(float(value)) for value in values.values())
     row["finite_mechanical_score"] = finite
     row["finalist_eligible"] = bool(
         row["structural_gate_pass"]
@@ -762,6 +785,7 @@ def rank_elastic_results(frame: pd.DataFrame) -> pd.DataFrame:
     numeric_defaults = {
         "mechanical_max_error_percent": math.inf,
         "mechanical_rmse_percent": math.inf,
+        "mechanical_max_relative_sem_percent": 0.0,
         "same_element_parameter_contrast": math.inf,
         "structural_margin": -math.inf,
     }
@@ -782,11 +806,12 @@ def rank_elastic_results(frame: pd.DataFrame) -> pd.DataFrame:
             "finite_mechanical_score",
             "mechanical_max_error_percent",
             "mechanical_rmse_percent",
+            "mechanical_max_relative_sem_percent",
             "same_element_parameter_contrast",
             "structural_margin",
             "parameter_key",
         ],
-        ascending=[False, False, False, False, True, True, True, False, True],
+        ascending=[False, False, False, False, True, True, True, True, False, True],
         kind="mergesort",
     ).reset_index(drop=True)
     ranked.insert(0, "result_rank", np.arange(1, len(ranked) + 1))
@@ -892,9 +917,11 @@ def _protocol_module(config: Mapping[str, Any], protocol: str) -> Mapping[str, A
     if not isinstance(module, Mapping):
         raise CubicElasticBatchError(f"compiled config has no elasticity {fidelity} module")
     targets = module.get("targets")
-    if not isinstance(targets, Mapping) or set(targets) != set(INDEPENDENT_TARGETS):
+    allowed = {frozenset(basis) for basis in ELASTIC_TARGET_BASES}
+    if not isinstance(targets, Mapping) or frozenset(targets) not in allowed:
         raise CubicElasticBatchError(
-            f"elasticity {fidelity} targets must be exactly B, Cprime and C44"
+            f"elasticity {fidelity} targets must be exactly B/Cprime/C44 "
+            "or B/G/E/nu"
         )
     return module
 
@@ -1220,15 +1247,22 @@ def aggregate_dynamic_seed_results(
         len(successful) == len(expected_seeds)
         and result["minimum_fit_r2"] >= minimum_r2
     )
-    metrics = _mechanical_metrics(
-        {name: result[f"{name}_gpa"] for name in INDEPENDENT_TARGETS},
-        module["targets"],
-    )
+    values = _mechanical_values(result, module["targets"])
+    metrics = _mechanical_metrics(values, module["targets"])
     result.update(metrics)
+    relative_sem: dict[str, float] = {}
+    for name, target_spec in module["targets"].items():
+        column = ELASTIC_TARGET_COLUMNS[name]
+        target = abs(float(target_spec["value"]))
+        standard_error = float(result[f"{column}_std"]) / math.sqrt(len(successful))
+        relative_sem[name] = 100.0 * standard_error / target
+    result["mechanical_relative_sem_percent"] = relative_sem
+    result["mechanical_max_relative_sem_percent"] = max(relative_sem.values())
+    result["replicate_uncertainty_available"] = len(successful) > 1
     for name, value in metrics["mechanical_signed_errors_percent"].items():
         result[f"error_{name}_percent"] = value
     result["finite_mechanical_score"] = all(
-        math.isfinite(float(result[f"{name}_gpa"])) for name in INDEPENDENT_TARGETS
+        math.isfinite(float(value)) for value in values.values()
     )
     result["finalist_eligible"] = bool(
         result["structural_gate_pass"]
@@ -1363,6 +1397,7 @@ def _write_frame(path: Path, frame: pd.DataFrame) -> None:
 def _best_candidate_document(
     ranked: pd.DataFrame,
     parameter_names: Sequence[str],
+    module: Mapping[str, Any],
 ) -> dict[str, Any]:
     eligible = ranked.loc[ranked["finalist_eligible"]] if not ranked.empty else ranked
     if eligible.empty:
@@ -1376,21 +1411,55 @@ def _best_candidate_document(
         }
     row = eligible.iloc[0]
     within = bool(row["within_quality_tier"])
+    targets = module["targets"]
+    observed = _mechanical_values(row, targets)
+    signed_errors = {
+        name: float(row[f"error_{name}_percent"])
+        for name in targets
+    }
+    replicate_uncertainty_available = bool(
+        row.get("replicate_uncertainty_available", False)
+    )
+    sem = row.get("mechanical_relative_sem_percent", {})
+    relative_sem = (
+        {name: float(sem.get(name, 0.0)) for name in targets}
+        if replicate_uncertainty_available and isinstance(sem, Mapping)
+        else {name: None for name in targets}
+    )
     return {
         "schema_version": 1,
         "status": "within_quality_tier" if within else "best_effort",
         "parameter_key": str(row["parameter_key"]),
         "raw_free_parameters": {name: float(row[name]) for name in parameter_names},
+        "mechanical_evidence": {
+            "target_basis": list(targets),
+            "observed": observed,
+            "targets": {
+                name: float(targets[name]["value"])
+                for name in targets
+            },
+            "signed_error_percent": signed_errors,
+            "absolute_error_percent": {
+                name: abs(value) for name, value in signed_errors.items()
+            },
+            "relative_sem_percent": relative_sem,
+            "replicate_uncertainty_available": replicate_uncertainty_available,
+        },
         "selection": {
             "result_rank": int(row["result_rank"]),
             "mechanical_max_error_percent": float(row["mechanical_max_error_percent"]),
             "mechanical_rmse_percent": float(row["mechanical_rmse_percent"]),
+            "mechanical_max_relative_sem_percent": (
+                float(row.get("mechanical_max_relative_sem_percent", 0.0))
+                if replicate_uncertainty_available
+                else None
+            ),
             "quality_tier_percent": float(row["quality_tier_percent"]),
             "within_quality_tier": within,
             "best_effort": not within,
             "selection_rule": (
                 "structure -> Born -> protocol fit-quality gates; then "
-                "M_infinity -> RMSE -> "
+                "M_infinity -> RMSE -> replicate SEM -> "
                 "same-element contrast -> structural margin"
             ),
         },
@@ -1657,6 +1726,7 @@ def run_elasticity_batch(
     best = _best_candidate_document(
         ranked,
         [name for name, _lower, _upper in parameter_space],
+        module,
     )
     _write_json(outputs["best_candidate"], best)
     preparation_failures = sum(

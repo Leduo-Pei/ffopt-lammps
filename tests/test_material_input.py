@@ -173,9 +173,10 @@ def test_explain_reports_material_parameter_graph_and_elasticity_contract(
     assert "Surrogate             : method=gp" in output
     assert "Surrogate             : method=gp ensemble=" not in output
     assert "module static: role=objective fidelity=static_0k cost=low" in output
-    assert "targets: B=173.1 GPa, Cprime=52.5 GPa, C44=121.9 GPa" in output
+    assert "targets: B=173.1 GPa, G=86.94 GPa, E=223.4 GPa, nu=0.2848 1" in output
+    assert "B/G closure diagnostic: consistent_within_reference_tolerance" in output
     assert "module dynamic: role=promotion fidelity=dynamic_300k cost=high" in output
-    assert "targets: B=166.2 GPa, Cprime=48.15 GPa, C44=115.87 GPa" in output
+    assert "targets: B=170 GPa, G=82 GPa, E=211 GPa, nu=0.29 1" in output
     assert "lattice<=1%, angles<=1 degree, density<=1%, surface<=5%" in output
     assert (
         "tier=20.0% (soft/reporting only), Born=required, "
@@ -208,10 +209,10 @@ def test_explain_reports_material_parameter_graph_and_elasticity_contract(
         "structural/static candidates=76/38 pool=65536"
     ) in output
     assert (
-        "AL acquisition/stop   : constrained_minimax; "
-        "improvement/boundary/global=0.50/0.30/0.20; "
-        "patience=3 min_improvement=0.5 pp"
-    ) in output
+            "AL acquisition/stop   : constrained_minimax; "
+            "improvement/boundary/global=0.55/0.30/0.15; "
+            "patience=3 min_improvement=0.5 pp"
+        ) in output
 
 
 def test_elemental_material_compiles_charge_defaults_and_parameter_graph(tmp_path):
