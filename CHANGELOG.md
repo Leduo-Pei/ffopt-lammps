@@ -6,6 +6,48 @@ expectations while the public API remains in alpha.
 
 ## Unreleased
 
+## 0.3.0a11 - 2026-08-29
+
+### Added
+
+- Support either a complete cubic `B/Cprime/C44` target basis or a complete
+  isotropic `B/G/E/nu` target basis for each enabled elasticity fidelity. Mixed
+  or incomplete bases are rejected, while all cubic constants remain available
+  as diagnostics and for Born-stability checks.
+- Record the algebraic closure of declared `B/G/E/nu` targets as a diagnostic,
+  and support physically admissible negative Poisson targets for auxetic
+  materials.
+
+### Changed
+
+- Make the Fe elemental-BCC workflow optimize its declared low-temperature and
+  300 K `B/G/E/nu` targets directly. Structurally eligible candidates are ranked
+  lexicographically by maximum relative elastic error, relative-error RMSE,
+  and finite-temperature relative SEM; `Cprime`, `C44`, and Zener anisotropy
+  remain reported diagnostics rather than competing objectives.
+- Preserve the exact lattice, angle, density, surface-energy, Born-stability,
+  fit-quality, and static-drift gates ahead of elasticity ranking. Elastic
+  improvement cannot compensate for failure of a hard scientific gate.
+- Gate the mechanical-improvement acquisition channel at a nominal minimum
+  structural feasibility probability of 0.5. The deterministic fallback first
+  expands beyond the local trust region, then relaxes by probability rank only
+  when necessary; boundary and global exploration quotas remain explicit.
+
+### Fixed
+
+- Keep reliable mechanical expected improvement active when only part of the
+  structural constraint surrogate is unreliable. The new partial-constraint
+  fallback records affected constraints, combines reliable gate probabilities
+  with conservative empirical pass rates, and uses coverage-only acquisition
+  only when no reliable mechanical guidance remains; exact LAMMPS gates are
+  unchanged.
+- Prevent partial-constraint fallback rounds from claiming scientific
+  convergence, and make Top-N and best-candidate evidence follow the configured
+  target basis instead of hard-coding one elastic representation.
+- Include the complete acquisition-backend scientific identity in each outer
+  material-AL round manifest, preventing a changed feasibility or surrogate
+  policy from reusing a completed round produced by older logic.
+
 ## 0.3.0a10 - 2026-08-26
 
 ### Added

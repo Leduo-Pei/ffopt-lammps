@@ -350,13 +350,15 @@ contract and must not be represented by relabeling it as this fixed metal.
 property elasticity
     module static objective
     target static B       173.10 GPa
-    target static Cprime   52.50 GPa
-    target static C44     121.90 GPa
+    target static G        86.94 GPa
+    target static E       223.40 GPa
+    target static nu        0.2848 1
 
     module dynamic promotion
-    target dynamic B       166.20 GPa
-    target dynamic Cprime   48.15 GPa
-    target dynamic C44     115.87 GPa
+    target dynamic B       170.00 GPa
+    target dynamic G        82.00 GPa
+    target dynamic E       211.00 GPa
+    target dynamic nu        0.2900 1
 
     gate lattice 1 percent
     gate angles  1 degree
@@ -387,21 +389,33 @@ end
 The schema-1 contract is for `crystal bcc` and reuses the structure declared by
 `property bulk`. The static module is required and has role `objective`. The
 dynamic module is optional and must have role `promotion` or `validation`.
-Every declared module has its own complete `B`, `Cprime`, and `C44` target
-triplet in GPa; a 0 K target is never silently reused at 300 K. `K`, `G`, `E`,
-and `nu` are rejected as fit targets. Hill `G`, Hill `E`, and Poisson's ratio
-are derived once and reported as diagnostics.
+Every declared module chooses one complete target basis: either the
+single-crystal `B/Cprime/C44` triplet or the isotropic `B/G/E/nu` quartet. The
+two bases cannot be mixed inside one fidelity, and a 0 K target is never
+silently reused at 300 K. `B`, `G`, and `E` use GPa; `nu` uses `1`. The cubic
+stress calculation always retains `C11/C12/Cprime/C44` and Born stability even
+when the isotropic basis controls selection.
+
+Positive `B/G/E` targets are required. `nu` may be negative for an auxetic
+material but must lie strictly inside the mechanically admissible interval
+`(-1, 0.5)` and cannot be zero because the selection metric is relative error.
+For a `B/G/E/nu` basis, compilation also reports the closed-form `E` and `nu`
+implied by the declared `B/G` pair and their relative mismatch. This is a
+diagnostic, not a hidden correction or rejection: experimental targets from
+different sources remain exactly as entered, while an overdetermined or
+internally inconsistent target set is made visible.
 
 Static elasticity is ranked by maximum relative error inside the declared
-structural gates, not added to the first-stage weighted structural RMSE. Its
+structural gates, not added to the first-stage weighted structural RMSE. The
+configured basis is ranked by maximum relative error and then RMSE. Its
 canonical values come from symmetric three-mode pressure slopes extrapolated
 to zero strain with the two smallest magnitudes. The raw linear fit, outer
 strain shells, and energy curvature remain diagnostics. Energy curvature is
 never used for ranking because an unshifted hard-cutoff potential has discrete
 energy jumps when neighbour shells cross the cutoff. The `r2`, `static_drift`,
 and optional Born-stability requirement are eligibility checks. `static_drift
-5 percent` rejects a candidate when any of the `B`, `Cprime`, or `C44`
-zero-strain intercepts changes by more than 5% under the outer-shell/full-window
+5 percent` rejects a candidate when any canonical `B/Cprime/C44` zero-strain
+intercept changes by more than 5% under the outer-shell/full-window
 extrapolation audits. It complements R2: a nearly linear-looking fit can still
 be too dependent on the chosen strain window. The default is 5% when the line
 is omitted; production inputs should state it explicitly. `tier` is a reporting

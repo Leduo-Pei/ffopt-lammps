@@ -352,19 +352,27 @@ def build_refinement_spec(
     targets = static.get("targets", {})
     if not isinstance(targets, Mapping):
         raise ValueError("elasticity.modules.static.targets must be a mapping")
+    objective_columns = {
+        "B": "B_gpa",
+        "Cprime": "Cprime_gpa",
+        "C44": "C44_gpa",
+        "G": "G_hill_gpa",
+        "E": "E_hill_gpa",
+        "nu": "nu_hill",
+    }
     objectives = []
-    for name in ("B", "Cprime", "C44"):
-        try:
-            raw = targets[name]
-        except KeyError as exc:
-            raise ValueError(f"Static elasticity target {name!r} is required") from exc
+    for name, raw in targets.items():
+        if name not in objective_columns:
+            raise ValueError(f"Unsupported static elasticity target {name!r}")
         value = raw.get("value") if isinstance(raw, Mapping) else raw
         objectives.append({
             "name": name,
-            "column": f"{name}_gpa",
+            "column": objective_columns[name],
             "target": float(value),
             "role": "objective",
         })
+    if not objectives:
+        raise ValueError("At least one static elasticity target is required")
 
     active_learning = config.get("active_learning", {})
     if not isinstance(active_learning, Mapping):

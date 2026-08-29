@@ -13,7 +13,12 @@ from engine.resources import resolve_builtin_resource
 
 from .artifact_manifest import sha256_file
 from .defaults import method_defaults
-from .input_file import FFOptInput, InputFileError, PropertySpec
+from .input_file import (
+    ELASTICITY_TARGET_BASES,
+    FFOptInput,
+    InputFileError,
+    PropertySpec,
+)
 from .lammps_data import inspect_lammps_data
 
 BULK_TARGETS = {"a", "b", "c", "alpha", "beta", "gamma_ang", "density"}
@@ -1056,19 +1061,64 @@ def _compile_elasticity(
     born_required = bool(prop.settings.get("born", True))
     reporting_tier = float(prop.settings.get("tier", 20.0))
 
+    target_basis_by_fidelity: dict[str, list[str]] = {}
     targets_by_fidelity: dict[str, dict[str, dict[str, Any]]] = {}
     for fidelity in ("static", "dynamic"):
+        declared = {
+            target.name: target
+            for target in prop.elasticity_targets
+            if target.fidelity == fidelity
+        }
+        basis = next(
+            (
+                list(candidate)
+                for candidate in ELASTICITY_TARGET_BASES
+                if set(candidate) == set(declared)
+            ),
+            [],
+        )
+        if fidelity in prop.elasticity_modules:
+            target_basis_by_fidelity[fidelity] = basis
         targets_by_fidelity[fidelity] = {
             name: {
-                "value": next(
-                    target.value
-                    for target in prop.elasticity_targets
-                    if target.fidelity == fidelity and target.name == name
-                ),
-                "unit": "GPa",
+                "value": declared[name].value,
+                "unit": declared[name].unit,
             }
-            for name in ("B", "Cprime", "C44")
-            if fidelity in prop.elasticity_modules
+            for name in basis
+        }
+
+    target_consistency_by_fidelity: dict[str, dict[str, Any]] = {}
+    for fidelity, basis in target_basis_by_fidelity.items():
+        if basis != ["B", "G", "E", "nu"]:
+            continue
+        values = {
+            name: float(targets_by_fidelity[fidelity][name]["value"])
+            for name in basis
+        }
+        denominator = 3.0 * values["B"] + values["G"]
+        closed_e = 9.0 * values["B"] * values["G"] / denominator
+        closed_nu = (
+            3.0 * values["B"] - 2.0 * values["G"]
+        ) / (2.0 * denominator)
+        errors = {
+            "E": 100.0 * abs(values["E"] - closed_e) / abs(values["E"]),
+            "nu": 100.0 * abs(values["nu"] - closed_nu) / abs(values["nu"]),
+        }
+        consistency_limit = 1.0
+        maximum_error = max(errors.values())
+        target_consistency_by_fidelity[fidelity] = {
+            "role": "diagnostic_only",
+            "derived_from": ["B", "G"],
+            "closed_form_values": {"E": closed_e, "nu": closed_nu},
+            "declared_values": {"E": values["E"], "nu": values["nu"]},
+            "relative_closure_error_percent": errors,
+            "maximum_relative_closure_error_percent": maximum_error,
+            "reference_tolerance_percent": consistency_limit,
+            "status": (
+                "consistent_within_reference_tolerance"
+                if maximum_error <= consistency_limit + 1.0e-12
+                else "inconsistent_experimental_targets"
+            ),
         }
 
     modules: dict[str, dict[str, Any]] = {}
@@ -1156,8 +1206,26 @@ def _compile_elasticity(
     config["elasticity"] = {
         "enabled": True,
         "symmetry": "cubic",
-        "target_basis": ["B", "Cprime", "C44"],
-        "derived_diagnostics_only": ["G_hill", "E_hill", "nu_hill"],
+        # ``target_basis`` remains the static objective basis for backwards
+        # readers.  The fidelity-specific mapping allows a future workflow to
+        # use a different experimental basis at finite temperature without
+        # changing what the cubic evaluator computes.
+        "target_basis": target_basis_by_fidelity["static"],
+        "target_basis_by_fidelity": target_basis_by_fidelity,
+        "target_consistency_by_fidelity": target_consistency_by_fidelity,
+        "derived_diagnostics_only_by_fidelity": {
+            fidelity: (
+                ["Cprime", "C44", "zener_anisotropy"]
+                if basis == ["B", "G", "E", "nu"]
+                else ["G_hill", "E_hill", "nu_hill"]
+            )
+            for fidelity, basis in target_basis_by_fidelity.items()
+        },
+        "derived_diagnostics_only": (
+            ["Cprime", "C44", "zener_anisotropy"]
+            if target_basis_by_fidelity["static"] == ["B", "G", "E", "nu"]
+            else ["G_hill", "E_hill", "nu_hill"]
+        ),
         "selection": {
             "method": "constrained_minimax_relative_error",
             "structural_gates": compiled_gates,

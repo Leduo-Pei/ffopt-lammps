@@ -15,6 +15,7 @@ from engine.cubic_elastic_batch import (
     CandidateParameterError,
     CubicElasticBatchError,
     PreparedCandidate,
+    aggregate_dynamic_seed_results,
     build_parser as build_elastic_batch_parser,
     effective_available_cores,
     load_candidates,
@@ -112,6 +113,17 @@ def test_dynamic_ranking_can_reverse_static_rank_and_retains_best_effort():
     assert list(reranked["parameter_key"]) == ["candidate2", "candidate1"]
     assert bool(reranked.iloc[0]["finalist_eligible"])
     assert not bool(reranked.iloc[0]["within_quality_tier"])
+
+
+def test_equal_BGEnu_scores_use_replicate_sem_before_parameter_contrast():
+    noisy = _rank_row("candidate1", 20.0, 12.0, contrast=0.01)
+    stable = _rank_row("candidate2", 20.0, 12.0, contrast=0.20)
+    noisy["mechanical_max_relative_sem_percent"] = 4.0
+    stable["mechanical_max_relative_sem_percent"] = 1.0
+
+    ranked = rank_elastic_results(pd.DataFrame([noisy, stable]))
+
+    assert list(ranked["parameter_key"]) == ["candidate2", "candidate1"]
 
 
 def test_refinement_aliases_are_directly_accepted_by_finalist_selection():
@@ -322,6 +334,163 @@ def test_static_extrapolation_drift_is_a_fail_closed_finalist_gate(
     assert bool(row["fit_quality_pass"]) is expected_pass
     assert bool(row["finalist_eligible"]) is expected_pass
     assert row["finalist_rejection_reason"] == expected_reason
+
+
+def test_isotropic_basis_scores_BGEnu_and_keeps_single_crystal_values_diagnostic(
+    tmp_path,
+):
+    candidate = Candidate(
+        parameter_key="named:sha256:isotropic",
+        raw_parameters={"epsilon": 6.0, "sigma": 2.3},
+        source_row={},
+        source_rank=1,
+    )
+    prepared = PreparedCandidate(
+        candidate=candidate,
+        resolved_parameters={"epsilon": 6.0, "sigma": 2.3},
+        force_field_include=tmp_path / "force_field.lmp",
+        parameter_contrast={
+            "contrast": 0.0,
+            "epsilon_contrast": 0.0,
+            "sigma_contrast": 0.0,
+        },
+    )
+    summary = {
+        "candidate_directory": str(tmp_path),
+        "candidate_fingerprint": "sha256:isotropic",
+        "elastic_constants_gpa": {"C11": 250.0, "C12": 130.0, "C44": 180.0},
+        "independent_moduli_gpa": {"B": 170.0, "Cprime": 60.0},
+        "derived_diagnostics": {
+            "G_hill_gpa": 90.2,
+            "E_hill_gpa": 232.1,
+            "nu_hill": 0.3045,
+        },
+        "fit_quality": {
+            "minimum_r2": 0.999,
+            "maximum_zero_strain_extrapolation_drift_percent": 1.0,
+        },
+        "born_stability": {"stable": True},
+    }
+    module = {
+        "targets": {
+            "B": {"value": 170.0},
+            "G": {"value": 82.0},
+            "E": {"value": 211.0},
+            "nu": {"value": 0.29},
+        },
+        "protocol": {"maximum_zero_strain_extrapolation_drift_percent": 5.0},
+    }
+    structural = {
+        "structural_gate_pass": True,
+        "structural_margin": 0.1,
+        "structural_gate_reason": "",
+        "structural_errors": {},
+    }
+
+    row = summarize_single_elastic_result(
+        candidate=candidate,
+        prepared=prepared,
+        structural=structural,
+        summary=summary,
+        module=module,
+        minimum_r2=0.98,
+        born_required=True,
+        quality_tier_percent=20.0,
+    )
+
+    expected = {
+        "B": 0.0,
+        "G": 10.0,
+        "E": 10.0,
+        "nu": 5.0,
+    }
+    for name, error in expected.items():
+        assert abs(row[f"error_{name}_percent"]) == pytest.approx(error)
+    assert row["mechanical_max_error_percent"] == pytest.approx(10.0)
+    assert row["mechanical_rmse_percent"] == pytest.approx(7.5)
+    assert row["Cprime_gpa"] == pytest.approx(60.0)
+    assert row["C44_gpa"] == pytest.approx(180.0)
+    assert "error_Cprime_percent" not in row
+    assert "error_C44_percent" not in row
+    assert bool(row["finalist_eligible"])
+
+
+def test_three_seed_isotropic_aggregate_reports_hand_checked_sem(tmp_path):
+    candidate = Candidate(
+        parameter_key="named:sha256:aggregate",
+        raw_parameters={"epsilon": 6.0, "sigma": 2.3},
+        source_row={},
+        source_rank=1,
+    )
+    prepared = PreparedCandidate(
+        candidate=candidate,
+        resolved_parameters={"epsilon": 6.0, "sigma": 2.3},
+        force_field_include=tmp_path / "force_field.lmp",
+        parameter_contrast={
+            "contrast": 0.0,
+            "epsilon_contrast": 0.0,
+            "sigma_contrast": 0.0,
+        },
+    )
+    rows = []
+    for seed, b_value, g_value, e_value, nu_value in (
+        (101, 160.0, 80.0, 205.0, 0.28),
+        (202, 170.0, 82.0, 211.0, 0.29),
+        (303, 180.0, 84.0, 217.0, 0.30),
+    ):
+        rows.append({
+            "calculation_status": "completed",
+            "trajectory_seed": seed,
+            "C11_gpa": 250.0,
+            "C12_gpa": 130.0,
+            "C44_gpa": 120.0,
+            "B_gpa": b_value,
+            "Cprime_gpa": 60.0,
+            "G_hill_gpa": g_value,
+            "E_hill_gpa": e_value,
+            "nu_hill": nu_value,
+            "minimum_fit_r2": 0.999,
+            "born_stability_pass": True,
+        })
+    module = {
+        "targets": {
+            "B": {"value": 170.0},
+            "G": {"value": 82.0},
+            "E": {"value": 211.0},
+            "nu": {"value": 0.29},
+        }
+    }
+    structural = {
+        "structural_gate_pass": True,
+        "structural_margin": 0.5,
+        "structural_gate_reason": "",
+        "structural_errors": {},
+    }
+
+    result = aggregate_dynamic_seed_results(
+        rows,
+        candidate=candidate,
+        prepared=prepared,
+        structural=structural,
+        module=module,
+        expected_seeds=[101, 202, 303],
+        minimum_r2=0.98,
+        born_required=True,
+        quality_tier_percent=20.0,
+    )
+
+    assert result["mechanical_max_error_percent"] == pytest.approx(0.0)
+    assert result["mechanical_rmse_percent"] == pytest.approx(0.0)
+    expected_b_sem = 100.0 * 10.0 / (3.0 ** 0.5) / 170.0
+    assert result["mechanical_relative_sem_percent"]["B"] == pytest.approx(
+        expected_b_sem
+    )
+    assert result["mechanical_max_relative_sem_percent"] == pytest.approx(
+        expected_b_sem
+    )
+    assert result["replicate_uncertainty_available"]
+    assert result["all_seeds_complete"]
+    assert result["finalist_eligible"]
 
 
 def test_nested_resource_plan_never_silently_oversubscribes():
@@ -789,6 +958,26 @@ def test_adaptive_dynamic_runs_broad_seed_then_confirms_only_reranked_winner(tmp
     assert json.loads((output / "best_candidate.json").read_text())[
         "raw_free_parameters"
     ]["Fe_corner_epsilon"] == pytest.approx(7.0)
+    best = json.loads((output / "best_candidate.json").read_text())
+    assert best["mechanical_evidence"]["target_basis"] == [
+        "B", "Cprime", "C44"
+    ]
+    assert set(best["mechanical_evidence"]["observed"]) == {
+        "B", "Cprime", "C44"
+    }
+    assert set(best["mechanical_evidence"]["signed_error_percent"]) == {
+        "B", "Cprime", "C44"
+    }
+    assert best["mechanical_evidence"]["replicate_uncertainty_available"]
+    triage_best = json.loads(
+        (output / "triage_batch" / "best_candidate.json").read_text()
+    )
+    assert not triage_best["mechanical_evidence"][
+        "replicate_uncertainty_available"
+    ]
+    assert triage_best["selection"][
+        "mechanical_max_relative_sem_percent"
+    ] is None
     state = json.loads((output / "dynamic_racing_state.json").read_text())
     assert state["triage"]["work_units"] == 2
     assert state["confirmation"]["work_units"] == 1

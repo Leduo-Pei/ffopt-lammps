@@ -420,7 +420,9 @@ def run_adaptive_dynamic_promotion(
     _write_frame(outputs["results"], ranked)
     _write_frame(outputs["finalists"], finalists)
     best = _best_candidate_document(
-        ranked, [name for name, _lower, _upper in parameter_space]
+        ranked,
+        [name for name, _lower, _upper in parameter_space],
+        module,
     )
     _write_json(outputs["best_candidate"], best)
     racing_state = {

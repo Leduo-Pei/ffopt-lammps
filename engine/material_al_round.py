@@ -995,6 +995,7 @@ def _round_scientific_identity(
     available_cores: int,
     cores_per_state: int,
     omp_threads_per_rank: int,
+    acquisition_backend: GaussianProcessStructuralAcquisition,
 ) -> dict[str, Any]:
     # Execution parallelism affects provenance/resume but not the scientific
     # result. It is included so an interrupted stage cannot silently change its
@@ -1009,7 +1010,13 @@ def _round_scientific_identity(
         "available_cores": int(available_cores),
         "cores_per_state": int(cores_per_state),
         "omp_threads_per_rank": int(omp_threads_per_rank),
-        "acquisition_backend": "gp_structural_constraints",
+        "acquisition": {
+            "backend": acquisition_backend.name,
+            "capability": acquisition_backend.capability,
+            "scientific_identity": dict(
+                acquisition_backend.scientific_identity()
+            ),
+        },
     }
 
 
@@ -1107,6 +1114,11 @@ def run_material_al_round(
     active = config.get("active_learning", {})
     if not isinstance(active, Mapping):
         active = {}
+    backend = acquisition_backend or _gp_backend(config)
+    if not isinstance(backend, GaussianProcessStructuralAcquisition):
+        raise MaterialALRoundError(
+            "material AL requires GaussianProcessStructuralAcquisition"
+        )
     pool_size = int(active.get("n_candidate_pool", 16384))
     scientific_identity = _round_scientific_identity(
         round_number=round_number,
@@ -1117,6 +1129,7 @@ def run_material_al_round(
         available_cores=available,
         cores_per_state=cores_per_state,
         omp_threads_per_rank=omp_threads_per_rank,
+        acquisition_backend=backend,
     )
     fixed_outputs = {
         label: destination / name for label, name in _ROUND_OUTPUTS.items()
@@ -1182,11 +1195,6 @@ def run_material_al_round(
     )
     _write_frame(fixed_outputs["candidate_pool"], pool)
 
-    backend = acquisition_backend or _gp_backend(config)
-    if not isinstance(backend, GaussianProcessStructuralAcquisition):
-        raise MaterialALRoundError(
-            "material AL requires GaussianProcessStructuralAcquisition"
-        )
     acquisition = backend.propose(AcquisitionContext(
         candidate_pool=pool,
         structural_observations=structural,

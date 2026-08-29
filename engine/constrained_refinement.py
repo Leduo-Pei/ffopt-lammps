@@ -135,7 +135,7 @@ class StructuralConstraintSpec:
 
 @dataclass(frozen=True)
 class MechanicalObjectiveSpec:
-    """One independent mechanical minimax objective."""
+    """One declared component of the mechanical minimax objective."""
 
     name: str
     column: str

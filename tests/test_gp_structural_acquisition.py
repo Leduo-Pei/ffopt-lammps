@@ -16,6 +16,7 @@ from engine.constrained_refinement import (
 )
 from engine.gp_structural_acquisition import (
     GaussianProcessStructuralAcquisition,
+    _improvement_feasibility_tiers,
     constrained_expected_improvement,
 )
 
@@ -74,6 +75,41 @@ def test_saturated_structural_probability_preserves_mechanical_ei():
 
     assert expected[0] > expected[1] > expected[2] > 0.0
     assert constrained == pytest.approx(expected)
+
+
+def test_improvement_feasibility_tiers_expand_before_relaxing_floor():
+    local, global_, relaxed, diagnostics = _improvement_feasibility_tiers(
+        local_indices=[0, 1],
+        all_indices=range(6),
+        probability=np.asarray([0.90, 0.80, 0.70, 0.60, 0.20, 0.10]),
+        constrained_improvement=np.asarray([1.0, 2.0, 3.0, 4.0, 100.0, 200.0]),
+        count=3,
+        nominal_floor=0.50,
+    )
+
+    assert local == [0, 1]
+    assert global_ == [2, 3]
+    assert relaxed == []
+    assert diagnostics["effective_floor"] == pytest.approx(0.50)
+    assert not diagnostics["floor_relaxed"]
+
+
+def test_improvement_feasibility_tiers_relax_by_probability_not_huge_ei():
+    local, global_, relaxed, diagnostics = _improvement_feasibility_tiers(
+        local_indices=[0],
+        all_indices=range(5),
+        probability=np.asarray([0.80, 0.40, 0.30, 0.10, np.nan]),
+        constrained_improvement=np.asarray([1.0, 2.0, 3.0, 1.0e6, 1.0e9]),
+        count=3,
+        nominal_floor=0.50,
+    )
+
+    assert local == [0]
+    assert global_ == []
+    assert relaxed == [1, 2]
+    assert diagnostics["effective_floor"] == pytest.approx(0.30)
+    assert diagnostics["floor_relaxed"]
+    assert diagnostics["finite_capacity_shortfall"] == 0
 
 
 def test_structural_failure_with_perfect_mechanics_never_becomes_incumbent():
@@ -200,6 +236,139 @@ def test_reliable_gp_batch_has_local_boundary_and_global_roles():
     ).all()
     assert np.isfinite(
         proposals["surrogate_mechanical_expected_improvement_percent"].to_numpy(float)
+    ).all()
+
+
+def test_unreliable_gate_gp_does_not_veto_reliable_mechanical_improvement():
+    rng = np.random.default_rng(20260829)
+    observed_x = np.linspace(0.0, 1.0, 61)
+    gate_values = np.where(rng.random(len(observed_x)) < 0.70, 0.5, 1.5)
+    constraint = StructuralConstraintSpec.from_mapping({
+        "name": "beta_gate_ratio_proxy",
+        "column": "beta_error",
+        "target": 0.0,
+        "tolerance": 1.0,
+        "mode": "absolute",
+    })
+    structural = _keyed([
+        {"x": float(value), "beta_error": float(gate)}
+        for value, gate in zip(observed_x, gate_values)
+    ])
+    mechanical = _keyed([
+        {"x": float(value), "B": 100.0 + 30.0 * float(value)}
+        for value, gate in zip(observed_x, gate_values)
+        if gate <= 1.0
+    ])
+    pool = _keyed([
+        {"x": float(value)} for value in np.linspace(0.0075, 0.9925, 80)
+    ])
+    context = AcquisitionContext(
+        candidate_pool=pool,
+        structural_observations=structural,
+        mechanical_observations=mechanical,
+        parameter_names=PARAMETERS,
+        round_number=1,
+        proposal_count=10,
+        seed=314159,
+        structural_constraints=(constraint,),
+        mechanical_objectives=OBJECTIVES,
+    )
+    backend = GaussianProcessStructuralAcquisition(
+        improvement_fraction=0.6,
+        boundary_fraction=0.2,
+        global_fraction=0.2,
+        minimum_structural_observations=10,
+        minimum_mechanical_observations=10,
+        minimum_holdout_r2=0.90,
+    )
+
+    result = backend.propose(context)
+
+    assert not result.diagnostics["quality"]["structural_models_reliable"]
+    assert result.diagnostics["quality"]["mechanical_model_reliable"]
+    assert result.diagnostics["mode"] == "partial_constraint_fallback"
+    assert not result.scientific_convergence_capable
+    assert (
+        result.proposals["selection_role"]
+        .eq("mechanical_improvement_partial_constraints_local")
+        .any()
+    )
+    assert np.isfinite(
+        result.proposals["surrogate_mechanical_expected_improvement_percent"]
+    ).all()
+
+
+def test_partial_fallback_retains_reliable_gate_model_alongside_noisy_gate():
+    rng = np.random.default_rng(90210)
+    observed_x = np.linspace(0.0, 1.0, 81)
+    density = 10.0 + 2.0 * (observed_x - 0.5)
+    beta_error = np.where(rng.random(len(observed_x)) < 0.75, 0.4, 1.4)
+    constraints = (
+        StructuralConstraintSpec.from_mapping({
+            "name": "density",
+            "column": "density",
+            "target": 10.0,
+            "tolerance": 0.75,
+            "mode": "absolute",
+        }),
+        StructuralConstraintSpec.from_mapping({
+            "name": "beta",
+            "column": "beta_error",
+            "target": 0.0,
+            "tolerance": 1.0,
+            "mode": "absolute",
+        }),
+    )
+    structural = _keyed([
+        {"x": float(x), "density": float(rho), "beta_error": float(beta)}
+        for x, rho, beta in zip(observed_x, density, beta_error)
+    ])
+    mechanical = _keyed([
+        {"x": float(x), "B": 100.0 + 30.0 * float(x)}
+        for x, rho, beta in zip(observed_x, density, beta_error)
+        if abs(float(rho) - 10.0) <= 0.75 and beta <= 1.0
+    ])
+    pool = _keyed([
+        {"x": float(value)} for value in np.linspace(0.006, 0.994, 100)
+    ])
+    context = AcquisitionContext(
+        candidate_pool=pool,
+        structural_observations=structural,
+        mechanical_observations=mechanical,
+        parameter_names=PARAMETERS,
+        round_number=1,
+        proposal_count=12,
+        seed=112358,
+        structural_constraints=constraints,
+        mechanical_objectives=OBJECTIVES,
+    )
+    backend = GaussianProcessStructuralAcquisition(
+        improvement_fraction=0.5,
+        boundary_fraction=0.25,
+        global_fraction=0.25,
+        minimum_structural_observations=10,
+        minimum_mechanical_observations=10,
+        minimum_holdout_r2=0.75,
+    )
+
+    result = backend.propose(context)
+
+    modes = result.diagnostics["constraint_guidance_modes"]
+    assert result.diagnostics["mode"] == "partial_constraint_fallback"
+    assert modes["density"] == "reliable_gp"
+    assert modes["beta"] == "shrunk_gp_fallback"
+    assert result.diagnostics["quality"]["mechanical_model_reliable"]
+    assert not result.scientific_convergence_capable
+    improvement = result.proposals["selection_role"].str.startswith(
+        "mechanical_improvement_partial_constraints"
+    )
+    gate = result.diagnostics["improvement_feasibility_gate"]
+    assert not gate["floor_relaxed"]
+    assert (
+        result.proposals.loc[
+            improvement, "surrogate_structural_feasibility_probability"
+        ]
+        >= gate["nominal_floor"]
     ).all()
 
 

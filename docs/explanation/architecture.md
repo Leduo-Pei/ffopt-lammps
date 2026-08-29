@@ -46,8 +46,10 @@ holdout validation in the persistent execution graph.
   minimized isolated-molecule potential energy.
 - Surface energy compares the configured complete and split slabs with the
   same force-field parameters and explicit facet metadata.
-- Cubic elasticity fits `B`, `Cprime`, and `C44`; derived `G`, `E`, and
-  Poisson ratio are validation outputs rather than extra fit dimensions.
+- Cubic elasticity always recovers `C11/C12/C44` and Born stability. Each
+  fidelity selects either the complete `B/Cprime/C44` basis or the complete
+  user-facing `B/G/E/nu` basis for minimax ranking; the unselected quantities
+  remain explicit diagnostics.
 - A property with targets runs during fitting and validation.
 - A property without targets is enabled only by final validation.
 - Intermediate optimization evaluations do not save trajectories; final

@@ -31,8 +31,22 @@ from workflow.artifact_manifest import (
 
 
 _EVIDENCE_COLUMNS = (
+    "B_gpa",
+    "G_hill_gpa",
+    "E_hill_gpa",
+    "nu_hill",
+    "Cprime_gpa",
+    "C44_gpa",
+    "error_B_percent",
+    "error_Cprime_percent",
+    "error_C44_percent",
+    "error_G_percent",
+    "error_E_percent",
+    "error_nu_percent",
     "mechanical_max_error_percent",
     "mechanical_rmse_percent",
+    "mechanical_max_relative_sem_percent",
+    "replicate_uncertainty_available",
     "structural_margin",
     "minimum_fit_r2",
     "maximum_static_extrapolation_drift_percent",
@@ -45,6 +59,15 @@ _EVIDENCE_COLUMNS = (
     "within_quality_tier",
     "quality_status",
 )
+
+_TARGET_REPORT_COLUMNS = {
+    "B": ("B_gpa", "B (GPa)"),
+    "Cprime": ("Cprime_gpa", "Cprime (GPa)"),
+    "C44": ("C44_gpa", "C44 (GPa)"),
+    "G": ("G_hill_gpa", "G (GPa)"),
+    "E": ("E_hill_gpa", "E (GPa)"),
+    "nu": ("nu_hill", "nu"),
+}
 
 
 def _validated_ranking(
@@ -193,8 +216,13 @@ def _build_records(
 
 
 def _markdown(
-    records: Sequence[Mapping[str, Any]], parameter_names: Sequence[str]
+    records: Sequence[Mapping[str, Any]],
+    parameter_names: Sequence[str],
+    *,
+    static_target_basis: Sequence[str],
+    dynamic_target_basis: Sequence[str],
 ) -> str:
+    primary_basis = tuple(dynamic_target_basis or static_target_basis)
     columns = [
         "selection_rank",
         "parameter_key",
@@ -202,6 +230,8 @@ def _markdown(
         "static_rank",
         "dynamic_rank",
         "evidence",
+        *(f"dynamic_{_TARGET_REPORT_COLUMNS[name][0]}" for name in primary_basis),
+        *(f"dynamic_error_{name}_percent" for name in primary_basis),
         "static_mechanical_max_error_percent",
         "dynamic_mechanical_max_error_percent",
     ]
@@ -212,6 +242,8 @@ def _markdown(
         "Static rank",
         "Dynamic rank",
         "Evidence",
+        *(f"300 K {_TARGET_REPORT_COLUMNS[name][1]}" for name in primary_basis),
+        *(f"{name} error (%)" for name in primary_basis),
         "Static M∞ (%)",
         "Dynamic M∞ (%)",
     ]
@@ -221,6 +253,8 @@ def _markdown(
         "Dynamic evidence is ranked first. Static-only rows are retained only as "
         "explicit lower-evidence fallbacks; a dynamically rejected candidate is not "
         "resurrected by its static rank.",
+        f"Static target basis: {'/'.join(static_target_basis)}. Dynamic target basis: "
+        f"{'/'.join(dynamic_target_basis) if dynamic_target_basis else 'not configured'}.",
         "",
         "| " + " | ".join(labels) + " |",
         "| " + " | ".join("---" for _ in labels) + " |",
@@ -261,6 +295,16 @@ def write_top_parameters_report(
     config = load_config(config_source)
     parameter_space = build_parameter_space(config)
     parameter_names = [name for name, _lower, _upper in parameter_space]
+    elasticity = config.get("elasticity", {})
+    modules = elasticity.get("modules", {}) if isinstance(elasticity, Mapping) else {}
+
+    def target_basis(fidelity: str) -> list[str]:
+        module = modules.get(fidelity, {}) if isinstance(modules, Mapping) else {}
+        targets = module.get("targets", {}) if isinstance(module, Mapping) else {}
+        return [name for name in _TARGET_REPORT_COLUMNS if name in targets]
+
+    static_target_basis = target_basis("static")
+    dynamic_target_basis = target_basis("dynamic")
     outputs = {
         "top_csv": destination / "TOP_PARAMETERS.csv",
         "top_json": destination / "TOP_PARAMETERS.json",
@@ -279,6 +323,8 @@ def write_top_parameters_report(
             "dynamic eligible by dynamic rank, followed by unevaluated static-only "
             "eligible candidates; dynamically rejected candidates excluded"
         ),
+        "static_target_basis": static_target_basis,
+        "dynamic_target_basis": dynamic_target_basis,
     }
     manifest_path = destination / manifest_name
     if manifest_path.exists():
@@ -343,6 +389,8 @@ def write_top_parameters_report(
             },
         },
         "selection_policy": scientific["selection_policy"],
+        "static_target_basis": static_target_basis,
+        "dynamic_target_basis": dynamic_target_basis,
         "requested_top_n": top_n,
         "reported": len(records),
         "parameter_names": parameter_names,
@@ -351,7 +399,12 @@ def write_top_parameters_report(
     _write_json(outputs["top_json"], document)
     _atomic_bytes(
         outputs["top_markdown"],
-        _markdown(records, parameter_names).encode("utf-8"),
+        _markdown(
+            records,
+            parameter_names,
+            static_target_basis=static_target_basis,
+            dynamic_target_basis=dynamic_target_basis,
+        ).encode("utf-8"),
     )
     manifest = build_artifact_manifest(
         kind="stage",
