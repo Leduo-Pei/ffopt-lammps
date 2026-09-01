@@ -71,7 +71,7 @@ conda install -c conda-forge "lammps=*=*openmpi*" openmpi -y
 python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 python -m pip install \
-  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a11/ffopt_lammps-0.3.0a11-py3-none-any.whl"
+  "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a12/ffopt_lammps-0.3.0a12-py3-none-any.whl"
 ```
 
 The example intentionally installs CPU PyTorch. On a GPU workstation, first
@@ -118,7 +118,7 @@ conda activate ffopt
 conda env config vars set PYTHONNOUSERSITE=1
 conda deactivate
 conda activate ffopt
-python -m pip install "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a11/ffopt_lammps-0.3.0a11-py3-none-any.whl"
+python -m pip install "ffopt-lammps[full] @ https://github.com/Leduo-Pei/ffopt-lammps/releases/download/v0.3.0a12/ffopt_lammps-0.3.0a12-py3-none-any.whl"
 ```
 
 LAMMPS and MPI may be installed separately. Their absolute paths are then

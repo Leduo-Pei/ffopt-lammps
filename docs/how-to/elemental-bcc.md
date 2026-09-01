@@ -167,3 +167,71 @@ includes or requires:
 `mixing default` means FFOpt does not issue `pair_modify mix`. With `lj/cut`,
 LAMMPS resolves the default geometric mixing rule. The rule is fixed and never
 optimized.
+
+### Separate publication scopes
+
+FFOpt treats the fitted ordered representation and an elemental
+transferability claim separately. The machine-readable publication scope in
+this release is one of:
+
+- `ordered_sublattice_bulk` uses the existing lattice, angle, density,
+  surface, Born-stability, stress-fit, static-drift, and independent 300 K
+  validation gates. It may publish an accepted or explicitly authorized
+  best-effort baseline.
+- `validated_material_domain` covers a validation that is not the permanent
+  multi-type elemental ordered-sublattice case.
+
+The independent evidence object uses
+`transferability_evidence.scope=elemental_transferability_only`. A future
+trusted runner may establish the conceptual `elemental_transferable`
+capability, but that is not a publication-scope value emitted by this release.
+Failing the transferability assessment limits the claim and intended use; it
+does not silently rerank or invalidate the completed bulk fit.
+
+The machine-readable fields are `formal_invariance_status`,
+`empirical_transfer_status`, and `elemental_transferability_claim`. Claim values
+are `requires_empirical_validation` when the formal test passes but empirical
+evidence is missing, `not_established` when evidence is incomplete or only
+attested, `not_supported` after demonstrated sensitivity, `not_applicable` for
+a single-type elemental representation, and `unknown` outside the elemental
+scope. `supported` is reserved for a future trusted runner that reads and
+verifies the empirical manifest, protocol, metrics, and case contents. This
+release only validates attestation shape, reports complete positive
+attestations as `attested_pass`, and keeps the claim `not_established`. These
+claim values are distinct from the broader `physical_transferability.status`
+workflow states emitted here: `requires_validation`, `incomplete`,
+`ordered_sublattice_only`, `not_transferable`, `requires_verified_runner`, and
+`unknown`. A future trusted runner may add a verified positive state.
+
+Formal invariance is evaluated from the final resolved pair coefficients, not
+from parameter-range declarations. Any two atom types representing the same
+element must have identical interaction rows and columns against every possible
+partner type, with equal mass and charge. For a two-type elemental LJ model
+this requires `epsilon_11 = epsilon_12 = epsilon_22` and
+`sigma_11 = sigma_12 = sigma_22`. A global type-name permutation alone is too
+weak because a symmetric lattice can hide assignment sensitivity.
+
+The empirical stage then quantifies the remaining risks with auditable inputs:
+
+1. a harness-control relabelling plus global and spatially separated local
+   type swaps, comparing energy and per-atom forces;
+2. physically unique BCC(110) cleavages and both artificial label registries,
+   without inventing chemical terminations that are only translations;
+3. equivalent type-1 and type-2 vacancy formation energies in one fixed box;
+4. conjugate seven-image vacancy migration-path sensitivity calculations.
+
+Each case reports `pass`, `fail`, `error`, `not_evaluated`, or
+`not_applicable`. A positive attestation requires unique case IDs, the
+protocol-specific minimum case count (label swaps 3, surface registries 2,
+vacancies 2, migration-path comparisons 2), and SHA-256 identities for its
+manifest, protocol, and metrics. Because this pure reporting module does not
+read those artifacts, even a well-formed attestation is only `attested_pass`;
+the claim stays `not_established`/`requires_verified_runner`. Bare `pass`
+strings and zero-case records become `error`. Short 300 K MD
+without an observed hop is only a
+`diagnostic_only/no_event` stability observation and cannot be reported as a
+diffusion pass. An ordered two-sigma Fe fit such as A11 formally fails arbitrary
+same-element relabelling, so it is reported as
+`elemental_transferability_claim=not_supported` with
+`physical_transferability.status=ordered_sublattice_only`, not as “a general
+Fe potential”. Its ordered-sublattice bulk validation remains unchanged.

@@ -289,6 +289,41 @@ def cmd_results(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_promote(args: argparse.Namespace) -> None:
+    """Publish one completed, state-addressed validation explicitly."""
+
+    from .promotion import promote_validation
+
+    project = load_project(args.input)
+    result = promote_validation(
+        project=project,
+        run_id=args.run_id,
+        canonical_root=args.canonical_root,
+        allow_best_effort=args.allow_best_effort,
+        replace_legacy=args.replace_legacy,
+        force_downgrade=args.force_downgrade,
+        dry_run=args.dry_run,
+    )
+    blocked = result.get("status") == "blocked"
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True, ensure_ascii=False))
+    else:
+        print(f"Promotion status : {result['status']}")
+        print(f"Source run       : {project.name}/{args.run_id}")
+        print(f"Canonical root   : {result['canonical_root']}")
+        print(f"Comparison       : {result['comparison']} ({result['comparison_reason']})")
+        print(
+            "Current best     : "
+            f"{'updated' if result['current_best_will_change'] else 'retained'}"
+        )
+        if result.get("blocked_reason"):
+            print(f"Blocked reason   : {result['blocked_reason']}")
+        if result.get("snapshot"):
+            print(f"Published snapshot: {result['snapshot']}")
+    if blocked:
+        raise SystemExit(2)
+
+
 def _include_material_top_results(report: dict) -> None:
     """Expose manifest-declared Top-N products through ``ffopt results``.
 
@@ -1686,6 +1721,57 @@ def build_parser() -> argparse.ArgumentParser:
     )
     results.add_argument("--json", action="store_true", help="Emit machine-readable paths.")
     results.set_defaults(function=cmd_results)
+
+    promote = sub.add_parser(
+        "promote",
+        help=(
+            "Publish a completed managed validation as an immutable snapshot; "
+            "update current best only when the comparison policy permits it."
+        ),
+    )
+    promote.add_argument(
+        "input", nargs="?", default=DEFAULT_PROJECT,
+        help="FFOpt command input (default: ffopt.in).",
+    )
+    promote.add_argument(
+        "--run-id", required=True,
+        help="Completed managed pipeline run containing its validate stage.",
+    )
+    promote.add_argument(
+        "--canonical-root", required=True,
+        help=(
+            "Publication root for snapshots, pointers, archives, and journal; "
+            "its final path component must exactly match the project name."
+        ),
+    )
+    promote.add_argument(
+        "--allow-best-effort", action="store_true",
+        help=(
+            "Allow a hard-gate-passing result outside its quality tier to compete "
+            "for current best; an otherwise publishable attempt is still "
+            "snapshotted without this flag."
+        ),
+    )
+    promote.add_argument(
+        "--replace-legacy", action="store_true",
+        help=(
+            "Durably archive legacy loose canonical files before replacing them "
+            "with managed pointers and compatibility caches."
+        ),
+    )
+    promote.add_argument(
+        "--force-downgrade", action="store_true",
+        help=(
+            "Explicitly replace current best with a worse or protocol-incomparable "
+            "validated result."
+        ),
+    )
+    promote.add_argument(
+        "--dry-run", action="store_true",
+        help="Validate and compare without creating snapshots or changing pointers.",
+    )
+    promote.add_argument("--json", action="store_true", help="Emit a machine-readable result.")
+    promote.set_defaults(function=cmd_promote)
 
     logs = sub.add_parser(
         "logs", help="Show the latest SLURM stdout/stderr for a pipeline stage."

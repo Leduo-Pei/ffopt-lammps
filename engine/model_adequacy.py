@@ -7,10 +7,12 @@ the fit?*  This module keeps those conclusions separate.
 
 ``assess_model_adequacy`` is deliberately a pure function.  It does not read a
 LAMMPS input, launch a calculation, reject a candidate, or mutate the compiled
-configuration.  Missing evidence is reported as ``"unknown"``.  In
+configuration. Missing model-form information is ``"unknown"``; a declared
+transferability experiment that has not run is ``"not_evaluated"``. In
 particular, an elemental material represented by several permanent LAMMPS atom
 types is flagged as an ordered-sublattice surrogate, but that warning is not a
-proof that a fit is impossible.
+proof that a fit is impossible or that its ordered-sublattice bulk validation
+failed.
 
 Optional elasticity input may be either a direct zero-kelvin mapping::
 
@@ -22,10 +24,14 @@ may place the constants directly in the record or below
 labelled ``diagnostic_only`` because thermal, stress-fluctuation, and kinetic
 contributions invalidate a literal zero-kelvin central-force interpretation.
 
-The optional label-swap result accepts ``passed`` (a boolean), or numerical
+The legacy optional label-swap result accepts ``passed`` (a boolean), or numerical
 ``reference_value``/``swapped_value`` values and an optional
 ``relative_tolerance``.  Numerical inputs are required to be finite; the
-returned report contains no NaN or infinity and is JSON-compatible.
+returned report contains no NaN or infinity and is JSON-compatible. A positive
+``elemental_transferability_claim`` additionally requires a future trusted
+runner to read, schema-check, and hash the referenced artifacts. This module
+can structurally validate a provenance *attestation*, but it cannot verify file
+content; therefore attested ``pass`` records never establish transferability.
 """
 
 from __future__ import annotations
@@ -33,14 +39,44 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 import math
 from numbers import Real
+import re
 from typing import Any
 
 
-REPORT_SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 2
+TRANSFERABILITY_EVIDENCE_SCHEMA_VERSION = 1
 _PARAMETERS = ("epsilon", "sigma", "charge")
 _ZERO_K_KEYS = ("zero_k", "zero_kelvin", "0k", "0_K")
 _FINITE_T_KEYS = ("finite_temperature", "finite_t", "300k", "300_K")
 _EPS = 1.0e-15
+_RELABEL_RTOL = 1.0e-12
+_RELABEL_ATOL = 1.0e-12
+_TRANSFERABILITY_TESTS = (
+    "label_swap",
+    "surface_registry",
+    "vacancy",
+    "migration_path_sensitivity",
+)
+_TRANSFERABILITY_MINIMUM_CASES = {
+    "label_swap": 3,
+    "surface_registry": 2,
+    "vacancy": 2,
+    "migration_path_sensitivity": 2,
+}
+_SUPPORTED_FORMAL_LJ_STYLES = {"lj/cut"}
+_SUPPORTED_PROVENANCE_PRODUCERS = {"ffopt-transfer-audit-v1"}
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_TRANSFERABILITY_STATUSES = {
+    "pass",
+    "fail",
+    "error",
+    "not_evaluated",
+    "not_applicable",
+}
+_TRANSFERABILITY_ALIASES = {
+    "surface_terminations": "surface_registry",
+    "diffusion": "migration_path_sensitivity",
+}
 
 
 class ModelAdequacyError(ValueError):
@@ -510,11 +546,564 @@ def _label_swap_diagnostic(result: Mapping[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _transferability_status(value: Any, location: str) -> str:
+    status = _clean_text(value)
+    if status is None:
+        raise ModelAdequacyError(f"{location} must be a transferability status")
+    normalized = status.lower()
+    if normalized not in _TRANSFERABILITY_STATUSES:
+        choices = ", ".join(sorted(_TRANSFERABILITY_STATUSES))
+        raise ModelAdequacyError(f"{location} must be one of: {choices}")
+    return normalized
+
+
+def _aggregate_case_statuses(statuses: Sequence[str]) -> str:
+    """Aggregate independent cases with fail-closed precedence."""
+    if any(status == "fail" for status in statuses):
+        return "fail"
+    if any(status == "error" for status in statuses):
+        return "error"
+    if any(status == "not_evaluated" for status in statuses):
+        return "not_evaluated"
+    if statuses and all(status == "not_applicable" for status in statuses):
+        return "not_applicable"
+    return "pass" if statuses else "not_evaluated"
+
+
+def _provenance_attestation(
+    value: Any,
+    *,
+    location: str,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Validate attestation shape; this does not read or verify artifacts."""
+    if value is None:
+        return None, [f"{location} is required for a pass"]
+    record = _mapping(value, location)
+    errors: list[str] = []
+    schema_version = record.get("schema_version")
+    if schema_version != 1:
+        errors.append(f"{location}.schema_version must equal 1")
+    audited = record.get("content_audit_attested")
+    if audited is not True:
+        errors.append(f"{location}.content_audit_attested must be true")
+    producer = _clean_text(record.get("producer"))
+    if producer not in _SUPPORTED_PROVENANCE_PRODUCERS:
+        choices = ", ".join(sorted(_SUPPORTED_PROVENANCE_PRODUCERS))
+        errors.append(f"{location}.producer must be one of: {choices}")
+    hashes: dict[str, str | None] = {}
+    for key in ("manifest_sha256", "protocol_sha256", "metrics_sha256"):
+        digest = _clean_text(record.get(key))
+        normalized = digest.lower() if digest is not None else None
+        if normalized is None or _SHA256_PATTERN.fullmatch(normalized) is None:
+            errors.append(f"{location}.{key} must be a 64-character SHA-256")
+        hashes[key] = normalized
+    if errors:
+        return None, errors
+    return {
+        "schema_version": 1,
+        "content_audit_attested": True,
+        "producer": producer,
+        **hashes,
+    }, []
+
+
+def _normalize_transferability_record(
+    test_id: str,
+    value: Any,
+) -> dict[str, Any]:
+    if value is None:
+        source: Mapping[str, Any] = {}
+        explicit_status = None
+    elif isinstance(value, str):
+        source = {}
+        explicit_status = _transferability_status(
+            value, f"transferability_evidence.{test_id}"
+        )
+    else:
+        source = _mapping(value, f"transferability_evidence.{test_id}")
+        explicit = source.get("status")
+        explicit_status = (
+            None
+            if explicit is None
+            else _transferability_status(
+                explicit, f"transferability_evidence.{test_id}.status"
+            )
+        )
+
+    raw_cases = source.get("cases", [])
+    if isinstance(raw_cases, (str, bytes, bytearray)) or not isinstance(
+        raw_cases, Sequence
+    ):
+        raise ModelAdequacyError(
+            f"transferability_evidence.{test_id}.cases must be a sequence"
+        )
+    cases: list[dict[str, Any]] = []
+    for index, raw_case in enumerate(raw_cases):
+        location = f"transferability_evidence.{test_id}.cases[{index}]"
+        if isinstance(raw_case, str):
+            case = {"status": _transferability_status(raw_case, location)}
+        else:
+            case_source = _mapping(raw_case, location)
+            case = {
+                "status": _transferability_status(
+                    case_source.get("status"), f"{location}.status"
+                )
+            }
+            for key in ("id", "evidence", "message"):
+                text = _clean_text(case_source.get(key))
+                if text is not None:
+                    case[key] = text
+        cases.append(case)
+
+    case_status = _aggregate_case_statuses([case["status"] for case in cases])
+    if explicit_status is not None and cases and explicit_status != case_status:
+        raise ModelAdequacyError(
+            f"transferability_evidence.{test_id}.status conflicts with its cases"
+        )
+    status = explicit_status or case_status
+    minimum_cases = _TRANSFERABILITY_MINIMUM_CASES[test_id]
+    applicable_cases = [
+        case for case in cases
+        if case["status"] not in {"not_evaluated", "not_applicable"}
+    ]
+    verification_errors: list[str] = []
+    attestation: dict[str, Any] | None = None
+    if status == "pass":
+        if len(applicable_cases) < minimum_cases:
+            verification_errors.append(
+                f"{test_id} requires at least {minimum_cases} applicable cases"
+            )
+        case_ids = [case.get("id") for case in applicable_cases]
+        if any(case_id is None for case_id in case_ids):
+            verification_errors.append(
+                f"every applicable {test_id} case must have a non-empty id"
+            )
+        elif len(set(case_ids)) != len(case_ids):
+            verification_errors.append(f"{test_id} case ids must be unique")
+        attestation, provenance_errors = _provenance_attestation(
+            source.get("provenance_attestation"),
+            location=f"transferability_evidence.{test_id}.provenance_attestation",
+        )
+        verification_errors.extend(provenance_errors)
+        if verification_errors:
+            status = "error"
+
+    effective_status = "attested_pass" if status == "pass" else status
+    result: dict[str, Any] = {
+        "id": test_id,
+        "status": status,
+        "effective_status": effective_status,
+        "claimed_status": explicit_status or case_status,
+        "cases": cases,
+        "case_count": len(cases),
+        "applicable_case_count": len(applicable_cases),
+        "minimum_cases": minimum_cases,
+        "verification_status": (
+            "attested_not_content_verified"
+            if status == "pass"
+            else "rejected_unverified_pass"
+            if verification_errors
+            else "not_required_for_nonpass"
+        ),
+        "provenance_attestation": attestation,
+        "verification_errors": verification_errors,
+    }
+    for key in ("evidence", "message"):
+        text = _clean_text(source.get(key))
+        if text is not None:
+            result[key] = text
+    return result
+
+
+def _aggregate_required_test_statuses(statuses: Sequence[str]) -> str:
+    """Aggregate required evidence without upgrading attestations to verification."""
+    if any(status == "fail" for status in statuses):
+        return "fail"
+    if any(status == "error" for status in statuses):
+        return "error"
+    if any(status in {"not_evaluated", "not_applicable"} for status in statuses):
+        return "not_evaluated"
+    if statuses and all(status == "attested_pass" for status in statuses):
+        return "attested_pass"
+    return "pass" if statuses and all(status == "pass" for status in statuses) else "error"
+
+
+def aggregate_transferability_evidence(
+    evidence: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Normalize and aggregate the independent elemental transferability gate.
+
+    This evidence is deliberately separate from ordered-sublattice bulk
+    validation.  A failed or missing transferability experiment limits the
+    claim that may be made; it does not retroactively invalidate properties
+    calculated for the original permanent type assignment.
+    """
+    source = _optional_mapping(evidence, "transferability_evidence")
+    normalized_source: dict[str, Any] = {}
+    for raw_id, value in source.items():
+        test_id = _TRANSFERABILITY_ALIASES.get(str(raw_id), str(raw_id))
+        if test_id not in _TRANSFERABILITY_TESTS:
+            raise ModelAdequacyError(
+                f"unsupported transferability evidence id: {raw_id}"
+            )
+        if test_id in normalized_source:
+            raise ModelAdequacyError(
+                f"duplicate transferability evidence for {test_id}"
+            )
+        normalized_source[test_id] = value
+
+    tests = {
+        test_id: _normalize_transferability_record(
+            test_id, normalized_source.get(test_id)
+        )
+        for test_id in _TRANSFERABILITY_TESTS
+    }
+    statuses = [
+        tests[test_id]["effective_status"] for test_id in _TRANSFERABILITY_TESTS
+    ]
+    aggregate = _aggregate_required_test_statuses(statuses)
+    return {
+        "schema_version": TRANSFERABILITY_EVIDENCE_SCHEMA_VERSION,
+        "status": aggregate,
+        "required_tests": list(_TRANSFERABILITY_TESTS),
+        "complete": aggregate in {"pass", "fail"},
+        "counts": {
+            status: statuses.count(status)
+            for status in sorted(_TRANSFERABILITY_STATUSES | {"attested_pass"})
+        },
+        "tests": tests,
+        "scope": "elemental_transferability_only",
+        "ordered_sublattice_bulk_validation_affected": False,
+    }
+
+
+def _resolved_type_value(
+    resolved: Mapping[str, Any],
+    label: str,
+    parameter: str,
+) -> float | None:
+    key = f"{label}_{parameter}"
+    if key not in resolved:
+        return None
+    return _finite(resolved[key], f"resolved_parameters.{key}")
+
+
+def _mixed_lj_coefficients(
+    first: tuple[float, float],
+    second: tuple[float, float],
+    rule: str,
+) -> tuple[float, float]:
+    epsilon_i, sigma_i = first
+    epsilon_j, sigma_j = second
+    if min(epsilon_i, epsilon_j, sigma_i, sigma_j) < 0.0:
+        raise ModelAdequacyError("resolved LJ epsilon and sigma must be non-negative")
+    if rule == "geometric":
+        return math.sqrt(epsilon_i * epsilon_j), math.sqrt(sigma_i * sigma_j)
+    if rule == "arithmetic":
+        return math.sqrt(epsilon_i * epsilon_j), 0.5 * (sigma_i + sigma_j)
+    if rule == "sixthpower":
+        denominator = sigma_i**6 + sigma_j**6
+        if denominator <= _EPS:
+            return math.sqrt(epsilon_i * epsilon_j), 0.0
+        sigma = (0.5 * denominator) ** (1.0 / 6.0)
+        epsilon = (
+            2.0
+            * math.sqrt(epsilon_i * epsilon_j)
+            * sigma_i**3
+            * sigma_j**3
+            / denominator
+        )
+        return epsilon, sigma
+    raise ModelAdequacyError(f"unsupported resolved LJ mixing rule: {rule}")
+
+
+def _explicit_cross_coefficients(
+    config: Mapping[str, Any],
+    resolved: Mapping[str, Any],
+) -> dict[tuple[int, int], tuple[float, float]]:
+    pair_params = _optional_mapping(config.get("pair_params"), "config.pair_params")
+    result: dict[tuple[int, int], tuple[float, float]] = {}
+    for index, raw in enumerate(pair_params.get("explicit_pairs", [])):
+        pair = _mapping(raw, f"config.pair_params.explicit_pairs[{index}]")
+        raw_types = pair.get("types")
+        if (
+            isinstance(raw_types, (str, bytes, bytearray))
+            or not isinstance(raw_types, Sequence)
+            or len(raw_types) != 2
+            or any(isinstance(item, bool) or not isinstance(item, int) for item in raw_types)
+        ):
+            raise ModelAdequacyError(
+                f"config.pair_params.explicit_pairs[{index}].types must contain two integer ids"
+            )
+        first, second = int(raw_types[0]), int(raw_types[1])
+        epsilon_key = f"cross_{first}_{second}_epsilon"
+        sigma_key = f"cross_{first}_{second}_sigma"
+        reverse_epsilon_key = f"cross_{second}_{first}_epsilon"
+        reverse_sigma_key = f"cross_{second}_{first}_sigma"
+        if epsilon_key in resolved and sigma_key in resolved:
+            epsilon = _finite(resolved[epsilon_key], f"resolved_parameters.{epsilon_key}")
+            sigma = _finite(resolved[sigma_key], f"resolved_parameters.{sigma_key}")
+        elif reverse_epsilon_key in resolved and reverse_sigma_key in resolved:
+            epsilon = _finite(
+                resolved[reverse_epsilon_key],
+                f"resolved_parameters.{reverse_epsilon_key}",
+            )
+            sigma = _finite(
+                resolved[reverse_sigma_key],
+                f"resolved_parameters.{reverse_sigma_key}",
+            )
+        else:
+            continue
+        result[tuple(sorted((first, second)))] = (epsilon, sigma)
+    return result
+
+
+def assess_same_element_relabeling_invariance(
+    compiled_config: Mapping[str, Any],
+    *,
+    resolved_parameters: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Test invariance to arbitrary same-element type reassignment.
+
+    A simultaneous permutation ``P.T @ M @ P`` merely renames a parameter
+    matrix and is therefore not this test.  Arbitrary reassignment is
+    invariant only when every complete pair-coefficient row and column is the
+    same (and type-local mass/charge values are the same).  The full ``i,j``
+    matrix is expanded using the resolved LAMMPS mixing rule before testing.
+    """
+    config = _mapping(compiled_config, "compiled_config")
+    material = _optional_mapping(config.get("material"), "config.material")
+    atom_types = _atom_types(config)
+    elemental = (_clean_text(material.get("kind")) or "unknown").lower() == "elemental"
+    if not elemental or len(atom_types) <= 1:
+        return {
+            "status": "not_applicable",
+            "formal_invariance_status": "not_applicable",
+            "reason": "requires an elemental material represented by multiple atom types",
+            "criterion": "all complete pair-coefficient rows/columns and type-local attributes are identical",
+            "pair_matrix_complete": False,
+            "pair_coefficients": [],
+            "violations": [],
+        }
+    pair_model = _pair_model(config)
+    pair_style = pair_model["pair_style"]
+    if pair_style not in _SUPPORTED_FORMAL_LJ_STYLES:
+        return {
+            "status": "not_evaluated",
+            "formal_invariance_status": "not_evaluated",
+            "reason": (
+                "formal relabeling is implemented only for a single, fully "
+                "resolved supported LJ pair style"
+            ),
+            "pair_style": pair_style,
+            "pair_style_source": pair_model["pair_style_source"],
+            "supported_pair_styles": sorted(_SUPPORTED_FORMAL_LJ_STYLES),
+            "criterion": "all complete pair-coefficient rows/columns and type-local attributes are identical",
+            "pair_matrix_complete": False,
+            "pair_coefficients": [],
+            "violations": [],
+        }
+    if resolved_parameters is None:
+        return {
+            "status": "not_evaluated",
+            "formal_invariance_status": "not_evaluated",
+            "reason": "final resolved parameters were not supplied",
+            "criterion": "all complete pair-coefficient rows/columns and type-local attributes are identical",
+            "pair_matrix_complete": False,
+            "pair_coefficients": [],
+            "violations": [],
+        }
+    resolved = _mapping(resolved_parameters, "resolved_parameters")
+    mixing = pair_model["mixing"]["resolved_for_diagnostics"]
+    configured_mixing = pair_model["mixing"]["configured"]
+    charge_config = _optional_mapping(config.get("charge"), "config.charge")
+    charge_enabled = charge_config.get("enabled")
+    if charge_enabled is not None and not isinstance(charge_enabled, bool):
+        raise ModelAdequacyError("config.charge.enabled must be boolean")
+
+    type_records: list[dict[str, Any]] = []
+    self_coefficients: dict[int, tuple[float, float]] = {}
+    missing: list[str] = []
+    missing_type_attributes: list[str] = []
+    assumptions: list[str] = []
+    for index, item in enumerate(atom_types):
+        type_id = item.get("type")
+        if isinstance(type_id, bool) or not isinstance(type_id, int):
+            raise ModelAdequacyError(f"config.atom_types[{index}].type must be an integer")
+        label = _type_label(item, index)
+        epsilon = _resolved_type_value(resolved, label, "epsilon")
+        sigma = _resolved_type_value(resolved, label, "sigma")
+        if epsilon is None:
+            missing.append(f"{label}_epsilon")
+        if sigma is None:
+            missing.append(f"{label}_sigma")
+        if epsilon is not None and sigma is not None:
+            self_coefficients[type_id] = (epsilon, sigma)
+        charge = _resolved_type_value(resolved, label, "charge")
+        if charge is None:
+            if charge_enabled is False:
+                charge = 0.0
+                assumptions.append(
+                    f"{label}_charge was absent and is treated as 0.0 because config.charge.enabled is false"
+                )
+            else:
+                missing.append(f"{label}_charge")
+        mass = _optional_finite(item, ("mass",), f"config.atom_types[{index}]")
+        if mass is None:
+            missing_type_attributes.append(f"{label}.mass")
+        type_records.append({
+            "type": type_id,
+            "label": label,
+            "mass": mass,
+            "charge": charge,
+        })
+
+    if missing:
+        return {
+            "status": "not_evaluated",
+            "formal_invariance_status": "not_evaluated",
+            "reason": "final resolved force-field parameters are incomplete",
+            "missing_parameters": sorted(missing),
+            "charge_enabled": charge_enabled,
+            "criterion": "all complete pair-coefficient rows/columns and type-local attributes are identical",
+            "pair_matrix_complete": False,
+            "pair_coefficients": [],
+            "violations": [],
+        }
+    if missing_type_attributes:
+        return {
+            "status": "not_evaluated",
+            "formal_invariance_status": "not_evaluated",
+            "reason": "type-local attributes needed for arbitrary relabeling are incomplete",
+            "missing_type_attributes": sorted(missing_type_attributes),
+            "assumptions": assumptions,
+            "criterion": "all complete pair-coefficient rows/columns and type-local attributes are identical",
+            "pair_matrix_complete": False,
+            "pair_coefficients": [],
+            "violations": [],
+        }
+
+    explicit = _explicit_cross_coefficients(config, resolved)
+    ids = [record["type"] for record in type_records]
+    matrix: dict[tuple[int, int], tuple[float, float]] = {}
+    missing_pairs: list[str] = []
+    for first in ids:
+        for second in ids:
+            key = tuple(sorted((first, second)))
+            if first == second:
+                coefficients = self_coefficients[first]
+            elif configured_mixing == "none":
+                coefficients = explicit.get(key)
+                if coefficients is None:
+                    missing_pairs.append(f"{key[0]}-{key[1]}")
+                    continue
+            elif mixing in {"geometric", "arithmetic", "sixthpower"}:
+                coefficients = _mixed_lj_coefficients(
+                    self_coefficients[first], self_coefficients[second], mixing
+                )
+            else:
+                missing_pairs.append(f"{key[0]}-{key[1]}")
+                continue
+            matrix[(first, second)] = coefficients
+
+    pair_rows = [
+        {
+            "type_i": first,
+            "type_j": second,
+            "epsilon": matrix[(first, second)][0],
+            "sigma": matrix[(first, second)][1],
+        }
+        for first in ids
+        for second in ids
+        if (first, second) in matrix
+    ]
+    if missing_pairs:
+        return {
+            "status": "not_evaluated",
+            "formal_invariance_status": "not_evaluated",
+            "reason": "complete pair-coefficient rows/columns could not be resolved",
+            "missing_pairs": sorted(set(missing_pairs)),
+            "criterion": "all complete pair-coefficient rows/columns and type-local attributes are identical",
+            "mixing_rule": mixing,
+            "pair_matrix_complete": False,
+            "pair_coefficients": pair_rows,
+            "violations": [],
+        }
+
+    reference = matrix[(ids[0], ids[0])]
+    violations: list[dict[str, Any]] = []
+    for first in ids:
+        for second in ids:
+            epsilon, sigma = matrix[(first, second)]
+            for parameter, observed, expected in (
+                ("epsilon", epsilon, reference[0]),
+                ("sigma", sigma, reference[1]),
+            ):
+                if not math.isclose(
+                    observed,
+                    expected,
+                    rel_tol=_RELABEL_RTOL,
+                    abs_tol=_RELABEL_ATOL,
+                ):
+                    violations.append({
+                        "kind": "pair_coefficient",
+                        "type_i": first,
+                        "type_j": second,
+                        "parameter": parameter,
+                        "value": observed,
+                        "reference_value": expected,
+                        "absolute_difference": abs(observed - expected),
+                    })
+    for attribute in ("mass", "charge"):
+        values = [record[attribute] for record in type_records]
+        if values[0] is None:
+            continue
+        for record, value in zip(type_records[1:], values[1:]):
+            if value is None or not math.isclose(
+                float(value),
+                float(values[0]),
+                rel_tol=_RELABEL_RTOL,
+                abs_tol=_RELABEL_ATOL,
+            ):
+                violations.append({
+                    "kind": "type_local_attribute",
+                    "type": record["type"],
+                    "parameter": attribute,
+                    "value": value,
+                    "reference_value": values[0],
+                    "absolute_difference": (
+                        None if value is None else abs(float(value) - float(values[0]))
+                    ),
+                })
+
+    status = "fail" if violations else "pass"
+    return {
+        "status": status,
+        "formal_invariance_status": status,
+        "reason": (
+            "one or more complete pair-coefficient rows/columns or type-local attributes differ"
+            if violations
+            else "all complete pair-coefficient rows/columns and type-local attributes are identical"
+        ),
+        "criterion": "all complete pair-coefficient rows/columns and type-local attributes are identical",
+        "not_a_matrix_permutation_test": True,
+        "mixing_rule": mixing,
+        "charge_enabled": charge_enabled,
+        "pair_matrix_complete": True,
+        "pair_coefficients": pair_rows,
+        "type_local_attributes": type_records,
+        "assumptions": assumptions,
+        "violations": violations,
+    }
+
+
 def assess_model_adequacy(
     compiled_config: Mapping[str, Any],
     *,
     elasticity_results: Mapping[str, Any] | None = None,
     label_swap_result: Mapping[str, Any] | None = None,
+    resolved_parameters: Mapping[str, Any] | None = None,
+    transferability_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return a JSON-compatible, read-only model-form applicability report.
 
@@ -543,6 +1132,15 @@ def assess_model_adequacy(
     symmetry = _parameter_symmetry(config, atom_types)
     label_swap = _label_swap_diagnostic(label_swap_result)
     elasticity = _elasticity_diagnostics(elasticity_results)
+    formal_invariance = assess_same_element_relabeling_invariance(
+        config, resolved_parameters=resolved_parameters
+    )
+    empirical_input = dict(
+        _optional_mapping(transferability_evidence, "transferability_evidence")
+    )
+    if "label_swap" not in empirical_input and label_swap["status"] in {"pass", "fail"}:
+        empirical_input["label_swap"] = {"status": label_swap["status"]}
+    empirical_evidence = aggregate_transferability_evidence(empirical_input)
 
     warnings: list[dict[str, Any]] = []
     required_validations: list[dict[str, Any]] = []
@@ -561,10 +1159,12 @@ def assess_model_adequacy(
             }
         )
         required_validations = [
-            {"id": "label_swap", "status": label_swap["status"]},
-            {"id": "surface_terminations", "status": "unknown", "minimum_cases": 2},
-            {"id": "vacancy", "status": "unknown"},
-            {"id": "diffusion", "status": "unknown"},
+            {
+                "id": test_id,
+                "status": empirical_evidence["tests"][test_id]["effective_status"],
+                "minimum_cases": _TRANSFERABILITY_MINIMUM_CASES[test_id],
+            }
+            for test_id in _TRANSFERABILITY_TESTS
         ]
         if label_swap["status"] == "fail":
             warnings.append(
@@ -579,6 +1179,22 @@ def assess_model_adequacy(
                     "implies_fit_is_impossible": False,
                 }
             )
+        if formal_invariance["status"] == "fail":
+            warnings.append(
+                {
+                    "code": "formal_same_element_relabeling_noninvariance",
+                    "severity": "warning",
+                    "scope": "elemental_transferability",
+                    "message": (
+                        "The final complete pair-coefficient rows/columns are not "
+                        "identical across same-element atom types. The result is valid "
+                        "for the fitted ordered sublattice but is not invariant to "
+                        "arbitrary same-element type reassignment."
+                    ),
+                    "implies_fit_is_impossible": False,
+                    "affects_ordered_sublattice_bulk_validation": False,
+                }
+            )
 
     mixing_status = pair_model["mixing"]["resolution_status"]
     central_lj = pair_model["central_lj_pair_style"]
@@ -590,9 +1206,35 @@ def assess_model_adequacy(
         composability_status = "model_specific"
 
     if elemental and type_count > 1:
-        transferability_status = "requires_validation"
+        formal_status = formal_invariance["status"]
+        empirical_status = empirical_evidence["status"]
+        if formal_status == "fail":
+            transferability_status = "ordered_sublattice_only"
+            transferability_claim = "not_supported"
+        elif empirical_status == "fail":
+            transferability_status = "not_transferable"
+            transferability_claim = "not_supported"
+        elif empirical_status == "error":
+            transferability_status = "incomplete"
+            transferability_claim = "not_established"
+        elif empirical_status == "attested_pass":
+            transferability_status = "requires_verified_runner"
+            transferability_claim = "not_established"
+        elif empirical_status == "pass":
+            # Reserved for a future trusted runner. This pure module cannot
+            # verify artifact bytes, so it must not grant the positive claim.
+            transferability_status = "requires_verified_runner"
+            transferability_claim = "not_established"
+        else:
+            transferability_status = "requires_validation"
+            transferability_claim = (
+                "requires_empirical_validation"
+                if formal_status == "pass"
+                else "not_established"
+            )
     else:
         transferability_status = "unknown"
+        transferability_claim = "not_applicable" if elemental and type_count == 1 else "unknown"
 
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
@@ -608,6 +1250,11 @@ def assess_model_adequacy(
         "parameter_symmetry": symmetry,
         "elasticity_diagnostics": elasticity,
         "label_swap_diagnostic": label_swap,
+        "same_element_relabeling": formal_invariance,
+        "transferability_evidence": empirical_evidence,
+        "formal_invariance_status": formal_invariance["status"],
+        "empirical_transfer_status": empirical_evidence["status"],
+        "elemental_transferability_claim": transferability_claim,
         "computational_composability": {
             "status": composability_status,
             "basis": (
@@ -617,8 +1264,12 @@ def assess_model_adequacy(
         },
         "physical_transferability": {
             "status": transferability_status,
+            "formal_invariance_status": formal_invariance["status"],
+            "empirical_transfer_status": empirical_evidence["status"],
+            "elemental_transferability_claim": transferability_claim,
             "required_validations": required_validations,
             "warning_is_not_impossibility_proof": True,
+            "ordered_sublattice_bulk_validation_affected": False,
         },
         "warnings": warnings,
     }
@@ -627,5 +1278,8 @@ def assess_model_adequacy(
 __all__ = [
     "ModelAdequacyError",
     "REPORT_SCHEMA_VERSION",
+    "TRANSFERABILITY_EVIDENCE_SCHEMA_VERSION",
+    "aggregate_transferability_evidence",
+    "assess_same_element_relabeling_invariance",
     "assess_model_adequacy",
 ]

@@ -9,6 +9,7 @@ wheel = Path(sys.argv[1])
 required_suffixes = (
     "engine/parameter_space.py",
     "workflow/machine_test_runner.py",
+    "workflow/promotion.py",
     "share/ffopt/lammps/inputs/bulk/in.bulk.mol",
     "share/ffopt/lammps/inputs/molecule/in.sublimation.single",
     "share/ffopt/lammps/inputs/adsorption/in.complex",

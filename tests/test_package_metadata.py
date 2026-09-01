@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -26,6 +27,14 @@ def test_citation_version_matches_package_metadata():
     assert f"version: {__version__}" in citation
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     assert f"## {__version__} -" in changelog
+
+
+def test_citation_release_date_matches_changelog_release_header():
+    citation = (ROOT / "CITATION.cff").read_text(encoding="utf-8")
+    match = re.search(r"^date-released:\s*(\S+)\s*$", citation, re.MULTILINE)
+    assert match is not None
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert f"## {__version__} - {match.group(1)}" in changelog
 
 
 def test_cli_reports_installed_version(capsys):
