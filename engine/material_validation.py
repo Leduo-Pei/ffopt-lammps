@@ -797,6 +797,7 @@ def _model_adequacy_document(
     *,
     config: Mapping[str, Any],
     candidate: Candidate,
+    resolved_parameters: Mapping[str, Any],
     static_row: Mapping[str, Any] | None,
     dynamic_row: Mapping[str, Any] | None,
     static_results: Path,
@@ -829,6 +830,7 @@ def _model_adequacy_document(
         config,
         elasticity_results=elasticity or None,
         label_swap_result={"status": "unknown"},
+        resolved_parameters=resolved_parameters,
     )
     # The ordinary validation runner evaluates the supplied type assignment;
     # it cannot safely exchange permanent atom-type identities in every input
@@ -1071,6 +1073,11 @@ def _publish_zero_eligible_validation(
             "physical_transferability_status": adequacy[
                 "physical_transferability"
             ]["status"],
+            "formal_invariance_status": adequacy["formal_invariance_status"],
+            "empirical_transfer_status": adequacy["empirical_transfer_status"],
+            "elemental_transferability_claim": adequacy[
+                "elemental_transferability_claim"
+            ],
             "label_swap_status": "not_evaluated_no_candidate",
         },
         "top_parameters_report": top_summary,
@@ -1347,6 +1354,7 @@ def run_material_validation(
     adequacy = _model_adequacy_document(
         config=config,
         candidate=candidate,
+        resolved_parameters=prepared.resolved_parameters,
         static_row=static_row,
         dynamic_row=dynamic_row,
         static_results=static_results,
@@ -1415,6 +1423,11 @@ def run_material_validation(
             "physical_transferability_status": adequacy[
                 "physical_transferability"
             ]["status"],
+            "formal_invariance_status": adequacy["formal_invariance_status"],
+            "empirical_transfer_status": adequacy["empirical_transfer_status"],
+            "elemental_transferability_claim": adequacy[
+                "elemental_transferability_claim"
+            ],
             "label_swap_status": adequacy["label_swap_diagnostic"]["status"],
         },
         "top_parameters_report": top_report_summary,

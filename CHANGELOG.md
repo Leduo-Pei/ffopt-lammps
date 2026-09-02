@@ -6,6 +6,37 @@ expectations while the public API remains in alpha.
 
 ## Unreleased
 
+## 0.3.0a12 - 2026-09-02
+
+### Added
+
+- Add an explicit, hash-verified baseline-promotion workflow that separates the
+  most recent validation attempt from the current scientific best, snapshots a
+  compact fixed set of final validation results immutably, retains the full
+  campaign as replay evidence, archives legacy canonicals, and uses fail-closed
+  transaction journals and atomic current-best pointers.
+- Add an independent elemental-transferability assessment contract for
+  ordered same-element multi-type models, including formal pair-matrix
+  invariance and structured label-swap, surface-registry, vacancy, and
+  migration-path evidence. A positive claim requires minimum case counts and
+  structurally valid manifest, protocol, and metrics SHA-256 attestations;
+  naked `pass` labels fail closed. Until a trusted runner reads and verifies
+  those artifacts, even complete attestations remain `attested_pass` and cannot
+  establish an elemental-transferability claim.
+
+### Changed
+
+- Require explicit permission to promote best-effort validation and explicit
+  override for a valid downgrade or protocol-incomparable replacement.
+  Rejected, incomplete, hard-gate-failing, or hash-invalid attempts can never
+  change current-best parameters.
+- Publish multi-type elemental fits with the explicit
+  `ordered_sublattice_bulk` scope and keep the independent
+  `elemental_transferability_only` assessment separate. A transferability
+  failure limits the claim without rewriting the completed bulk fit or its
+  ranking; `elemental_transferable` remains a future verified capability, not
+  a scope emitted by this release.
+
 ## 0.3.0a11 - 2026-08-29
 
 ### Added

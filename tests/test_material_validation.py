@@ -566,7 +566,25 @@ def test_mechanical_tier_excess_is_manifested_best_effort_and_resumes(tmp_path):
     )
     adequacy = json.loads((output / "model_adequacy.json").read_text())
     assert adequacy["label_swap_diagnostic"]["status"] == "not_evaluated"
-    assert adequacy["physical_transferability"]["status"] == "requires_validation"
+    assert adequacy["formal_invariance_status"] == "fail"
+    assert adequacy["physical_transferability"]["status"] == (
+        "ordered_sublattice_only"
+    )
+    assert adequacy["elemental_transferability_claim"] == "not_supported"
+    assert any(
+        warning["code"] == "formal_same_element_relabeling_noninvariance"
+        for warning in adequacy["warnings"]
+    )
+    assert adequacy["physical_transferability"][
+        "ordered_sublattice_bulk_validation_affected"
+    ] is False
+    assert summary["model_adequacy"]["formal_invariance_status"] == "fail"
+    assert summary["model_adequacy"]["empirical_transfer_status"] == (
+        "not_evaluated"
+    )
+    assert summary["model_adequacy"]["elemental_transferability_claim"] == (
+        "not_supported"
+    )
     atom_types = pd.read_csv(output / "final_atom_parameters.csv")
     assert list(atom_types["label"]) == ["Fe_corner", "Fe_body"]
     assert (output / "TOP_PARAMETERS.csv").is_file()

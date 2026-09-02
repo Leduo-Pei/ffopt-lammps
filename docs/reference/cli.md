@@ -88,6 +88,44 @@ recorded when that pipeline was run.
 `logs` reads scheduler stdout/stderr. `results` resolves exact paths for
 parameters, properties, metrics, histories, and trajectories.
 
+## Promote a validated baseline
+
+Promotion is explicit and is not an automatic pipeline stage:
+
+```bash
+ffopt promote ffopt.in \
+  --run-id RUN_ID \
+  --canonical-root runs/PROJECT \
+  --dry-run
+
+ffopt promote ffopt.in \
+  --run-id RUN_ID \
+  --canonical-root runs/PROJECT \
+  --allow-best-effort \
+  --replace-legacy
+```
+
+The source is always derived as
+`runs/<project>/pipelines/<run-id>/validate`; arbitrary source directories are
+not accepted. FFOpt requires a completed state record, a matching output
+directory, a finished timestamp, and a valid material-validation manifest
+whose declared files still match their SHA-256 digests.
+
+| Option | Meaning |
+|---|---|
+| `--canonical-root PATH` | Required operational publication target; it is deliberately not part of `ffopt.in`, and its final path component must exactly equal the project name. |
+| `--allow-best-effort` | Permit a complete hard-gate-passing result that missed its requested mechanical tier to compete for current best; an otherwise publishable attempt is still snapshotted without this flag. |
+| `--replace-legacy` | Durably archive an unmanaged root canonical before replacing it on the first managed promotion. An interruption during legacy removal requires journal/archive inspection; deleting a stale lock alone is not recovery. |
+| `--force-downgrade` | Permit an otherwise valid lower/incomparable result; never bypasses completeness, hard gates, hashes, or best-effort permission. |
+| `--dry-run` | Validate source, target, permission, and comparison without writing. A blocked plan exits with status 2 after printing its result. |
+| `--json` | Emit machine-readable promotion outcome and artifact paths. |
+
+Accepted results rank above best-effort results. Results in the same tier and
+with the same validation-protocol fingerprint compare their independent
+finite-temperature maximum mechanical error, lower first. Different protocols
+are incomparable by default. Rejected or incomplete validation attempts can
+never become current-best.
+
 ## Packaged acceptance test
 
 ```bash

@@ -2,11 +2,14 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from workflow.cli import (
     _include_material_top_results,
     _public_workflow,
     _resolve_run_stage_bound,
     build_parser,
+    cmd_promote,
     cmd_status,
 )
 from workflow.project import Project
@@ -112,6 +115,70 @@ def test_run_parser_accepts_public_and_expanded_material_stage_names():
         "constrained_al_02",
         "finalists",
     )
+
+
+def test_promote_parser_requires_explicit_source_identity_and_destination():
+    parser = build_parser()
+
+    arguments = parser.parse_args([
+        "promote",
+        "ffopt.in",
+        "--run-id",
+        "production-a12",
+        "--canonical-root",
+        "published/fe",
+        "--allow-best-effort",
+        "--replace-legacy",
+        "--force-downgrade",
+        "--dry-run",
+        "--json",
+    ])
+
+    assert arguments.input == "ffopt.in"
+    assert arguments.run_id == "production-a12"
+    assert arguments.canonical_root == "published/fe"
+    assert arguments.allow_best_effort is True
+    assert arguments.replace_legacy is True
+    assert arguments.force_downgrade is True
+    assert arguments.dry_run is True
+    assert arguments.json is True
+
+
+def test_blocked_promotion_dry_run_has_nonzero_cli_status(
+    tmp_path: Path, monkeypatch, capsys
+):
+    project = _project(tmp_path)
+    result = {
+        "status": "blocked",
+        "canonical_root": str(tmp_path / "canonical" / "fe"),
+        "comparison": "ineligible",
+        "comparison_reason": "best_effort_not_explicitly_allowed",
+        "current_best_will_change": False,
+        "blocked_reason": (
+            "legacy_current_baseline_would_be_removed_without_replacement"
+        ),
+    }
+    monkeypatch.setattr("workflow.cli.load_project", lambda _path: project)
+    monkeypatch.setattr(
+        "workflow.promotion.promote_validation",
+        lambda **_kwargs: result,
+    )
+    arguments = SimpleNamespace(
+        input="ffopt.in",
+        run_id="production-a12",
+        canonical_root=result["canonical_root"],
+        allow_best_effort=False,
+        replace_legacy=True,
+        force_downgrade=False,
+        dry_run=True,
+        json=True,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_promote(arguments)
+
+    assert exc.value.code == 2
+    assert json.loads(capsys.readouterr().out)["status"] == "blocked"
 
 
 def test_results_expose_only_explicitly_declared_material_top_outputs(

@@ -75,6 +75,72 @@ Exact availability is reported by:
 ffopt results ffopt.in
 ```
 
+## Validation attempts and promoted baselines
+
+A completed `validate/` directory is evidence for one attempt. It is not
+automatically the project baseline. Promotion keeps recency and scientific
+selection separate:
+
+```text
+runs/<project>/
+|-- latest_validation.json       # most recently published validation attempt
+|-- latest_attempt.json          # pointer to that immutable attempt snapshot
+|-- current_best.json            # authoritative promoted-baseline pointer
+|-- final_parameters.json        # compatibility copy of current-best parameters
+|-- published_validations/
+|   `-- <run-id>-<manifest>/      # immutable, hash-verified compact snapshot
+|-- archived_legacy/              # recoverable previous canonical files
+`-- promotion_journal/            # last durable phase of each transaction
+```
+
+Only an explicit `ffopt promote` command can advance `latest_validation.json`.
+It can advance when a complete attempt is rejected,
+when best-effort promotion was not authorized, or when the result is worse
+than the current baseline. None of those cases may change `current_best.json`
+or `final_parameters.json`.
+
+`current_best.json` is the single authoritative publication commit point.
+The referenced snapshot records the source run, validation manifest, quality
+tier, comparison metric, applicability scope, and file hashes. Snapshot
+directories are never edited in place. Legacy root-level files are archived
+before their first managed promotion. An interrupted promotion fails closed:
+the journal records its last durable phase and the lock prevents concurrent
+takeover. FFOpt does not currently auto-resume or auto-roll back a publication;
+inspect the journal and archived files before touching a stale lock. In
+particular, interruption while legacy entries are being removed can leave a
+partial legacy layout that the one-time A11 recognizer deliberately rejects.
+Use that transaction's `ARCHIVE_MANIFEST.json` to verify and restore the
+incomplete legacy layout (or deliberately complete the managed layout), then
+remove the stale lock and repeat the explicit command. Simply deleting the lock
+and retrying is not a recovery procedure.
+
+Both the immutable `PUBLICATION.json` and the current-best pointer contain an
+`applicability` object with `scope`, `physical_transferability_status`,
+`formal_invariance_status`, `empirical_transfer_status`, and
+`elemental_transferability_claim`. The pointer also addresses its snapshot's
+`validation_summary.json`. Missing legacy transferability evidence is
+normalized conservatively to `not_established` / `requires_validation`; it is
+never upgraded to a transferable claim during publication.
+
+`applicability.scope` is `ordered_sublattice_bulk` for a permanent multi-type
+elemental representation and `validated_material_domain` otherwise. The
+separate model-adequacy evidence uses
+`transferability_evidence.scope=elemental_transferability_only`.
+`elemental_transferable` names a future verified capability; it is not a scope
+enum emitted by this release.
+
+For an elemental material represented by permanent ordered atom types, a
+promoted bulk baseline must state its scope explicitly. A result can be
+`ordered_sublattice_bulk` current-best while its
+`elemental_transferability_claim` remains `requires_empirical_validation`,
+`not_established`, or `not_supported` (with `not_applicable` and `unknown`
+used outside the multi-type elemental case). The current pure assessment can
+report at most an `attested_pass` as positive evidence; it does not read the
+referenced artifacts and therefore cannot
+set the claim to `supported`. A future trusted runner must verify manifest,
+protocol, metrics hashes, schemas, and required case contents before that
+positive claim is available. Plain status labels fail closed.
+
 ## Provenance
 
 Content-addressed snapshots of the exact input text, expanded runtime JSON,

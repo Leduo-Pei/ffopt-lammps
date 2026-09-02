@@ -30,6 +30,7 @@ required = {
     "examples/fe_bcc/README.md",
     "examples/fe_bcc/ffopt.in",
     "examples/fe_bcc/ffopt.canary.in",
+    "workflow/promotion.py",
 }
 missing = sorted(required - relative)
 if missing:
