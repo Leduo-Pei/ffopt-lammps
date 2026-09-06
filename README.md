@@ -1,5 +1,11 @@
 # FFOpt-LAMMPS
 
+<p align="center">
+  <img src="docs/assets/ffopt-cover.svg"
+       alt="FFOpt-LAMMPS: a framework for material force-field development guided by experiments and tested with LAMMPS. Current material workflows: molecular crystals and an elemental BCC extension."
+       width="100%">
+</p>
+
 [![tests](https://github.com/Leduo-Pei/ffopt-lammps/actions/workflows/ci.yml/badge.svg)](https://github.com/Leduo-Pei/ffopt-lammps/actions/workflows/ci.yml)
 [![release](https://img.shields.io/github/v/release/Leduo-Pei/ffopt-lammps?include_prereleases)](https://github.com/Leduo-Pei/ffopt-lammps/releases)
 [![Python](https://img.shields.io/badge/Python-3.10--3.12-3776AB)](https://www.python.org/)
@@ -11,38 +17,64 @@
 [`ffopt.in` reference](docs/reference/input-file.md) |
 [Releases](https://github.com/Leduo-Pei/ffopt-lammps/releases)
 
-FFOpt-LAMMPS is a restartable workflow for fitting molecular force-field
-parameters to experimental properties with LAMMPS, Bayesian optimization,
-focused sampling, ANN surrogate models, active learning, and final physical
-validation.
+**Develop force-field parameters from experimental material properties.**
+FFOpt is a general framework for material force-field development. It connects
+parameter search, LAMMPS calculations, machine-learning models and final
+validation in one restartable workflow.
 
-> **Alpha scope:** the first public release supports molecular crystals,
-> isolated molecules, and molecular adsorption models. BTAH is the packaged
-> regression and machine-acceptance system. Elemental, alloy, reactive, and
-> polymorph workflows are not yet claimed as supported.
-> The current adsorption backend treats one configured, uncharged metal type
-> as fixed and optimizes the molecular atom types; arbitrary multicomponent or
-> charged substrates are outside the schema 1 contract.
+You supply structures, initial parameters, allowed ranges and experimental
+targets. FFOpt proposes parameter sets, calculates their properties, learns
+from the results and tests the final candidates. **Machine learning guides the
+search; LAMMPS provides the physical evidence.**
 
-> **Development branch:** `feature/material-workflows` adds an experimental
-> elemental-BCC workflow without forking the orchestration framework.  It uses
-> the same one-file project, persistent state, machine profiles, and packaging
-> as BTAH, while adding structural feasible-region coverage, exact cubic
-> elasticity, constrained active learning, finite-temperature promotion, and
-> model-form diagnostics.  It is not a released support claim until the BTAH
-> and Fe acceptance gates both pass from one built distribution.
+## Current material workflows
 
-## One input, one run
+The framework is designed to grow across material classes. Work to date covers
+**molecular crystals and elemental body-centred cubic (BCC) materials**. These
+are two workflows within FFOpt, not separate software packages.
+
+| | Molecular crystals | Elemental BCC extension |
+|---|---|---|
+| Current example | BTAH; packaged molecular acceptance test | Fe; experimental BCC workflow |
+| Parameters | Lennard-Jones epsilon, sigma and atomic charges; selected values can be fixed | Constrained Lennard-Jones parameters; elemental charges are disabled |
+| Fitting strategy | Find repeatable regions, sample nearby and improve agreement with the selected properties | Satisfy structure and surface limits, then reduce the largest configured elastic-property error |
+| Calculations | Bulk structure and density, a sublimation-energy estimate, optional adsorption | Bulk and surface properties, static elasticity, finite-temperature screening and validation |
+| Learning model | ANN surrogate in the molecular workflow | Gaussian-process model in the packaged BCC example |
+| Start here | [Molecular guide](docs/tutorials/new-molecular-project.md) and [BTAH example](examples/btah/README.md) | [BCC guide](docs/how-to/elemental-bcc.md) and [Fe input](examples/fe_bcc/ffopt.in) |
+
+**Current limits:** a general framework does not mean that every material or
+potential form has been validated. Alloys, reactive systems and polymorph
+workflows are not yet established here. Each new material requires its own
+inputs, fit and validation. In particular, the two-type BCC example is an
+ordered-sublattice LJ model, not a claim of a transferable elemental metal
+potential. See [scientific scope](#scientific-scope).
+
+## How it works
 
 <p align="center">
   <a href="docs/assets/ffopt-workflow.svg">
     <img src="docs/assets/ffopt-workflow.svg"
-         alt="FFOpt-LAMMPS workflow from one input through Bayesian optimization, focused sampling, ANN surrogate learning, active learning, robust selection, and physical validation"
+         alt="Define data, parameters and targets; generate LAMMPS-labelled data with molecular or BCC workflows; train a surrogate offline, select candidates and test them with LAMMPS; repeat, then validate and export the final force field."
          width="100%">
   </a>
 </p>
 
-<p align="center"><sub><a href="docs/assets/ffopt-workflow.vsdx">Editable Visio source</a></sub></p>
+1. **Define the fit.** Choose the material, property modules, experimental targets
+   and parameter bounds in `ffopt.in`.
+2. **Build the evidence.** Bayesian optimization (BO) and sampling evaluate
+   candidate parameters with LAMMPS. BCC adds structural constraints and elastic
+   screening.
+3. **Learn and refine.** A surrogate learns the stored parameter-to-property
+   mapping. Active learning selects new candidates for LAMMPS, then updates the
+   model with the new results. Training itself does not run MD at every epoch.
+4. **Verify and export.** Repeated physical evaluations and material-specific
+   checks determine the final choice. Predictions alone do not establish the
+   final result.
+
+[Detailed workflow and accuracy](docs/explanation/workflow-and-accuracy.md) |
+[Editable SVG and artwork sources](docs/assets/README.md)
+
+## One scientific input file
 
 A user project is deliberately small:
 
@@ -119,7 +151,12 @@ Use the same input with one- and two-node profiles to compare performance; BO
 candidate batch size is independent of worker count, so the scientific budget
 does not change with the machine.
 
-## Create a project
+## Start with an example
+
+For BCC, use the [Fe example](examples/fe_bcc/ffopt.in) and follow the
+[BCC campaign guide](docs/how-to/elemental-bcc.md). The molecular walkthrough
+below uses BTAH data and a charge-only fit; its target names and modules are not
+a template for every material class.
 
 The BTAH acceptance data is included in every wheel. It can be inspected
 without finding a repository checkout:
@@ -186,11 +223,11 @@ ffopt logs ffopt.in --stage bo --lines 100
 ffopt results ffopt.in
 ```
 
-Final validation writes a complete per-type epsilon/sigma/charge table,
+Final validation writes the resolved per-type force-field parameters,
 calculated-versus-target properties, pass/fail gates, structures, and
 trajectories under `runs/<project>/pipelines/<run-id>/validate/`.
 
-## Input at a glance
+## Molecular input at a glance
 
 ```text
 ffopt 1
@@ -235,7 +272,9 @@ property-specific default. Elemental BCC inputs must use at least
 - [Scientific rationale and literature](docs/development/material-workflows-scientific-rationale.md)
 - [Developer architecture](docs/explanation/architecture.md)
 
-## Scientific definition
+## Scientific scope
+
+### Molecular observables
 
 The bundled bulk protocol is fixed-box minimization followed by flexible-cell
 NPT equilibration and production. The current sublimation observable is a
@@ -248,6 +287,33 @@ E_sub,estimate = E_single,min - <PE_bulk,NPT> / N_molecules
 fitted to a user-supplied experimental sublimation-enthalpy target. It does
 not include translational, rotational, vibrational, or standard-state thermal
 corrections and is reported with that provenance in validation outputs.
+
+Molecular adsorption is optional. The current backend fixes one configured,
+uncharged metal type and optimizes the molecular atom types; arbitrary charged
+or multicomponent substrates are outside the current input contract. A module
+without a fitting target can be used for final validation instead.
+
+### BCC fitting and transferability
+
+The BCC extension constrains structure and surface properties before refining
+mechanical properties. Static and finite-temperature elastic targets have
+separate protocols; a good static ranking is not assumed to survive at finite
+temperature.
+
+The packaged two-type Fe model labels the corner and body sublattices of one
+element. A good bulk fit does not establish invariance to reassigning those
+labels, or reliability for defects, diffusion, interfaces and other phases.
+FFOpt reports model limitations separately from the fit. Read the
+[BCC model and transferability limits](docs/how-to/elemental-bcc.md#ordered-two-type-elemental-warning)
+before using such a model beyond its tested domain.
+
+### Accuracy is measured, not guaranteed
+
+The best achievable fit depends on the potential form, parameter bounds,
+targets, simulation protocol and data coverage. High surrogate R2 does not by
+itself demonstrate accurate final physics. Compare the final LAMMPS results
+with the declared targets and tolerances, and retain failed checks and
+explicitly labelled best-effort results in the scientific record.
 
 ## Development status
 

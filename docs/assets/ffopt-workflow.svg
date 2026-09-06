@@ -1,147 +1,72 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1360" height="560" viewBox="0 0 1360 560" role="img" aria-labelledby="title desc">
-  <title id="title">FFOpt-LAMMPS optimization workflow</title>
-  <desc id="desc">A restartable workflow from one FFOpt input through Bayesian optimization, focused sampling, ANN surrogate learning, active learning, stability audit, robust selection, and final LAMMPS validation.</desc>
+<?xml version='1.0' encoding='utf-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="1240" viewBox="0 0 1280 1240" role="img" aria-labelledby="title description" font-family="Arial, Helvetica, sans-serif">
+  <title id="title">FFOpt: one framework, material-specific workflows</title>
+  <desc id="description">Start from data, parameters and targets in ffopt.in. Molecular BO and sampling generate property labels; BCC adds structural constraints and static elasticity. Train on stored data, select new candidates, calculate them with LAMMPS, and return the new results to training. Final selection uses repeated calculations and material-specific validation. Surrogate training itself does not run molecular dynamics.</desc>
   <defs>
-    <marker id="arrow" viewBox="0 0 10 10" refX="8.4" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
+    <marker id="arrow-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 Z" fill="#182D35" />
     </marker>
-    <style>
-      .canvas { fill: #f8fafc; }
-      .card { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.5; }
-      .phase { font: 700 14px 'Aptos', 'Segoe UI', sans-serif; letter-spacing: 1.5px; }
-      .step { font: 700 12px 'Aptos', 'Segoe UI', sans-serif; letter-spacing: 1.1px; }
-      .title { fill: #0f172a; font: 700 21px 'Aptos Display', 'Segoe UI', sans-serif; }
-      .body { fill: #475569; font: 400 15px 'Aptos', 'Segoe UI', sans-serif; }
-      .small { fill: #64748b; font: 600 13px 'Aptos', 'Segoe UI', sans-serif; }
-      .number { fill: #ffffff; font: 700 14px 'Aptos', 'Segoe UI', sans-serif; text-anchor: middle; dominant-baseline: central; }
-      .connector { fill: none; stroke: #334155; stroke-width: 2.5; marker-end: url(#arrow); }
-      .dot { fill: #0ea5a4; }
-    </style>
+    <marker id="arrow-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 Z" fill="#087E83" />
+    </marker>
+    <marker id="arrow-rust" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 Z" fill="#B4502B" />
+    </marker>
   </defs>
-
-  <rect class="canvas" width="1360" height="560" rx="12"/>
-  <rect x="1" y="1" width="1358" height="558" rx="12" fill="none" stroke="#e2e8f0" stroke-width="2"/>
-
-  <text x="40" y="42" fill="#0f172a" font-family="Aptos Display, Segoe UI, sans-serif" font-size="26" font-weight="700">EXPERIMENT-GUIDED FORCE-FIELD OPTIMIZATION</text>
-  <text x="1320" y="42" fill="#64748b" font-family="Aptos, Segoe UI, sans-serif" font-size="15" font-weight="600" text-anchor="end">ONE INPUT  |  RESTARTABLE  |  PHYSICALLY VALIDATED</text>
-  <line x1="40" y1="62" x2="1320" y2="62" stroke="#cbd5e1" stroke-width="1.5"/>
-
-  <text class="phase" x="40" y="105" fill="#2563eb">DEFINE</text>
-  <line x1="105" y1="100" x2="255" y2="100" stroke="#93c5fd" stroke-width="2"/>
-  <text class="phase" x="300" y="105" fill="#2563eb">DISCOVER</text>
-  <line x1="390" y1="100" x2="775" y2="100" stroke="#93c5fd" stroke-width="2"/>
-  <text class="phase" x="820" y="105" fill="#0f766e">LEARN &amp; REFINE</text>
-  <line x1="970" y1="100" x2="1320" y2="100" stroke="#5eead4" stroke-width="2"/>
-
-  <!-- Input -->
-  <rect class="card" x="40" y="130" width="220" height="165" rx="10"/>
-  <rect x="40" y="130" width="220" height="8" rx="4" fill="#2563eb"/>
-  <text class="step" x="60" y="163" fill="#2563eb">SINGLE CONTROL FILE</text>
-  <text class="title" x="60" y="193">One ffopt.in</text>
-  <circle class="dot" cx="64" cy="222" r="4"/>
-  <text class="body" x="78" y="227">LAMMPS data</text>
-  <circle class="dot" cx="64" cy="249" r="4"/>
-  <text class="body" x="78" y="254">Experimental targets</text>
-  <circle class="dot" cx="64" cy="276" r="4"/>
-  <text class="body" x="78" y="281">Initial values &amp; ranges</text>
-
-  <!-- BO -->
-  <rect class="card" x="300" y="130" width="220" height="165" rx="10"/>
-  <rect x="300" y="130" width="220" height="8" rx="4" fill="#2563eb"/>
-  <circle cx="330" cy="164" r="17" fill="#2563eb"/>
-  <text class="number" x="330" y="164">01</text>
-  <text class="step" x="358" y="169" fill="#2563eb">BAYESIAN SEARCH</text>
-  <text class="title" x="320" y="209">BO / TuRBO</text>
-  <text class="body" x="320" y="238">Locate stable, low-error</text>
-  <text class="body" x="320" y="260">parameter regions</text>
-  <rect x="320" y="272" width="78" height="3" rx="1.5" fill="#bfdbfe"/>
-
-  <!-- Sampling -->
-  <rect class="card" x="560" y="130" width="220" height="165" rx="10"/>
-  <rect x="560" y="130" width="220" height="8" rx="4" fill="#3b82f6"/>
-  <circle cx="590" cy="164" r="17" fill="#3b82f6"/>
-  <text class="number" x="590" y="164">02</text>
-  <text class="step" x="618" y="169" fill="#2563eb">FOCUSED SAMPLING</text>
-  <text class="title" x="580" y="209">Local design</text>
-  <text class="body" x="580" y="238">Generate reproducible</text>
-  <text class="body" x="580" y="260">parameter-property data</text>
-  <circle cx="590" cy="276" r="3" fill="#60a5fa"/>
-  <circle cx="603" cy="276" r="3" fill="#3b82f6"/>
-  <circle cx="616" cy="276" r="3" fill="#2563eb"/>
-
-  <!-- ANN -->
-  <rect class="card" x="820" y="130" width="220" height="165" rx="10"/>
-  <rect x="820" y="130" width="220" height="8" rx="4" fill="#0f766e"/>
-  <circle cx="850" cy="164" r="17" fill="#0f766e"/>
-  <text class="number" x="850" y="164">03</text>
-  <text class="step" x="878" y="169" fill="#0f766e">ANN SURROGATE</text>
-  <text class="title" x="840" y="209">Learn the mapping</text>
-  <text class="body" x="840" y="238">Force-field parameters</text>
-  <text class="body" x="840" y="260">to physical properties</text>
-  <path d="M844 278 L856 269 L868 279 L880 264 L892 272" fill="none" stroke="#14b8a6" stroke-width="2.5"/>
-
-  <!-- AL -->
-  <rect class="card" x="1080" y="130" width="220" height="165" rx="10"/>
-  <rect x="1080" y="130" width="220" height="8" rx="4" fill="#0ea5a4"/>
-  <circle cx="1110" cy="164" r="17" fill="#0ea5a4"/>
-  <text class="number" x="1110" y="164">04</text>
-  <text class="step" x="1138" y="169" fill="#0f766e">ACTIVE LEARNING</text>
-  <text class="title" x="1100" y="209">Select next points</text>
-  <text class="body" x="1100" y="238">Balance improvement</text>
-  <text class="body" x="1100" y="260">with model uncertainty</text>
-  <path d="M1104 279 C1120 262 1135 287 1152 268 C1168 250 1180 278 1196 264" fill="none" stroke="#14b8a6" stroke-width="2.5"/>
-
-  <!-- Top connectors -->
-  <path class="connector" d="M260 212.5 H292"/>
-  <path class="connector" d="M520 212.5 H552"/>
-  <path class="connector" d="M780 212.5 H812"/>
-  <path class="connector" d="M1040 212.5 H1072"/>
-
-  <text class="phase" x="560" y="340" fill="#b45309">VERIFY, SELECT &amp; EXPORT</text>
-  <line x1="757" y1="335" x2="1320" y2="335" stroke="#fcd34d" stroke-width="2"/>
-
-  <!-- Audit -->
-  <rect class="card" x="1080" y="365" width="220" height="135" rx="10"/>
-  <rect x="1080" y="365" width="220" height="8" rx="4" fill="#f59e0b"/>
-  <circle cx="1110" cy="399" r="17" fill="#f59e0b"/>
-  <text class="number" x="1110" y="399">05</text>
-  <text class="step" x="1138" y="404" fill="#b45309">MULTI-SEED AUDIT</text>
-  <text class="title" x="1100" y="444">Measure stability</text>
-  <text class="body" x="1100" y="472">Repeatability and noise</text>
-
-  <!-- Final selection -->
-  <rect class="card" x="820" y="365" width="220" height="135" rx="10"/>
-  <rect x="820" y="365" width="220" height="8" rx="4" fill="#d97706"/>
-  <circle cx="850" cy="399" r="17" fill="#d97706"/>
-  <text class="number" x="850" y="399">06</text>
-  <text class="step" x="878" y="404" fill="#b45309">ROBUST SELECTION</text>
-  <text class="title" x="840" y="444">Choose final set</text>
-  <text class="body" x="840" y="472">Minimize mean + variation</text>
-
-  <!-- Validation -->
-  <rect class="card" x="560" y="365" width="220" height="135" rx="10"/>
-  <rect x="560" y="365" width="220" height="8" rx="4" fill="#16a34a"/>
-  <circle cx="590" cy="399" r="17" fill="#16a34a"/>
-  <text class="number" x="590" y="399">07</text>
-  <text class="step" x="618" y="404" fill="#15803d">LAMMPS VALIDATION</text>
-  <text class="title" x="580" y="444">Physical checks</text>
-  <text class="body" x="580" y="472">Bulk | sublimation | adsorption</text>
-
-  <!-- Output -->
-  <rect x="40" y="365" width="480" height="135" rx="10" fill="#0f172a"/>
-  <rect x="40" y="365" width="8" height="135" rx="4" fill="#22c55e"/>
-  <text class="step" x="70" y="401" fill="#86efac">RELEASE-READY OUTPUT</text>
-  <text x="70" y="439" fill="#ffffff" font-family="Aptos Display, Segoe UI, sans-serif" font-size="24" font-weight="700">Final force field</text>
-  <text x="70" y="471" fill="#cbd5e1" font-family="Aptos, Segoe UI, sans-serif" font-size="15">epsilon, sigma, q  |  properties  |  structures  |  trajectories</text>
-
-  <!-- Bottom connectors, read right to left -->
-  <path class="connector" d="M1190 295 V357"/>
-  <path class="connector" d="M1080 432.5 H1048"/>
-  <path class="connector" d="M820 432.5 H788"/>
-  <path class="connector" d="M560 432.5 H528"/>
-
-  <circle cx="42" cy="533" r="5" fill="#2563eb"/>
-  <text class="small" x="58" y="538">Checkpointed state and automatic resume at every stage</text>
-  <circle cx="737" cy="533" r="5" fill="#0ea5a4"/>
-  <text class="small" x="753" y="538">The scientific workflow is unchanged across local, single-node, and multi-node execution</text>
+  <rect width="1280" height="1240" fill="#FFFFFF" />
+  <text x="48" y="65" font-size="39" fill="#182D35" font-weight="700" text-anchor="start">From experimental targets to a tested force field</text>
+  <text x="48" y="106" font-size="24" fill="#50646C" font-weight="400" text-anchor="start">Shared execution and data. Material-specific objectives and validation.</text>
+  <circle cx="66" cy="161" r="19" fill="#182D35" />
+  <text x="66" y="168" font-size="19" fill="#FFFFFF" font-weight="700" text-anchor="middle">1</text>
+  <text x="100" y="169" font-size="28" fill="#182D35" font-weight="700" text-anchor="start">Define the material and the fit</text>
+  <rect x="48" y="196" width="1184" height="87" rx="6" fill="#F3F6F7" />
+  <text x="72" y="231" font-size="26" fill="#182D35" font-weight="700" text-anchor="start">One ffopt.in + LAMMPS data</text>
+  <text x="72" y="264" font-size="23" fill="#50646C" font-weight="400" text-anchor="start">Initial parameters and bounds   /   Experimental targets   /   Property modules</text>
+  <line x1="640" y1="284" x2="640" y2="316" stroke="#182D35" stroke-width="2" fill="none" marker-end="url(#arrow-ink)" />
+  <circle cx="66" cy="349" r="19" fill="#182D35" />
+  <text x="66" y="356" font-size="19" fill="#FFFFFF" font-weight="700" text-anchor="middle">2</text>
+  <text x="100" y="357" font-size="28" fill="#182D35" font-weight="700" text-anchor="start">Build a material-specific training set</text>
+  <rect x="48" y="384" width="574" height="226" rx="6" fill="#EAF6F5" />
+  <rect x="48" y="384" width="5" height="226" fill="#087E83" />
+  <rect x="658" y="384" width="574" height="226" rx="6" fill="#FCF0E9" />
+  <rect x="658" y="384" width="5" height="226" fill="#B4502B" />
+  <text x="72" y="425" font-size="29" fill="#087E83" font-weight="700" text-anchor="start">Molecular crystals</text>
+  <text x="72" y="463" font-size="25" fill="#182D35" font-weight="700" text-anchor="start">BO search + focused sampling</text>
+  <text x="72" y="500" font-size="22" fill="#50646C" font-weight="400" text-anchor="start">Find promising, repeatable parameter regions.</text>
+  <text x="72" y="534" font-size="22" fill="#50646C" font-weight="400" text-anchor="start">Calculate the configured molecular properties.</text>
+  <text x="72" y="580" font-size="22" fill="#087E83" font-weight="400" text-anchor="start">Bulk  /  Sublimation estimate  /  Adsorption</text>
+  <text x="682" y="425" font-size="29" fill="#B4502B" font-weight="700" text-anchor="start">Elemental BCC</text>
+  <text x="682" y="463" font-size="24" fill="#182D35" font-weight="700" text-anchor="start">Feasible-region search + elastic screening</text>
+  <text x="682" y="500" font-size="22" fill="#50646C" font-weight="400" text-anchor="start">Map allowed structure and surface properties.</text>
+  <text x="682" y="534" font-size="22" fill="#50646C" font-weight="400" text-anchor="start">Sample the region; calculate static elasticity.</text>
+  <text x="682" y="580" font-size="22" fill="#B4502B" font-weight="400" text-anchor="start">Structural limits first; then mechanical accuracy.</text>
+  <text x="640" y="649" font-size="24" fill="#182D35" font-weight="400" text-anchor="middle">BO and sampling call LAMMPS. Their results become the training data.</text>
+  <circle cx="66" cy="707" r="19" fill="#182D35" />
+  <text x="66" y="714" font-size="19" fill="#FFFFFF" font-weight="700" text-anchor="middle">3</text>
+  <text x="100" y="715" font-size="28" fill="#182D35" font-weight="700" text-anchor="start">Learn the response and test new candidates</text>
+  <text x="48" y="754" font-size="23" fill="#50646C" font-weight="400" text-anchor="start">Models in the packaged examples: molecular ANN and BCC Gaussian process (GP).</text>
+  <line x1="48" y1="786" x2="393" y2="786" stroke="#087E83" stroke-width="4" fill="none" />
+  <text x="48" y="825" font-size="27" fill="#087E83" font-weight="700" text-anchor="start">Train the surrogate</text>
+  <text x="48" y="862" font-size="21" fill="#50646C" font-weight="400" text-anchor="start">Stored parameters and properties</text>
+  <text x="48" y="893" font-size="21" fill="#50646C" font-weight="400" text-anchor="start">Offline learning: no MD per epoch</text>
+  <line x1="467" y1="786" x2="812" y2="786" stroke="#182D35" stroke-width="4" fill="none" />
+  <text x="467" y="825" font-size="27" fill="#182D35" font-weight="700" text-anchor="start">Choose candidates</text>
+  <text x="467" y="862" font-size="21" fill="#50646C" font-weight="400" text-anchor="start">Predicted improvement + uncertainty</text>
+  <text x="467" y="893" font-size="21" fill="#50646C" font-weight="400" text-anchor="start">Respect the material constraints</text>
+  <line x1="879" y1="786" x2="1224" y2="786" stroke="#B4502B" stroke-width="4" fill="none" />
+  <text x="879" y="825" font-size="27" fill="#B4502B" font-weight="700" text-anchor="start">Test with LAMMPS</text>
+  <text x="879" y="862" font-size="21" fill="#50646C" font-weight="400" text-anchor="start">Calculate and compare properties</text>
+  <text x="879" y="893" font-size="21" fill="#50646C" font-weight="400" text-anchor="start">Add the new results to the dataset</text>
+  <line x1="401" y1="824" x2="443" y2="824" stroke="#182D35" stroke-width="2" fill="none" marker-end="url(#arrow-ink)" />
+  <line x1="815" y1="824" x2="855" y2="824" stroke="#182D35" stroke-width="2" fill="none" marker-end="url(#arrow-ink)" />
+  <path d="M 1217 909 V 962 H 65 V 918" stroke="#087E83" stroke-width="2.5" fill="none" stroke-linejoin="round" marker-end="url(#arrow-teal)" />
+  <rect x="370" y="943" width="548" height="37" fill="#FFFFFF" />
+  <text x="644" y="969" font-size="21" fill="#087E83" font-weight="400" text-anchor="middle">New physical evidence updates the model</text>
+  <circle cx="66" cy="1036" r="19" fill="#182D35" />
+  <text x="66" y="1043" font-size="19" fill="#FFFFFF" font-weight="700" text-anchor="middle">4</text>
+  <text x="100" y="1044" font-size="28" fill="#182D35" font-weight="700" text-anchor="start">Select, validate and export</text>
+  <text x="48" y="1085" font-size="23" fill="#50646C" font-weight="400" text-anchor="start">Repeated molecular evaluations or BCC finite-temperature screening select the finalists.</text>
+  <rect x="48" y="1110" width="1184" height="92" rx="6" fill="#182D35" />
+  <text x="72" y="1148" font-size="27" fill="#FFFFFF" font-weight="700" text-anchor="start">Final LAMMPS validation</text>
+  <text x="72" y="1183" font-size="22" fill="#FFFFFF" font-weight="400" text-anchor="start">Resolved parameters   /   Target comparison   /   Structures and trajectories   /   Model limitations</text>
 </svg>
