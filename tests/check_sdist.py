@@ -20,6 +20,8 @@ required = {
     "CITATION.cff",
     "CONTRIBUTING.md",
     "SECURITY.md",
+    "docs/assets/README.md",
+    "docs/assets/ffopt-cover.svg",
     "docs/assets/ffopt-workflow.svg",
     "docs/assets/ffopt-workflow.vsdx",
     "docs/en/USER_GUIDE.md",
@@ -31,6 +33,7 @@ required = {
     "examples/fe_bcc/ffopt.in",
     "examples/fe_bcc/ffopt.canary.in",
     "workflow/promotion.py",
+    "utils/build_readme_assets.py",
 }
 missing = sorted(required - relative)
 if missing:

@@ -14,6 +14,16 @@ read developer internals before running a calculation.
 - [Create a new molecular project](tutorials/new-molecular-project.md)
 - [Install and verify on the mag1 SLURM server](tutorials/mag1-slurm.md)
 
+## Choose a material workflow
+
+FFOpt is a general material force-field development framework. The currently
+developed workflows share project files, machine profiles and restart state;
+they use different scientific targets and validation protocols.
+
+- [Molecular crystals: BTAH examples and acceptance test](../examples/btah/README.md)
+- [Elemental BCC extension: campaign guide and scientific limits](how-to/elemental-bcc.md)
+- [Elemental BCC: annotated Fe input](../examples/fe_bcc/ffopt.in)
+
 ## How-to guides
 
 - [Configure local and SLURM machines](how-to/configure-machines.md)
@@ -31,6 +41,7 @@ read developer internals before running a calculation.
 ## Explanation
 
 - [Workflow and accuracy model](explanation/workflow-and-accuracy.md)
+- [Homepage cover and workflow artwork](assets/README.md)
 - [Architecture](explanation/architecture.md)
 
 Historical development audits are kept under `development/` and are not part

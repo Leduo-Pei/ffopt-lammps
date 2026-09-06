@@ -1,24 +1,32 @@
 # FFOpt-LAMMPS Complete English User Manual
 
-This manual is written for users who are developing molecular force-field
-parameters for the first time. The intended workflow is simple: prepare LAMMPS
-data files, experimental targets, and physically defensible parameter ranges;
-edit one `ffopt.in`; then let FFOpt run Bayesian optimization (BO), focused
-sampling, ANN surrogate training, active learning (AL), and final LAMMPS
-validation. Interrupted calculations can resume automatically.
+FFOpt is a general framework for material force-field development. This manual
+introduces its shared installation, input and execution model, using BTAH for
+the molecular walkthrough. Prepare LAMMPS data, experimental targets and
+physically defensible parameter ranges; edit one `ffopt.in`; then run parameter
+search, sampling, surrogate learning, active learning (AL) and final LAMMPS
+validation. Interrupted calculations can resume from stored state.
 
-> **Alpha scope:** the current public release supports molecular crystals,
-> isolated molecules, and molecular adsorption models. BTAH is the packaged
-> regression system. Elemental, alloy, reactive-force-field, and general
-> polymorph transfer workflows are not yet public support claims.
+> **Current scope:** work to date covers molecular crystals and an experimental
+> elemental body-centred cubic (BCC) extension within the same FFOpt framework.
+> BTAH is the packaged molecular regression system; Fe is the packaged BCC
+> example. The general framework is not a claim that all materials, alloys,
+> reactive force fields or polymorph transfers have already been validated.
 > The current adsorption backend treats one configured, uncharged metal atom
 > type as a fixed substrate and optimizes only the molecular atom types.
 > Charged, multicomponent, or optimizable substrates are outside the schema 1
 > contract.
 
+For BCC, use the [BCC campaign guide](../how-to/elemental-bcc.md) and
+[annotated Fe input](../../examples/fe_bcc/ffopt.in). It adds structural
+constraints and elastic-property refinement; the packaged example uses a
+Gaussian process rather than the molecular ANN. Its ordered-sublattice LJ
+representation has additional transferability limits, described in that guide.
+
 ## 1. Understand the three file layers
 
-A scientific project should remain small:
+A scientific project should remain small. This layout illustrates molecular
+property modules; BCC uses its own bulk, surface and elasticity inputs:
 
 ```text
 my_project/
